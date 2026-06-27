@@ -1,0 +1,619 @@
+/*
+ * core.c - portable core. Owns the input state, the per-frame event list, the
+ * key and char queues, and the touch slots. Knows nothing about the OS: every
+ * platform detail goes through backend.h.
+ */
+#include "core_internal.h"
+#include "backend.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* ---- ring buffers ---- */
+
+static void keycode_push(InputState *s, int key)
+{
+    int next = (s->kq_tail + 1) % KEYCODE_QUEUE_LEN;
+    if (next == s->kq_head)
+        return; /* full: drop the newest, keep order */
+    s->keycode_q[s->kq_tail] = key;
+    s->kq_tail = next;
+}
+
+static int keycode_pop(InputState *s)
+{
+    if (s->kq_head == s->kq_tail)
+        return 0;
+    int key = s->keycode_q[s->kq_head];
+    s->kq_head = (s->kq_head + 1) % KEYCODE_QUEUE_LEN;
+    return key;
+}
+
+static void char_push(InputState *s, uint32_t cp)
+{
+    int next = (s->cq_tail + 1) % CHAR_QUEUE_LEN;
+    if (next == s->cq_head)
+        return;
+    s->char_q[s->cq_tail] = cp;
+    s->cq_tail = next;
+}
+
+static uint32_t char_pop(InputState *s)
+{
+    if (s->cq_head == s->cq_tail)
+        return 0;
+    uint32_t cp = s->char_q[s->cq_head];
+    s->cq_head = (s->cq_head + 1) % CHAR_QUEUE_LEN;
+    return cp;
+}
+
+/* ---- touch slots, kept dense and matched by id ---- */
+
+static int touch_find(InputState *s, int id)
+{
+    for (int i = 0; i < s->touch_count; i++)
+        if (s->touch[i].id == id)
+            return i;
+    return -1;
+}
+
+static void touch_apply(InputState *s, int id, float x, float y, float pressure, TouchPhase phase)
+{
+    int i = touch_find(s, id);
+    switch (phase)
+    {
+    case TOUCH_DOWN:
+        if (i < 0 && s->touch_count < MAX_TOUCH_POINTS)
+            i = s->touch_count++;
+        if (i < 0)
+            return;
+        s->touch[i].id = id;
+        s->touch[i].x = x;
+        s->touch[i].y = y;
+        s->touch[i].pressure = pressure;
+        break;
+    case TOUCH_MOVE:
+        if (i < 0)
+            return;
+        s->touch[i].x = x;
+        s->touch[i].y = y;
+        s->touch[i].pressure = pressure;
+        break;
+    case TOUCH_UP:
+    case TOUCH_CANCEL:
+        if (i < 0)
+            return;
+        for (int j = i; j < s->touch_count - 1; j++)
+            s->touch[j] = s->touch[j + 1];
+        s->touch_count--;
+        break;
+    }
+}
+
+/* ========================================================================== */
+/*  Backend -> core                                                           */
+/* ========================================================================== */
+
+void core_push_char(Core *core, uint32_t codepoint)
+{
+    char_push(&core->in, codepoint);
+}
+
+void core_push_event(Core *core, const Event *ev)
+{
+    InputState *s = &core->in;
+
+    if (s->fe_count < FRAME_EVENT_MAX)
+        s->frame_events[s->fe_count++] = *ev;
+
+    switch (ev->type)
+    {
+    case EVENT_KEY:
+    {
+        int k = ev->data.key.key;
+        if (k > 0 && k < KEY_MAX)
+        {
+            s->key_down[k] = ev->data.key.down;
+            if (ev->data.key.down && !ev->data.key.repeat)
+                keycode_push(s, k);
+        }
+        break;
+    }
+    case EVENT_CHAR:
+        char_push(s, ev->data.codepoint);
+        break;
+    case EVENT_MOUSE_MOVE:
+        s->mouse_x = ev->data.mouse.x;
+        s->mouse_y = ev->data.mouse.y;
+        break;
+    case EVENT_MOUSE_BUTTON:
+    {
+        int b = ev->data.mouse.button;
+        if (b >= 0 && b < MOUSE_BUTTON_MAX)
+            s->mouse_down[b] = ev->data.mouse.down;
+        break;
+    }
+    case EVENT_MOUSE_WHEEL:
+        s->wheel_x += ev->data.wheel.x;
+        s->wheel_y += ev->data.wheel.y;
+        break;
+    case EVENT_TOUCH:
+        touch_apply(s, ev->data.touch.id, ev->data.touch.x, ev->data.touch.y,
+                    ev->data.touch.pressure, ev->data.touch.phase);
+        break;
+    case EVENT_WINDOW_CLOSE:
+        s->close_request = true;
+        break;
+    default:
+        break;
+    }
+}
+
+/* ========================================================================== */
+/*  Lifecycle                                                                 */
+/* ========================================================================== */
+
+static uint64_t g_time_base; /* nanoseconds at platform_init */
+
+static uint64_t now_nanos(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+bool platform_init(void)
+{
+    g_time_base = now_nanos();
+    return backend_init();
+}
+
+void platform_shutdown(void)
+{
+    backend_shutdown();
+}
+
+PlatformWindow *window_create(const WindowConfig *cfg)
+{
+    if (!cfg)
+        return NULL;
+    PlatformWindow *w = calloc(1, sizeof *w);
+    if (!w)
+        return NULL;
+    w->cfg = *cfg;
+    w->b = backend_create(cfg);
+    if (!w->b)
+    {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+void window_destroy(PlatformWindow *w)
+{
+    if (!w)
+        return;
+    backend_destroy(w->b);
+    free(w);
+}
+
+bool window_should_close(PlatformWindow *w)
+{
+    return w->should_close;
+}
+void window_set_should_close(PlatformWindow *w, bool v)
+{
+    w->should_close = v;
+}
+
+void window_set_user_ptr(PlatformWindow *w, void *ptr)
+{
+    w->user = ptr;
+}
+void *window_get_user_ptr(PlatformWindow *w)
+{
+    return w->user;
+}
+
+void window_begin_frame(PlatformWindow *w)
+{
+    InputState *s = &w->core.in;
+    memcpy(s->key_prev, s->key_down, sizeof s->key_down);
+    memcpy(s->mouse_prev, s->mouse_down, sizeof s->mouse_down);
+    s->mouse_px = s->mouse_x;
+    s->mouse_py = s->mouse_y;
+    s->wheel_x = s->wheel_y = 0;
+    s->fe_count = 0;
+    s->fe_cursor = 0;
+    /* keycode_q and char_q are not cleared here: the consumer drains them */
+
+    backend_pump_events(w->b, &w->core);
+
+    if (s->close_request)
+        window_set_should_close(w, true);
+    if (s->exit_key && key_pressed(w, s->exit_key))
+        window_set_should_close(w, true);
+}
+
+void window_swap(PlatformWindow *w)
+{
+    backend_swap(w->b);
+}
+
+void app_run(PlatformWindow *w, FrameCallback frame, void *user)
+{
+    backend_run(w->b, w, frame, user);
+}
+
+bool poll_event(PlatformWindow *w, Event *out)
+{
+    InputState *s = &w->core.in;
+    if (s->fe_cursor >= s->fe_count)
+        return false;
+    *out = s->frame_events[s->fe_cursor++];
+    return true;
+}
+
+/* ========================================================================== */
+/*  OpenGL context                                                            */
+/* ========================================================================== */
+
+void window_make_current(PlatformWindow *w)
+{
+    backend_make_current(w->b);
+}
+void window_set_vsync(PlatformWindow *w, bool on)
+{
+    backend_set_vsync(w->b, on);
+}
+void *gl_proc_address(const char *name)
+{
+    return backend_gl_proc_address(name);
+}
+
+bool window_lock_pixels(PlatformWindow *w, Framebuffer *out)
+{
+    return backend_lock_pixels(w->b, out);
+}
+void window_present_pixels(PlatformWindow *w)
+{
+    backend_present_pixels(w->b);
+}
+
+/* ========================================================================== */
+/*  Geometry                                                                  */
+/* ========================================================================== */
+
+void window_get_size(PlatformWindow *w, int *width, int *height)
+{
+    backend_get_size(w->b, width, height);
+}
+void window_set_size(PlatformWindow *w, int width, int height)
+{
+    backend_set_size(w->b, width, height);
+}
+void window_get_framebuffer_size(PlatformWindow *w, int *width, int *height)
+{
+    backend_get_fb_size(w->b, width, height);
+}
+void window_get_position(PlatformWindow *w, int *x, int *y)
+{
+    backend_get_pos(w->b, x, y);
+}
+void window_set_position(PlatformWindow *w, int x, int y)
+{
+    backend_set_pos(w->b, x, y);
+}
+void window_set_title(PlatformWindow *w, const char *title)
+{
+    backend_set_title(w->b, title);
+}
+void window_set_size_limits(PlatformWindow *w, int minw, int minh, int maxw, int maxh)
+{
+    backend_set_size_limits(w->b, minw, minh, maxw, maxh);
+}
+float window_content_scale(PlatformWindow *w)
+{
+    return backend_content_scale(w->b);
+}
+
+void window_center_on_monitor(PlatformWindow *w, int monitor)
+{
+    MonitorInfo m;
+    if (!monitor_get_info(monitor, &m))
+        return;
+    int ww, wh;
+    window_get_size(w, &ww, &wh);
+    window_set_position(w, m.x + (m.width - ww) / 2, m.y + (m.height - wh) / 2);
+}
+
+void window_set_monitor(PlatformWindow *w, int monitor)
+{
+    MonitorInfo m;
+    if (!monitor_get_info(monitor, &m))
+        return;
+    window_set_position(w, m.x, m.y);
+}
+
+/* ========================================================================== */
+/*  PlatformWindow state                                                              */
+/* ========================================================================== */
+
+void window_minimize(PlatformWindow *w)
+{
+    backend_minimize(w->b);
+}
+void window_maximize(PlatformWindow *w)
+{
+    backend_maximize(w->b);
+}
+void window_restore(PlatformWindow *w)
+{
+    backend_restore(w->b);
+}
+void window_show(PlatformWindow *w)
+{
+    backend_show(w->b);
+}
+void window_hide(PlatformWindow *w)
+{
+    backend_hide(w->b);
+}
+void window_focus(PlatformWindow *w)
+{
+    backend_focus(w->b);
+}
+void window_request_attention(PlatformWindow *w)
+{
+    backend_request_attention(w->b);
+}
+
+bool window_is_focused(PlatformWindow *w)
+{
+    return backend_get_flag(w->b, WIN_FLAG_FOCUSED);
+}
+bool window_is_minimized(PlatformWindow *w)
+{
+    return backend_get_flag(w->b, WIN_FLAG_MINIMIZED);
+}
+bool window_is_maximized(PlatformWindow *w)
+{
+    return backend_get_flag(w->b, WIN_FLAG_MAXIMIZED);
+}
+bool window_is_visible(PlatformWindow *w)
+{
+    return backend_get_flag(w->b, WIN_FLAG_VISIBLE);
+}
+bool window_is_hovered(PlatformWindow *w)
+{
+    return backend_get_flag(w->b, WIN_FLAG_HOVERED);
+}
+
+void window_set_mode(PlatformWindow *w, WindowMode mode, int monitor)
+{
+    backend_set_mode(w->b, mode, monitor);
+}
+WindowMode window_get_mode(PlatformWindow *w)
+{
+    return backend_get_mode(w->b);
+}
+
+void window_set_icon(PlatformWindow *w, int width, int height, const uint8_t *rgba)
+{
+    backend_set_icon(w->b, width, height, rgba);
+}
+void window_set_opacity(PlatformWindow *w, float alpha)
+{
+    backend_set_opacity(w->b, alpha);
+}
+void window_set_always_on_top(PlatformWindow *w, bool on)
+{
+    backend_set_always_on_top(w->b, on);
+}
+
+/* ========================================================================== */
+/*  Monitors                                                                  */
+/* ========================================================================== */
+
+int monitor_count(void)
+{
+    return backend_monitor_count();
+}
+bool monitor_get_info(int index, MonitorInfo *out)
+{
+    return backend_monitor_info(index, out);
+}
+
+int monitor_from_point(int x, int y)
+{
+    int n = backend_monitor_count();
+    for (int i = 0; i < n; i++)
+    {
+        MonitorInfo m;
+        if (!backend_monitor_info(i, &m))
+            continue;
+        if (x >= m.x && x < m.x + m.width && y >= m.y && y < m.y + m.height)
+            return i;
+    }
+    return -1;
+}
+
+int monitor_from_window(PlatformWindow *w)
+{
+    int x, y, ww, wh;
+    window_get_position(w, &x, &y);
+    window_get_size(w, &ww, &wh);
+    int m = monitor_from_point(x + ww / 2, y + wh / 2);
+    return m < 0 ? 0 : m;
+}
+
+/* ========================================================================== */
+/*  Keyboard                                                                  */
+/* ========================================================================== */
+
+bool key_down(PlatformWindow *w, int key)
+{
+    return key > 0 && key < KEY_MAX && w->core.in.key_down[key];
+}
+bool key_up(PlatformWindow *w, int key)
+{
+    return !key_down(w, key);
+}
+bool key_pressed(PlatformWindow *w, int key)
+{
+    return key > 0 && key < KEY_MAX && w->core.in.key_down[key] && !w->core.in.key_prev[key];
+}
+bool key_released(PlatformWindow *w, int key)
+{
+    return key > 0 && key < KEY_MAX && !w->core.in.key_down[key] && w->core.in.key_prev[key];
+}
+
+int key_get_pressed(PlatformWindow *w)
+{
+    return keycode_pop(&w->core.in);
+}
+uint32_t char_get_pressed(PlatformWindow *w)
+{
+    return char_pop(&w->core.in);
+}
+
+void key_set_exit(PlatformWindow *w, int key)
+{
+    w->core.in.exit_key = key;
+}
+
+/* ========================================================================== */
+/*  Mouse                                                                     */
+/* ========================================================================== */
+
+bool mouse_button_down(PlatformWindow *w, int button)
+{
+    return button >= 0 && button < MOUSE_BUTTON_MAX && w->core.in.mouse_down[button];
+}
+bool mouse_button_up(PlatformWindow *w, int button)
+{
+    return !mouse_button_down(w, button);
+}
+bool mouse_button_pressed(PlatformWindow *w, int button)
+{
+    return button >= 0 && button < MOUSE_BUTTON_MAX &&
+           w->core.in.mouse_down[button] && !w->core.in.mouse_prev[button];
+}
+bool mouse_button_released(PlatformWindow *w, int button)
+{
+    return button >= 0 && button < MOUSE_BUTTON_MAX &&
+           !w->core.in.mouse_down[button] && w->core.in.mouse_prev[button];
+}
+
+int mouse_x(PlatformWindow *w)
+{
+    return w->core.in.mouse_x;
+}
+int mouse_y(PlatformWindow *w)
+{
+    return w->core.in.mouse_y;
+}
+void mouse_position(PlatformWindow *w, int *x, int *y)
+{
+    if (x)
+        *x = w->core.in.mouse_x;
+    if (y)
+        *y = w->core.in.mouse_y;
+}
+void mouse_delta(PlatformWindow *w, int *dx, int *dy)
+{
+    if (dx)
+        *dx = w->core.in.mouse_x - w->core.in.mouse_px;
+    if (dy)
+        *dy = w->core.in.mouse_y - w->core.in.mouse_py;
+}
+float mouse_wheel(PlatformWindow *w)
+{
+    return w->core.in.wheel_y;
+}
+void mouse_wheel_v(PlatformWindow *w, float *x, float *y)
+{
+    if (x)
+        *x = w->core.in.wheel_x;
+    if (y)
+        *y = w->core.in.wheel_y;
+}
+
+void mouse_set_position(PlatformWindow *w, int x, int y)
+{
+    w->core.in.mouse_x = x;
+    w->core.in.mouse_y = y;
+    backend_set_mouse_pos(w->b, x, y);
+}
+void mouse_set_cursor(PlatformWindow *w, int cursor)
+{
+    backend_set_cursor(w->b, cursor);
+}
+void mouse_set_mode(PlatformWindow *w, int mode)
+{
+    backend_set_mouse_mode(w->b, mode);
+}
+
+/* ========================================================================== */
+/*  Touch                                                                     */
+/* ========================================================================== */
+
+int touch_count(PlatformWindow *w)
+{
+    return w->core.in.touch_count;
+}
+int touch_x(PlatformWindow *w, int index)
+{
+    return (index >= 0 && index < w->core.in.touch_count) ? (int)w->core.in.touch[index].x : 0;
+}
+int touch_y(PlatformWindow *w, int index)
+{
+    return (index >= 0 && index < w->core.in.touch_count) ? (int)w->core.in.touch[index].y : 0;
+}
+void touch_position(PlatformWindow *w, int index, float *x, float *y)
+{
+    if (index < 0 || index >= w->core.in.touch_count)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        return;
+    }
+    if (x)
+        *x = w->core.in.touch[index].x;
+    if (y)
+        *y = w->core.in.touch[index].y;
+}
+int touch_id(PlatformWindow *w, int index)
+{
+    return (index >= 0 && index < w->core.in.touch_count) ? w->core.in.touch[index].id : -1;
+}
+
+/* ========================================================================== */
+/*  Time                                                                      */
+/* ========================================================================== */
+
+uint64_t time_nanos(void)
+{
+    return now_nanos() - g_time_base;
+}
+double time_seconds(void)
+{
+    return (double)time_nanos() / 1e9;
+}
+
+/* ========================================================================== */
+/*  Clipboard                                                                 */
+/* ========================================================================== */
+
+void clipboard_set(const char *text)
+{
+    backend_clipboard_set(text);
+}
+const char *clipboard_get(void)
+{
+    return backend_clipboard_get();
+}

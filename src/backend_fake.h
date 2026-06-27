@@ -1,0 +1,27 @@
+/*
+ * backend_fake.h - test-only injection API for backend_fake.c. Lets a test feed
+ * events into a window as if the OS had produced them, with no display. Not part
+ * of the public contract; never shipped to consumers.
+ */
+#ifndef BACKEND_FAKE_H
+#define BACKEND_FAKE_H
+
+#include "platform.h"
+
+/* Queue a raw item; delivered to the core on the next window_begin_frame. */
+void fake_inject_event(PlatformWindow *w, const Event *ev);
+void fake_inject_char(PlatformWindow *w, uint32_t codepoint);
+
+/* Convenience builders for the common cases. */
+void fake_key(PlatformWindow *w, int key, bool down, bool repeat);
+void fake_mouse_move(PlatformWindow *w, int x, int y);
+void fake_mouse_button(PlatformWindow *w, int button, bool down);
+void fake_wheel(PlatformWindow *w, float x, float y);
+void fake_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase);
+void fake_resize(PlatformWindow *w, int width, int height);    /* EVENT_WINDOW_RESIZE, screen coords */
+void fake_fb_resize(PlatformWindow *w, int width, int height); /* EVENT_WINDOW_FB_RESIZE, pixels */
+
+/* Number of swaps performed so far; used to confirm the app_run frame cycle. */
+int fake_swap_count(PlatformWindow *w);
+
+#endif /* BACKEND_FAKE_H */
