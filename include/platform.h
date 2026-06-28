@@ -267,6 +267,11 @@ extern "C"
         SCALE_BILINEAR
     } ScaleMode;
 
+    /* Optional scissor rect. Pixels outside the clip are silently dropped.
+       draw_set_clip enables it; draw_reset_clip disables (default: off). */
+    PLATFORM_API void draw_set_clip(int x, int y, int w, int h);
+    PLATFORM_API void draw_reset_clip(void);
+
     PLATFORM_API void draw_clear(Framebuffer *fb, uint32_t color);
     PLATFORM_API void draw_pixel(Framebuffer *fb, int x, int y, uint32_t color, BlendMode blend);
     PLATFORM_API uint32_t draw_get_pixel(const Framebuffer *fb, int x, int y); /* 0 if out of bounds */
@@ -274,6 +279,10 @@ extern "C"
     PLATFORM_API void draw_line(Framebuffer *fb, int x0, int y0, int x1, int y1, uint32_t color, BlendMode blend);
     PLATFORM_API void draw_rect(Framebuffer *fb, int x, int y, int w, int h, uint32_t color, BlendMode blend);
     PLATFORM_API void draw_fill_rect(Framebuffer *fb, int x, int y, int w, int h, uint32_t color, BlendMode blend);
+    /* Rounded rectangle, radius clamped to half the shorter side. radius <= 0
+       falls back to the square versions. */
+    PLATFORM_API void draw_round_rect(Framebuffer *fb, int x, int y, int w, int h, int radius, uint32_t color, BlendMode blend);
+    PLATFORM_API void draw_fill_round_rect(Framebuffer *fb, int x, int y, int w, int h, int radius, uint32_t color, BlendMode blend);
     PLATFORM_API void draw_circle(Framebuffer *fb, int cx, int cy, int radius, uint32_t color, BlendMode blend);
     PLATFORM_API void draw_fill_circle(Framebuffer *fb, int cx, int cy, int radius, uint32_t color, BlendMode blend);
     PLATFORM_API void draw_fill_triangle(Framebuffer *fb, int x0, int y0, int x1, int y1, int x2, int y2,

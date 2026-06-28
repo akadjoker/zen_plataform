@@ -13,7 +13,7 @@ option(PLATFORM_USE_FAKE    "Force the fake backend" OFF)
 option(PLATFORM_SANITIZE    "Build with ASan + UBSan (debug)" OFF)
 # BUILD_SHARED_LIBS (CMake builtin): ON -> .so/.dll, OFF -> .a/.lib
 
-set(CORE_SRC src/core.c src/error.c src/gamepad.c src/io.c src/os.c src/draw2d.c src/image.c)
+set(CORE_SRC src/core.c src/error.c src/gamepad.c src/io.c src/os.c src/draw2d.c src/image.c src/glad.c)
 if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT EMSCRIPTEN AND NOT PLATFORM_USE_FAKE)
     list(APPEND CORE_SRC src/gamepad_evdev.c)
 elseif(WIN32 AND NOT PLATFORM_USE_FAKE)
@@ -50,6 +50,59 @@ set_target_properties(platform PROPERTIES
     C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
 if(NOT BUILD_SHARED_LIBS)
     target_compile_definitions(platform PUBLIC PLATFORM_STATIC)
+endif()
+
+# zen_ui: immediate-mode widget toolkit. Backend-agnostic core; links only the
+# platform, never OpenGL. Ships the GL-free software renderer; the GL renderer
+# lives in the separate zen_2d library below.
+# The embedded default font: a vendored TTF turned into a C array at build time
+# by cmake/embed_font.cmake (cmake -P, so it works under cross toolchains too).
+set(ZEN_UI_FONT_TTF ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/fonts/DejaVuSans.ttf)
+set(ZEN_UI_FONT_C   ${CMAKE_CURRENT_BINARY_DIR}/ui_font_default.c)
+add_custom_command(
+    OUTPUT ${ZEN_UI_FONT_C}
+    COMMAND ${CMAKE_COMMAND} -DSRC=${ZEN_UI_FONT_TTF} -DDST=${ZEN_UI_FONT_C}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
+    DEPENDS ${ZEN_UI_FONT_TTF} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
+    COMMENT "Embedding default font ${ZEN_UI_FONT_TTF}"
+    VERBATIM)
+
+set(ZEN_UI_SRC
+    src/ui/ui_core.c
+    src/ui/ui_utf8.c
+    src/ui/ui_font.c
+    src/ui/ui_layout.c
+    src/ui/ui_theme.c
+    src/ui/ui_state.c
+    src/ui/stb_impl.c
+    src/ui/ui_widgets.c
+    src/ui/ui_dialog.c
+    src/ui/ui_render_software.c
+    ${ZEN_UI_FONT_C})
+add_library(zen_ui ${ZEN_UI_SRC})
+target_include_directories(zen_ui PUBLIC include PRIVATE src src/ui)
+target_compile_features(zen_ui PUBLIC c_std_11)
+set_target_properties(zen_ui PROPERTIES
+    C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(zen_ui PUBLIC platform)
+
+# zen_2d (r2d): batched 2D engine on GL, and the zen_ui GL renderer. Separate
+# library so the toolkit core never depends on OpenGL. Desktop uses GL 3.3 core
+# via glad; web (WebGL2) and Android (GLES3) use the GLES3 path in r2d.c.
+if(NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX))
+    add_library(zen_2d src/r2d/r2d.c src/r2d/r2d_ui.c)
+    target_include_directories(zen_2d PUBLIC include PRIVATE src/r2d)
+    target_compile_features(zen_2d PUBLIC c_std_11)
+    set_target_properties(zen_2d PROPERTIES
+        C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
+    if(EMSCRIPTEN)
+        target_link_libraries(zen_2d PUBLIC zen_ui platform) # GL resolved at app link (FULL_ES3)
+    elseif(ANDROID)
+        target_link_libraries(zen_2d PUBLIC zen_ui platform GLESv3 m)
+    else()
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(zen_2d PUBLIC zen_ui platform OpenGL::GL m)
+    endif()
 endif()
 
 # Sanitizers wire into every target through these interface flags. ASan + UBSan

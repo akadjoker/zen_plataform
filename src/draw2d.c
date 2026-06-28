@@ -8,6 +8,30 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ---- optional scissor clip ------------------------------------------------ */
+
+static struct { bool on; int x, y, w, h; } g_clip;
+
+void draw_set_clip(int x, int y, int w, int h)
+{
+    g_clip.on = true;
+    g_clip.x = x;
+    g_clip.y = y;
+    g_clip.w = w;
+    g_clip.h = h;
+}
+
+void draw_reset_clip(void)
+{
+    g_clip.on = false;
+}
+
+static inline bool clip_reject(int x, int y)
+{
+    return g_clip.on &&
+        (x < g_clip.x || y < g_clip.y || x >= g_clip.x + g_clip.w || y >= g_clip.y + g_clip.h);
+}
+
 /* ---- framebuffer ownership ---- */
 
 bool framebuffer_alloc(Framebuffer *fb, int width, int height)
@@ -77,6 +101,8 @@ void draw_pixel(Framebuffer *fb, int x, int y, uint32_t color, BlendMode blend)
 {
     if (!fb || !fb->pixels || x < 0 || y < 0 || x >= fb->width || y >= fb->height)
         return;
+    if (clip_reject(x, y))
+        return;
     uint32_t *p = &fb->pixels[(size_t)y * fb->stride + x];
     *p = blend == BLEND_ALPHA ? blend_over(*p, color) : color;
 }
@@ -136,6 +162,13 @@ void draw_fill_rect(Framebuffer *fb, int x, int y, int w, int h, uint32_t color,
     int y0 = y < 0 ? 0 : y;
     int x1 = x + w > fb->width ? fb->width : x + w;
     int y1 = y + h > fb->height ? fb->height : y + h;
+    if (g_clip.on) /* honour the scissor like the per-pixel primitives do */
+    {
+        if (x0 < g_clip.x) x0 = g_clip.x;
+        if (y0 < g_clip.y) y0 = g_clip.y;
+        if (x1 > g_clip.x + g_clip.w) x1 = g_clip.x + g_clip.w;
+        if (y1 > g_clip.y + g_clip.h) y1 = g_clip.y + g_clip.h;
+    }
     for (int yy = y0; yy < y1; yy++)
     {
         uint32_t *row = fb->pixels + (size_t)yy * fb->stride;
@@ -152,6 +185,70 @@ void draw_rect(Framebuffer *fb, int x, int y, int w, int h, uint32_t color, Blen
     draw_line(fb, x, y + h - 1, x + w - 1, y + h - 1, color, blend);
     draw_line(fb, x, y, x, y + h - 1, color, blend);
     draw_line(fb, x + w - 1, y, x + w - 1, y + h - 1, color, blend);
+}
+
+/* ---- rounded rects ---- */
+
+static int round_radius(int w, int h, int r)
+{
+    int m = (w < h ? w : h) / 2;
+    if (r > m)
+        r = m;
+    return r;
+}
+
+void draw_fill_round_rect(Framebuffer *fb, int x, int y, int w, int h, int radius, uint32_t color, BlendMode blend)
+{
+    if (!fb || !fb->pixels || w <= 0 || h <= 0)
+        return;
+    int r = round_radius(w, h, radius);
+    if (r <= 0)
+    {
+        draw_fill_rect(fb, x, y, w, h, color, blend);
+        return;
+    }
+    /* Middle band spans the full width; the two end bands inset each row by the
+       corner arc. vd is the vertical distance from the corner centre. */
+    draw_fill_rect(fb, x, y + r, w, h - 2 * r, color, blend);
+    for (int dy = 0; dy < r; dy++)
+    {
+        int vd = r - dy;
+        int chord = (int)isqrt_l((long)r * r - (long)vd * vd);
+        int inset = r - chord;
+        draw_fill_rect(fb, x + inset, y + dy, w - 2 * inset, 1, color, blend);
+        draw_fill_rect(fb, x + inset, y + h - 1 - dy, w - 2 * inset, 1, color, blend);
+    }
+}
+
+void draw_round_rect(Framebuffer *fb, int x, int y, int w, int h, int radius, uint32_t color, BlendMode blend)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    int r = round_radius(w, h, radius);
+    if (r <= 0)
+    {
+        draw_rect(fb, x, y, w, h, color, blend);
+        return;
+    }
+    /* Straight edges between the corner arcs. */
+    draw_line(fb, x + r, y, x + w - 1 - r, y, color, blend);
+    draw_line(fb, x + r, y + h - 1, x + w - 1 - r, y + h - 1, color, blend);
+    draw_line(fb, x, y + r, x, y + h - 1 - r, color, blend);
+    draw_line(fb, x + w - 1, y + r, x + w - 1, y + h - 1 - r, color, blend);
+    /* Four quarter arcs; plotting both (i,j) and (j,i) leaves no gaps. */
+    int cxl = x + r, cxr = x + w - 1 - r, cyt = y + r, cyb = y + h - 1 - r;
+    for (int i = 0; i <= r; i++)
+    {
+        int j = (int)isqrt_l((long)r * r - (long)i * i);
+        draw_pixel(fb, cxl - i, cyt - j, color, blend);
+        draw_pixel(fb, cxl - j, cyt - i, color, blend);
+        draw_pixel(fb, cxr + i, cyt - j, color, blend);
+        draw_pixel(fb, cxr + j, cyt - i, color, blend);
+        draw_pixel(fb, cxl - i, cyb + j, color, blend);
+        draw_pixel(fb, cxl - j, cyb + i, color, blend);
+        draw_pixel(fb, cxr + i, cyb + j, color, blend);
+        draw_pixel(fb, cxr + j, cyb + i, color, blend);
+    }
 }
 
 /* ---- circles ---- */

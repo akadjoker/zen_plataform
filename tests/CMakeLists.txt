@@ -66,3 +66,44 @@ if(PLATFORM_BACKEND_X11)
     add_test(NAME test_input_x11 COMMAND test_input_x11)
     set_tests_properties(test_input_x11 PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+
+# Fake test with extra source files (widgets + UI + software renderer).
+function(add_fake_ext_test name)
+    set(srcs "")
+    foreach(s ${ARGN})
+        list(APPEND srcs ${CMAKE_SOURCE_DIR}/${s})
+    endforeach()
+    add_executable(${name} ${name}.c
+        ${CMAKE_SOURCE_DIR}/src/core.c
+        ${CMAKE_SOURCE_DIR}/src/backend_fake.c
+        ${srcs})
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(${name} PRIVATE c_std_11)
+    target_compile_definitions(${name} PRIVATE PLATFORM_STATIC)
+    target_link_libraries(${name} PRIVATE platform_sanitize)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+# Full widget test in both PIXEL and GL mode
+add_fake_ext_test(test_widgets
+    ${FS_SRC}
+    src/gamepad.c
+    src/gamepad_stub.c
+    src/draw2d.c
+    src/ui/ui_core.c
+    src/ui/ui_widgets.c
+    src/ui/ui_layout.c
+    src/ui/ui_state.c
+    src/ui/ui_theme.c
+    src/ui/ui_render_software.c
+    src/ui/ui_font.c
+    src/ui/stb_impl.c
+    src/ui/ui_utf8.c
+    src/ui/ui_dialog.c)
+
+# The test also needs libm for stb_truetype math functions (sqrt, floor, etc.)
+if(NOT WIN32)
+    target_link_libraries(test_widgets PRIVATE m)
+endif()
