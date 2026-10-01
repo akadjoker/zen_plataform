@@ -102,4 +102,4 @@ Não entra no zen (fica nos engines):
 - `GLX_EXT_create_context_es2_profile`: suporte nos drivers alvo (o Kinetix2D pede ES 3.0 também no desktop?).
 - Web: IDBFS clássico ou WasmFS/OPFS; depende da versão do emsdk usada.
 - Android: `AAssetDir` não lista subdiretórios (opções: manifesto gerado no build, ou JNI).
-- `ARCHITECTURE.md` e `CLAUDE.md` são citados no README mas não estão no repositório.
+- O README cita um `ARCHITECTURE.md` e um ficheiro de convenções de código que não estão no repositório.
