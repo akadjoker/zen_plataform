@@ -70,6 +70,8 @@ static struct
     glXSwapIntervalMESAProc swap_mesa;
     glXSwapIntervalSGIProc swap_sgi;
 
+    Cursor cursors[CURSOR_COUNT]; /* created on first use, shared by every window */
+
     Window helper;        /* unmapped window that owns the CLIPBOARD selection */
     char *clipboard_text; /* what we last set; also the get() return buffer */
 } g;
@@ -112,6 +114,8 @@ static int translate_keysym(KeySym ks)
         return KEY_ZERO + (int)(ks - XK_0);
     if (ks >= XK_F1 && ks <= XK_F12)
         return KEY_F1 + (int)(ks - XK_F1);
+    if (ks >= XK_KP_0 && ks <= XK_KP_9)
+        return KEY_KP_0 + (int)(ks - XK_KP_0);
 
     switch (ks)
     {
@@ -175,6 +179,46 @@ static int translate_keysym(KeySym ks)
         return KEY_PRINT_SCREEN;
     case XK_Pause:
         return KEY_PAUSE;
+    case XK_Scroll_Lock:
+        return KEY_SCROLL_LOCK;
+    case XK_Menu:
+        return KEY_MENU;
+    case XK_KP_Insert:
+        return KEY_KP_0;
+    case XK_KP_End:
+        return KEY_KP_1;
+    case XK_KP_Down:
+        return KEY_KP_2;
+    case XK_KP_Page_Down:
+        return KEY_KP_3;
+    case XK_KP_Left:
+        return KEY_KP_4;
+    case XK_KP_Begin:
+        return KEY_KP_5;
+    case XK_KP_Right:
+        return KEY_KP_6;
+    case XK_KP_Home:
+        return KEY_KP_7;
+    case XK_KP_Up:
+        return KEY_KP_8;
+    case XK_KP_Page_Up:
+        return KEY_KP_9;
+    case XK_KP_Delete:
+    case XK_KP_Decimal:
+    case XK_KP_Separator:
+        return KEY_KP_DECIMAL;
+    case XK_KP_Divide:
+        return KEY_KP_DIVIDE;
+    case XK_KP_Multiply:
+        return KEY_KP_MULTIPLY;
+    case XK_KP_Subtract:
+        return KEY_KP_SUBTRACT;
+    case XK_KP_Add:
+        return KEY_KP_ADD;
+    case XK_KP_Enter:
+        return KEY_KP_ENTER;
+    case XK_KP_Equal:
+        return KEY_KP_EQUAL;
     case XK_Shift_L:
         return KEY_LEFT_SHIFT;
     case XK_Control_L:
@@ -428,6 +472,11 @@ bool backend_init(void)
 void backend_shutdown(void)
 {
     free(g.clipboard_text);
+    for (int i = 0; i < CURSOR_COUNT; i++)
+    {
+        if (g.cursors[i])
+            XFreeCursor(g.dpy, g.cursors[i]);
+    }
     if (g.helper)
         XDestroyWindow(g.dpy, g.helper);
     if (g.xim)
@@ -642,8 +691,6 @@ void backend_destroy(BackendWindow *b)
     XDeleteContext(g.dpy, b->win, g.ctx);
     if (b->hidden_cursor)
         XFreeCursor(g.dpy, b->hidden_cursor);
-    if (b->active_cursor)
-        XFreeCursor(g.dpy, b->active_cursor);
     XDestroyWindow(g.dpy, b->win);
     XFreeColormap(g.dpy, b->colormap);
     free(b);
@@ -1244,38 +1291,45 @@ static Cursor make_hidden_cursor(BackendWindow *b)
     return b->hidden_cursor;
 }
 
-void backend_set_cursor(BackendWindow *b, int cursor)
+static unsigned int cursor_shape(int cursor)
 {
-    unsigned int shape;
     switch (cursor)
     {
     case CURSOR_IBEAM:
-        shape = XC_xterm;
-        break;
+        return XC_xterm;
     case CURSOR_CROSSHAIR:
-        shape = XC_crosshair;
-        break;
+        return XC_crosshair;
     case CURSOR_HAND:
-        shape = XC_hand2;
-        break;
+        return XC_hand2;
     case CURSOR_RESIZE_EW:
-        shape = XC_sb_h_double_arrow;
-        break;
+        return XC_sb_h_double_arrow;
     case CURSOR_RESIZE_NS:
-        shape = XC_sb_v_double_arrow;
-        break;
+        return XC_sb_v_double_arrow;
+    case CURSOR_RESIZE_NWSE:
+        return XC_top_left_corner;
+    case CURSOR_RESIZE_NESW:
+        return XC_top_right_corner;
+    case CURSOR_RESIZE_ALL:
+        return XC_fleur;
     case CURSOR_NOT_ALLOWED:
-        shape = XC_X_cursor;
-        break;
+        return XC_X_cursor;
     default:
-        shape = XC_left_ptr;
-        break;
+        return XC_left_ptr;
     }
-    if (b->active_cursor)
-        XFreeCursor(g.dpy, b->active_cursor);
-    b->active_cursor = XCreateFontCursor(g.dpy, shape);
+}
+
+void backend_set_cursor(BackendWindow *b, int cursor)
+{
+    if (cursor < 0 || cursor >= CURSOR_COUNT)
+        cursor = CURSOR_DEFAULT;
+    if (!g.cursors[cursor])
+        g.cursors[cursor] = XCreateFontCursor(g.dpy, cursor_shape(cursor));
+    b->active_cursor = g.cursors[cursor];
     if (b->cursor_mode == MOUSE_MODE_NORMAL)
+    {
         XDefineCursor(g.dpy, b->win, b->active_cursor);
+        XFlush(g.dpy);
+    }
 }
 
 void backend_set_mouse_mode(BackendWindow *b, int mode)

@@ -5,7 +5,7 @@ de depender do SDL2, passando a usar o `zen_platform`. Sem DLLs, build rápido e
 binários pequenos. **Regra: só entra o que os engines usam.** Fora do plano:
 threads, mutex, áudio, SDL_Renderer, logging, storage SDL3 completo.
 
-Estado: Fases 1 a 4 concluidas. Proxima: Fase 5.
+Estado: Fases 1 a 5 concluidas. Proxima: Fase 6.
 
 ## 1. Levantamento: o que os engines usam do SDL2
 
@@ -64,12 +64,14 @@ Não entra no zen (fica nos engines):
 - O swap interval continua em `window_set_vsync`.
 - X11: `GLX_ARB_create_context`, `GLX_EXT_create_context_es2_profile` e handler de erros do X, para uma versao impossivel devolver NULL em vez de terminar o processo.
 
-### Fase 5 - Input em falta
-- Modificadores: `key_mods(w)` e `mods` no `EVENT_KEY`.
-- Cursores NWSE/NESW/ALL. Cache dos cursores no X11: hoje cada mudança cria e liberta um cursor (`backend_x11.c:1170`).
-- `mouse_capture(w, on)`, equivalente ao `SDL_CaptureMouse`.
-- Texto: `text_input_start/stop` (teclado virtual no Android e na Web).
-- `time_sleep(ms)`.
+### Fase 5 - Input em falta (concluida em X11; Web e Android escritos mas nao compilados)
+- Teclas que o Radion mapeia e o zen nao tinha: teclado numerico (`KEY_KP_0`..`KEY_KP_9`, decimal, as quatro operacoes, enter, igual), `KEY_MENU` e `KEY_SCROLL_LOCK`. Em X11 traduzem-se tambem os keysyms de navegacao (`KP_Home`, `KP_End`...) que o servidor entrega com o NumLock desligado. A Web e o Android passam a mapear tambem NumLock, PrintScreen e Pause (e, no Android, Insert, CapsLock e Meta).
+- `key_mods(w)`: mascara `MOD_*` das teclas premidas agora, o equivalente ao `SDL_GetModState`. O campo `mods` dos eventos de tecla ja existia.
+- O core liberta todas as teclas e botoes do rato quando a janela perde o foco, para um modificador nao ficar preso depois de um Alt-Tab.
+- Cursores `CURSOR_RESIZE_NWSE`, `CURSOR_RESIZE_NESW` e `CURSOR_RESIZE_ALL`. No X11 os cursores passam a ser criados uma vez e partilhados por todas as janelas, em vez de criados e libertados a cada mudanca.
+- `time_sleep(milliseconds)`.
+- Fora do plano, porque nenhum engine usa: cursor com imagem propria, `CURSOR_WAIT`, `text_input_start/stop` (so aparece em exemplos do iGUI), `SDL_HasClipboardText` (equivale a `clipboard_get()[0] != 0`) e a direcao da roda (`MOUSEWHEEL_FLIPPED`).
+- `SDL_CaptureMouse`: no X11 o servidor ja entrega os eventos fora da janela enquanto um botao esta premido. O backend Win32 deve fazer `SetCapture` ao premir e `ReleaseCapture` ao largar, sem API publica.
 
 ### Fase 6 - Gamepad
 - API: `gamepad_count`, `gamepad_connected`, `gamepad_name`, `gamepad_button_down/pressed`, `gamepad_axis`, e eventos de ligar/desligar.

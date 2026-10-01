@@ -356,6 +356,8 @@ extern "C"
 
     /* Next key from this frame's press queue, in order. 0 when empty. */
     PLATFORM_API int key_get_pressed(PlatformWindow *w);
+    /* MOD_* mask of the modifier keys held now. */
+    PLATFORM_API int key_mods(PlatformWindow *w);
     /* Next codepoint from the text-input queue. 0 when empty. Independent of the
        key queue, so it carries layout and composed input correctly. */
     PLATFORM_API uint32_t char_get_pressed(PlatformWindow *w);
@@ -398,6 +400,7 @@ extern "C"
 
     PLATFORM_API double time_seconds(void); /* since platform_init */
     PLATFORM_API uint64_t time_nanos(void);
+    PLATFORM_API void time_sleep(uint32_t milliseconds);
 
     /* ========================================================================== */
     /*  Clipboard                                                                 */
@@ -610,6 +613,23 @@ extern "C"
         KEY_F10,
         KEY_F11,
         KEY_F12,
+        KEY_KP_0 = 320,
+        KEY_KP_1,
+        KEY_KP_2,
+        KEY_KP_3,
+        KEY_KP_4,
+        KEY_KP_5,
+        KEY_KP_6,
+        KEY_KP_7,
+        KEY_KP_8,
+        KEY_KP_9,
+        KEY_KP_DECIMAL,
+        KEY_KP_DIVIDE,
+        KEY_KP_MULTIPLY,
+        KEY_KP_SUBTRACT,
+        KEY_KP_ADD,
+        KEY_KP_ENTER,
+        KEY_KP_EQUAL,
         KEY_LEFT_SHIFT = 340,
         KEY_LEFT_CONTROL,
         KEY_LEFT_ALT,
@@ -618,6 +638,8 @@ extern "C"
         KEY_RIGHT_CONTROL,
         KEY_RIGHT_ALT,
         KEY_RIGHT_SUPER,
+        KEY_MENU,
+        KEY_SCROLL_LOCK,
         KEY_MAX
     };
 
@@ -648,7 +670,11 @@ extern "C"
         CURSOR_HAND,
         CURSOR_RESIZE_EW,
         CURSOR_RESIZE_NS,
-        CURSOR_NOT_ALLOWED
+        CURSOR_NOT_ALLOWED,
+        CURSOR_RESIZE_NWSE,
+        CURSOR_RESIZE_NESW,
+        CURSOR_RESIZE_ALL,
+        CURSOR_COUNT
     };
 
     enum

@@ -7,6 +7,7 @@
 #include "error_internal.h"
 #include "backend.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -142,6 +143,13 @@ void core_push_event(Core *core, const Event *ev)
     case EVENT_TOUCH:
         touch_apply(s, ev->data.touch.id, ev->data.touch.x, ev->data.touch.y,
                     ev->data.touch.pressure, ev->data.touch.phase);
+        break;
+    case EVENT_WINDOW_FOCUS:
+        if (!ev->data.focus.gained)
+        {
+            memset(s->key_down, 0, sizeof s->key_down);
+            memset(s->mouse_down, 0, sizeof s->mouse_down);
+        }
         break;
     case EVENT_WINDOW_CLOSE:
         s->close_request = true;
@@ -461,6 +469,21 @@ int monitor_from_window(PlatformWindow *w)
 /*  Keyboard                                                                  */
 /* ========================================================================== */
 
+int key_mods(PlatformWindow *w)
+{
+    const bool *k = w->core.in.key_down;
+    int mods = 0;
+    if (k[KEY_LEFT_SHIFT] || k[KEY_RIGHT_SHIFT])
+        mods |= MOD_SHIFT;
+    if (k[KEY_LEFT_CONTROL] || k[KEY_RIGHT_CONTROL])
+        mods |= MOD_CTRL;
+    if (k[KEY_LEFT_ALT] || k[KEY_RIGHT_ALT])
+        mods |= MOD_ALT;
+    if (k[KEY_LEFT_SUPER] || k[KEY_RIGHT_SUPER])
+        mods |= MOD_SUPER;
+    return mods;
+}
+
 bool key_down(PlatformWindow *w, int key)
 {
     return key > 0 && key < KEY_MAX && w->core.in.key_down[key];
@@ -611,6 +634,14 @@ uint64_t time_nanos(void)
 double time_seconds(void)
 {
     return (double)time_nanos() / 1e9;
+}
+
+void time_sleep(uint32_t milliseconds)
+{
+    struct timespec ts = {(time_t)(milliseconds / 1000), (long)(milliseconds % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
+    {
+    }
 }
 
 /* ========================================================================== */

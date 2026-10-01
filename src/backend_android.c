@@ -54,9 +54,43 @@ static int translate_key(int32_t code)
         return KEY_ZERO + (code - AKEYCODE_0);
     if (code >= AKEYCODE_F1 && code <= AKEYCODE_F12)
         return KEY_F1 + (code - AKEYCODE_F1);
+    if (code >= AKEYCODE_NUMPAD_0 && code <= AKEYCODE_NUMPAD_9)
+        return KEY_KP_0 + (code - AKEYCODE_NUMPAD_0);
 
     switch (code)
     {
+    case AKEYCODE_NUMPAD_DOT:
+        return KEY_KP_DECIMAL;
+    case AKEYCODE_NUMPAD_DIVIDE:
+        return KEY_KP_DIVIDE;
+    case AKEYCODE_NUMPAD_MULTIPLY:
+        return KEY_KP_MULTIPLY;
+    case AKEYCODE_NUMPAD_SUBTRACT:
+        return KEY_KP_SUBTRACT;
+    case AKEYCODE_NUMPAD_ADD:
+        return KEY_KP_ADD;
+    case AKEYCODE_NUMPAD_ENTER:
+        return KEY_KP_ENTER;
+    case AKEYCODE_NUMPAD_EQUALS:
+        return KEY_KP_EQUAL;
+    case AKEYCODE_MENU:
+        return KEY_MENU;
+    case AKEYCODE_SCROLL_LOCK:
+        return KEY_SCROLL_LOCK;
+    case AKEYCODE_INSERT:
+        return KEY_INSERT;
+    case AKEYCODE_CAPS_LOCK:
+        return KEY_CAPS_LOCK;
+    case AKEYCODE_NUM_LOCK:
+        return KEY_NUM_LOCK;
+    case AKEYCODE_SYSRQ:
+        return KEY_PRINT_SCREEN;
+    case AKEYCODE_BREAK:
+        return KEY_PAUSE;
+    case AKEYCODE_META_LEFT:
+        return KEY_LEFT_SUPER;
+    case AKEYCODE_META_RIGHT:
+        return KEY_RIGHT_SUPER;
     case AKEYCODE_SPACE:
         return KEY_SPACE;
     case AKEYCODE_ENTER:

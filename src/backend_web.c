@@ -78,6 +78,8 @@ static int translate_code(const char *code)
         return KEY_A + (code[3] - 'A');
     if (strncmp(code, "Digit", 5) == 0 && code[5])
         return KEY_ZERO + (code[5] - '0');
+    if (strncmp(code, "Numpad", 6) == 0 && code[6] >= '0' && code[6] <= '9' && !code[7])
+        return KEY_KP_0 + (code[6] - '0');
     if (code[0] == 'F' && code[1] >= '1' && code[1] <= '9')
     {
         int n = atoi(code + 1);
@@ -125,6 +127,18 @@ static int translate_code(const char *code)
         {"MetaLeft", KEY_LEFT_SUPER},
         {"MetaRight", KEY_RIGHT_SUPER},
         {"CapsLock", KEY_CAPS_LOCK},
+        {"NumLock", KEY_NUM_LOCK},
+        {"ScrollLock", KEY_SCROLL_LOCK},
+        {"PrintScreen", KEY_PRINT_SCREEN},
+        {"Pause", KEY_PAUSE},
+        {"ContextMenu", KEY_MENU},
+        {"NumpadDecimal", KEY_KP_DECIMAL},
+        {"NumpadDivide", KEY_KP_DIVIDE},
+        {"NumpadMultiply", KEY_KP_MULTIPLY},
+        {"NumpadSubtract", KEY_KP_SUBTRACT},
+        {"NumpadAdd", KEY_KP_ADD},
+        {"NumpadEnter", KEY_KP_ENTER},
+        {"NumpadEqual", KEY_KP_EQUAL},
     };
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
         if (strcmp(code, map[i].name) == 0)
@@ -708,6 +722,15 @@ void backend_set_cursor(BackendWindow *b, int cursor)
         break;
     case CURSOR_RESIZE_NS:
         css = "ns-resize";
+        break;
+    case CURSOR_RESIZE_NWSE:
+        css = "nwse-resize";
+        break;
+    case CURSOR_RESIZE_NESW:
+        css = "nesw-resize";
+        break;
+    case CURSOR_RESIZE_ALL:
+        css = "move";
         break;
     case CURSOR_NOT_ALLOWED:
         css = "not-allowed";
