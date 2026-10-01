@@ -5,7 +5,7 @@ de depender do SDL2, passando a usar o `zen_platform`. Sem DLLs, build rápido e
 binários pequenos. **Regra: só entra o que os engines usam.** Fora do plano:
 threads, mutex, áudio, SDL_Renderer, logging, storage SDL3 completo.
 
-Estado: Fases 1 e 2 concluidas. Proxima: Fase 3.
+Estado: Fases 1, 2 e 3 concluidas. Proxima: Fase 4.
 
 ## 1. Levantamento: o que os engines usam do SDL2
 
@@ -50,11 +50,11 @@ Não entra no zen (fica nos engines):
 - `io_load_file` e `io_save_file`. A escrita é atómica: `.tmp`, depois `fsync`, depois `rename`.
 - `file_read`/`file_write`/`asset_*` passam a assentar nesta camada.
 
-### Fase 3 - Filesystem (o que o `std::filesystem` e o SDL dão aos engines)
-- `fs_get_base_path`, `fs_get_pref_path(org, app)`, `fs_get_temp_path`, `fs_get_current_directory`.
+### Fase 3 - Filesystem (concluida em POSIX; Win32 na Fase 7, IDBFS na Fase 8)
+- `fs_get_base_path`, `fs_get_pref_path(org, app)`, `fs_get_temp_path`. `dir_current` já cobre o diretório atual.
 - `fs_get_path_info` (tipo, tamanho, mtime), `fs_create_directory` (recursivo), `fs_remove_path`, `fs_rename_path`.
 - `fs_enumerate_directory(path, recursive, cb, ud)`.
-- Web: `pref_path` em IDBFS e `fs_sync()` para gravar de forma persistente.
+- Web: o `pref_path` usa `$HOME/.local/share`; a persistência (IDBFS e `fs_sync`) fica na Fase 8.
 
 ### Fase 4 - OpenGL config
 - `GLConfig` dentro de `WindowConfig`: profile (CORE/COMPAT/ES), versão, depth, stencil, msaa, debug, `share_with`.

@@ -1,6 +1,6 @@
 /*
  * os.c - portable OS/filesystem core: file helpers over io.c, string logic for
- * paths, POSIX for directories.
+ * paths. Directory and stat work lives in fs_posix.c.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -14,7 +14,6 @@
 #include <ctype.h>
 #include <strings.h>
 #include <errno.h>
-#include <sys/stat.h>
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -22,7 +21,6 @@
 #define getcwd _getcwd
 #define chdir _chdir
 #else
-#include <dirent.h>
 #include <unistd.h>
 #endif
 
@@ -61,26 +59,26 @@ void fs_free(void *data)
 
 bool file_exists(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 && !S_ISDIR(st.st_mode);
+    PathInfo info;
+    return fs_get_path_info(path, &info) && info.type != PATH_TYPE_DIRECTORY;
 }
 
 bool dir_exists(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    PathInfo info;
+    return fs_get_path_info(path, &info) && info.type == PATH_TYPE_DIRECTORY;
 }
 
 int64_t file_size(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 ? (int64_t)st.st_size : -1;
+    PathInfo info;
+    return fs_get_path_info(path, &info) ? info.size : -1;
 }
 
 int64_t file_mod_time(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 ? (int64_t)st.st_mtime : -1;
+    PathInfo info;
+    return fs_get_path_info(path, &info) ? info.modify_time_ns / 1000000000 : -1;
 }
 
 /* ---- path string helpers ---- */
@@ -362,30 +360,23 @@ bool path_relative(char *out, size_t cap, const char *path, const char *base)
 
 /* ---- directories ---- */
 
-static char g_path_buf[PATH_CAP];
-
 const char *dir_current(void)
 {
-    if (!getcwd(g_path_buf, sizeof g_path_buf))
-        g_path_buf[0] = '\0';
-    return g_path_buf;
+    static char cwd[PATH_CAP];
+    if (!getcwd(cwd, sizeof cwd))
+        cwd[0] = '\0';
+    return cwd;
 }
 
 const char *dir_app(void)
 {
-#if defined(_WIN32)
-    /* Filled in by the Win32 backend later; cwd is the desktop fallback. */
-    return dir_current();
-#else
-    ssize_t n = readlink("/proc/self/exe", g_path_buf, sizeof g_path_buf - 1);
-    if (n <= 0)
+    static char app[PATH_CAP];
+    if (!fs_get_base_path(app, sizeof app))
         return dir_current();
-    g_path_buf[n] = '\0';
-    char *sep = strrchr(g_path_buf, '/');
-    if (sep)
-        *sep = '\0';
-    return g_path_buf;
-#endif
+    size_t n = strlen(app);
+    if (n > 1 && app[n - 1] == '/')
+        app[n - 1] = '\0';
+    return app;
 }
 
 const char *dir_data(void)
@@ -399,33 +390,45 @@ bool dir_change(const char *path)
     return chdir(path) == 0;
 }
 
-static bool make_one(const char *path)
-{
-#if defined(_WIN32)
-    return _mkdir(path) == 0 || errno == EEXIST;
-#else
-    return mkdir(path, 0777) == 0 || dir_exists(path);
-#endif
-}
-
 bool dir_make(const char *path)
 {
-    char tmp[PATH_CAP];
-    snprintf(tmp, sizeof tmp, "%s", path);
-    for (char *p = tmp + 1; *p; p++)
-    {
-        if (*p == '/')
-        {
-            *p = '\0';
-            if (tmp[0] && !make_one(tmp))
-                return false;
-            *p = '/';
-        }
-    }
-    return make_one(tmp);
+    return fs_create_directory(path);
 }
 
-#if !defined(_WIN32)
+typedef struct
+{
+    DirList *list;
+    int cap;
+    bool failed;
+} ListState;
+
+static bool list_add(const char *path, PathType type, void *user)
+{
+    (void)type;
+    ListState *ls = user;
+    DirList *list = ls->list;
+    if (list->count == ls->cap)
+    {
+        int cap = ls->cap ? ls->cap * 2 : 16;
+        char **grown = realloc(list->paths, (size_t)cap * sizeof *grown);
+        if (!grown)
+        {
+            ls->failed = true;
+            return false;
+        }
+        list->paths = grown;
+        ls->cap = cap;
+    }
+    char *copy = malloc(strlen(path) + 1);
+    if (!copy)
+    {
+        ls->failed = true;
+        return false;
+    }
+    list->paths[list->count++] = strcpy(copy, path);
+    return true;
+}
+
 bool dir_list(const char *path, DirList *out)
 {
     if (!out)
@@ -433,47 +436,14 @@ bool dir_list(const char *path, DirList *out)
     out->paths = NULL;
     out->count = 0;
 
-    DIR *d = opendir(path);
-    if (!d)
-        return false;
-
-    int cap = 0;
-    struct dirent *e;
-    while ((e = readdir(d)))
-    {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-            continue;
-        if (out->count == cap)
-        {
-            cap = cap ? cap * 2 : 16;
-            char **grown = realloc(out->paths, (size_t)cap * sizeof *grown);
-            if (!grown)
-            {
-                closedir(d);
-                dir_list_free(out);
-                return false;
-            }
-            out->paths = grown;
-        }
-        char full[PATH_CAP];
-        snprintf(full, sizeof full, "%s/%s", path, e->d_name);
-        out->paths[out->count++] = strdup(full);
-    }
-    closedir(d);
-    return true;
+    ListState ls = {out, 0, false};
+    bool ok = fs_enumerate_directory(path, false, list_add, &ls);
+    if (ok && ls.failed)
+        ok = error_set("out of memory");
+    if (!ok)
+        dir_list_free(out);
+    return ok;
 }
-#else
-bool dir_list(const char *path, DirList *out)
-{
-    (void)path;
-    if (out)
-    {
-        out->paths = NULL;
-        out->count = 0;
-    }
-    return false; /* Win32 listing wired up with the Win32 backend phase */
-}
-#endif
 
 void dir_list_free(DirList *list)
 {

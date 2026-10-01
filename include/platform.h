@@ -454,6 +454,39 @@ extern "C"
     PLATFORM_API bool path_absolute(char *out, size_t cap, const char *path);
     PLATFORM_API bool path_relative(char *out, size_t cap, const char *path, const char *base);
 
+    typedef enum
+    {
+        PATH_TYPE_NONE,
+        PATH_TYPE_FILE,
+        PATH_TYPE_DIRECTORY,
+        PATH_TYPE_OTHER
+    } PathType;
+
+    typedef struct
+    {
+        PathType type;
+        int64_t size;
+        int64_t modify_time_ns; /* unix epoch */
+    } PathInfo;
+
+    /* Return false and set platform_get_error() on failure. Symlinks are followed
+       by fs_get_path_info and not by fs_remove_path. */
+    PLATFORM_API bool fs_get_path_info(const char *path, PathInfo *out); /* out may be NULL */
+    PLATFORM_API bool fs_create_directory(const char *path);             /* recursive, idempotent */
+    PLATFORM_API bool fs_remove_path(const char *path);                  /* a file or an empty directory */
+    PLATFORM_API bool fs_rename_path(const char *from, const char *to);  /* replaces an existing file */
+
+    /* Calls cb with the full path of every entry; returning false from cb stops
+       early and is not an error. Recursion does not follow symlinks. */
+    typedef bool (*FsEnumCallback)(const char *path, PathType type, void *user);
+    PLATFORM_API bool fs_enumerate_directory(const char *path, bool recursive, FsEnumCallback cb, void *user);
+
+    /* Executable directory and per-user writable directory (created), both ending
+       in '/'. The temp directory has no trailing '/'. */
+    PLATFORM_API bool fs_get_base_path(char *out, size_t cap);
+    PLATFORM_API bool fs_get_pref_path(char *out, size_t cap, const char *org, const char *app);
+    PLATFORM_API bool fs_get_temp_path(char *out, size_t cap);
+
     /* Directories, raylib-style cursor over the process cwd. The dir_* string
        getters return a pointer to internal storage, valid until the next call. */
     PLATFORM_API const char *dir_current(void); /* working directory */

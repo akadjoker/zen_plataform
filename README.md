@@ -129,6 +129,16 @@ file_write("out.bin", data, size);
 bool exists = file_exists("path");
 const char *cwd = dir_current();
 
+char save[512];
+fs_get_pref_path(save, sizeof save, "MyOrg", "MyGame");  // created, ends with '/'
+fs_get_base_path(base, sizeof base);                      // executable dir, ends with '/'
+PathInfo info;
+if (fs_get_path_info("save.dat", &info) && info.type == PATH_TYPE_FILE)
+    printf("%lld bytes\n", (long long)info.size);
+fs_create_directory("a/b/c");                             // recursive
+fs_rename_path("a.tmp", "a.dat");
+fs_enumerate_directory("assets", true, on_entry, NULL);   // bool on_entry(path, type, user)
+
 char path[512];
 path_join(path, sizeof path, "assets", "tex/a.png");     // "assets/tex/a.png"
 path_normalize(path, sizeof path, "a/./b/../c");         // "a/c"

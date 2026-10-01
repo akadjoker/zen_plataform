@@ -10,7 +10,7 @@ set(CORE_SRC src/core.c src/error.c src/io.c src/os.c src/draw2d.c src/image.c)
 if(WIN32)
     list(APPEND CORE_SRC src/io_win32.c)
 else()
-    list(APPEND CORE_SRC src/io_posix.c)
+    list(APPEND CORE_SRC src/io_posix.c src/fs_posix.c)
 endif()
 
 if(PLATFORM_USE_FAKE)
