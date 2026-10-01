@@ -8,7 +8,7 @@
  * Commands: size, fillStyle #rrggbb, fillRect, beginPath, moveTo, lineTo,
  * closePath, fill [nonzero|evenodd].
  */
-#include "platform.h"
+#include "zv_io.h"
 
 #include <cairo.h>
 
@@ -29,7 +29,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: cairo_ref scene.txt out.bmp\n");
         return 2;
     }
-    char *text = file_read_text(argv[1]);
+    char *text = zv_io_read_text(argv[1]);
     if (!text)
         return 2;
 
@@ -82,7 +82,7 @@ int main(int argc, char **argv)
         else
             status = 1;
     }
-    fs_free(text);
+    zv_io_free(text);
     if (status != 0 || !surface)
     {
         fprintf(stderr, "%s: unsupported or missing command\n", argv[1]);
@@ -90,8 +90,8 @@ int main(int argc, char **argv)
     }
 
     cairo_surface_flush(surface);
-    Framebuffer fb;
-    if (!framebuffer_alloc(&fb, width, height))
+    ZvBitmap fb;
+    if (!zv_bitmap_alloc(&fb, width, height))
         return 2;
     const unsigned char *data = cairo_image_surface_get_data(surface);
     int stride = cairo_image_surface_get_stride(surface);
@@ -112,8 +112,8 @@ int main(int argc, char **argv)
             fb.pixels[y * fb.stride + x] = a ? (a << 24 | (r > 255 ? 255 : r) << 16 | (g > 255 ? 255 : g) << 8 | (b > 255 ? 255 : b)) : 0;
         }
     }
-    bool saved = framebuffer_save_bmp(&fb, argv[2]);
-    framebuffer_free(&fb);
+    bool saved = zv_bitmap_save_bmp(&fb, argv[2]);
+    zv_bitmap_free(&fb);
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
     return saved ? 0 : 2;

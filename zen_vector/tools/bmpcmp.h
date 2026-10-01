@@ -1,7 +1,7 @@
 #ifndef ZV_BMPCMP_H
 #define ZV_BMPCMP_H
 
-#include "platform.h"
+#include "zv_io.h"
 
 typedef struct
 {
@@ -17,7 +17,7 @@ typedef struct
    tolerance when any channel differs by more than tolerance. If diff is not NULL
    it receives a newly allocated picture: black where equal, green where within
    the tolerance, and red (brighter for larger differences) where over it.
-   Release it with framebuffer_free. */
-bool zv_compare(const Framebuffer *a, const Framebuffer *b, int tolerance, ZvCompare *out, Framebuffer *diff);
+   Release it with zv_bitmap_free. */
+bool zv_compare(const ZvBitmap *a, const ZvBitmap *b, int tolerance, ZvCompare *out, ZvBitmap *diff);
 
 #endif /* ZV_BMPCMP_H */

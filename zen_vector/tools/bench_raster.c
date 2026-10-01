@@ -6,6 +6,7 @@
  *   bench_raster --csv      scene,min_ms,median_ms
  */
 #include "zv_raster.h"
+#include "zv_io.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -161,8 +162,6 @@ int main(int argc, char **argv)
         {"full_screen_alpha", scene_full_screen_alpha},
     };
 
-    if (!platform_init())
-        return 1;
     ZvSurface surface;
     if (!zv_surface_init(&surface, NULL, WIDTH, HEIGHT))
         return 1;
@@ -185,9 +184,9 @@ int main(int argc, char **argv)
         {
             for (int i = 0; i < WIDTH * HEIGHT; i++)
                 surface.pixels[i] = 0xFF202020u;
-            uint64_t t0 = time_nanos();
+            uint64_t t0 = zv_time_nanos();
             scenes[s].run(&c);
-            ms[r] = (double)(time_nanos() - t0) / 1e6;
+            ms[r] = (double)(zv_time_nanos() - t0) / 1e6;
         }
         qsort(ms, RUNS, sizeof ms[0], compare_double);
         if (csv)
@@ -199,6 +198,5 @@ int main(int argc, char **argv)
     zv_polyline_release(&c.poly);
     zv_path_release(&c.path);
     zv_surface_release(&surface);
-    platform_shutdown();
     return 0;
 }

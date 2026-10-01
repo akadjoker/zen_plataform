@@ -26,16 +26,16 @@ int main(int argc, char **argv)
             return usage();
     }
 
-    Framebuffer a, b, diff;
-    if (!framebuffer_load_bmp(&a, argv[1]))
+    ZvBitmap a, b, diff;
+    if (!zv_bitmap_load_bmp(&a, argv[1]))
     {
-        fprintf(stderr, "cannot read %s: %s\n", argv[1], platform_get_error());
+        fprintf(stderr, "cannot read %s\n", argv[1]);
         return 2;
     }
-    if (!framebuffer_load_bmp(&b, argv[2]))
+    if (!zv_bitmap_load_bmp(&b, argv[2]))
     {
-        fprintf(stderr, "cannot read %s: %s\n", argv[2], platform_get_error());
-        framebuffer_free(&a);
+        fprintf(stderr, "cannot read %s\n", argv[2]);
+        zv_bitmap_free(&a);
         return 2;
     }
 
@@ -52,12 +52,12 @@ int main(int argc, char **argv)
                r.width, r.height, r.pixels, tolerance, r.over_tolerance, r.max_channel,
                r.max_alpha, r.max_red, r.max_green, r.max_blue);
         status = r.over_tolerance == 0 ? 0 : 1;
-        if (diff_path && !framebuffer_save_bmp(&diff, diff_path))
+        if (diff_path && !zv_bitmap_save_bmp(&diff, diff_path))
             fprintf(stderr, "cannot write %s\n", diff_path);
     }
     if (diff_path)
-        framebuffer_free(&diff);
-    framebuffer_free(&a);
-    framebuffer_free(&b);
+        zv_bitmap_free(&diff);
+    zv_bitmap_free(&a);
+    zv_bitmap_free(&b);
     return status;
 }

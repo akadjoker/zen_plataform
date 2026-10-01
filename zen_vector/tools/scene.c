@@ -1,5 +1,6 @@
 #include "scene.h"
 #include "zv_canvas.h"
+#include "zv_io.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -144,17 +145,17 @@ static bool load_font(Scene *sc)
     if (sc->font_loaded)
         return true;
     size_t size = 0;
-    uint8_t *data = file_read(g_font_path, &size);
+    uint8_t *data = zv_io_read(g_font_path, &size);
     if (!data)
         return false;
     sc->font_data = malloc(size);
     if (!sc->font_data)
     {
-        fs_free(data);
+        zv_io_free(data);
         return false;
     }
     memcpy(sc->font_data, data, size);
-    fs_free(data);
+    zv_io_free(data);
     sc->font_size = size;
     sc->font_loaded = zv_font_init(&sc->font, sc->font_data, sc->font_size, NULL);
     return sc->font_loaded;
@@ -562,7 +563,7 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
     return fail(err, errcap, line, "unknown command '%s'", cmd);
 }
 
-bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
+bool zv_scene_run(const char *text, ZvBitmap *out, char *err, size_t errcap)
 {
     if (err && errcap)
         err[0] = '\0';
@@ -609,10 +610,10 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
         ok = fail(err, errcap, line_no, "the scene has no size", NULL);
     if (ok)
     {
-        if (!framebuffer_alloc(out, sc.surface.width, sc.surface.height))
+        if (!zv_bitmap_alloc(out, sc.surface.width, sc.surface.height))
             ok = fail(err, errcap, line_no, "out of memory", NULL);
         else
-            zv_surface_store(&sc.surface, out);
+            zv_surface_store_pixels(&sc.surface, out->pixels, out->width, out->height, out->stride);
     }
     if (sc.have_size)
         zv_canvas_release(&sc.canvas);

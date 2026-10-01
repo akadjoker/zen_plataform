@@ -1,7 +1,7 @@
 #ifndef ZV_SCENE_H
 #define ZV_SCENE_H
 
-#include "platform.h"
+#include "zv_io.h"
 
 #include <stddef.h>
 
@@ -34,9 +34,9 @@
    Any other command is an error: a scene never renders partially. */
 
 /* Renders text into out (allocated here, transparent black before drawing).
-   Release it with framebuffer_free. On failure returns false, fills err with a
+   Release it with zv_bitmap_free. On failure returns false, fills err with a
    message that names the line, and leaves out untouched. */
-bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap);
+bool zv_scene_run(const char *text, ZvBitmap *out, char *err, size_t errcap);
 
 /* The font file used by the "font" command; NULL means the default,
    ZV_SCENE_FONT if defined at build time. */

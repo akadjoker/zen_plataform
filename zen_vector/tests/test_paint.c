@@ -435,14 +435,14 @@ static char *scene_text(const char *name)
 {
     char path[512];
     snprintf(path, sizeof path, ZV_DIR "/scenes/%s.scene", name);
-    return file_read_text(path);
+    return zv_io_read_text(path);
 }
 
-static bool load_reference(const char *name, Framebuffer *out)
+static bool load_reference(const char *name, ZvBitmap *out)
 {
     char path[512];
     snprintf(path, sizeof path, ZV_DIR "/refs/%s.bmp", name);
-    return framebuffer_load_bmp(out, path);
+    return zv_bitmap_load_bmp(out, path);
 }
 
 static void test_reference(const char *name, int tolerance, int max_over, int max_over_8_permille)
@@ -451,7 +451,7 @@ static void test_reference(const char *name, int tolerance, int max_over, int ma
     CHECK(text != NULL);
     if (!text)
         return;
-    Framebuffer mine, ref;
+    ZvBitmap mine, ref;
     char err[256];
     bool ok = zv_scene_run(text, &mine, err, sizeof err);
     if (!ok)
@@ -466,9 +466,9 @@ static void test_reference(const char *name, int tolerance, int max_over, int ma
            r.over_tolerance, r8.over_tolerance, r8.pixels, permille);
     CHECK(r.over_tolerance <= max_over);
     CHECK(permille <= max_over_8_permille);
-    fs_free(text);
-    framebuffer_free(&mine);
-    framebuffer_free(&ref);
+    zv_io_free(text);
+    zv_bitmap_free(&mine);
+    zv_bitmap_free(&ref);
 }
 
 int main(void)

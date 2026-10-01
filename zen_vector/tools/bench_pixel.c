@@ -1,13 +1,14 @@
 /*
  * Cost of blending one translucent colour over a 1280x720 opaque destination, per
  * pixel, for the pixel core against a naive per-channel version and against the
- * draw2d of zen_platform (the Phase 0 baseline). Prints the fastest and the median
+ * draw2d of zen_platform measured in FASE1.md. Prints the fastest and the median
  * of RUNS timed runs.
  *
  *   bench_pixel          human readable table
  *   bench_pixel --csv    name,min_ms,median_ms,ns_per_pixel
  */
 #include "zv_pixel.h"
+#include "zv_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +44,7 @@ static ZvPixel naive_blend(ZvPixel dst, ZvPixel src)
     return a << 24 | r << 16 | g << 8 | b;
 }
 
-static void run_naive(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
+static void run_naive(ZvPixel *buf, ZvBitmap *fb, const uint8_t *cover)
 {
     (void)fb;
     (void)cover;
@@ -51,7 +52,7 @@ static void run_naive(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
         buf[i] = naive_blend(buf[i], TRANSLUCENT);
 }
 
-static void run_blend_over(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
+static void run_blend_over(ZvPixel *buf, ZvBitmap *fb, const uint8_t *cover)
 {
     (void)fb;
     (void)cover;
@@ -59,7 +60,7 @@ static void run_blend_over(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
         buf[i] = zv_blend_over(buf[i], TRANSLUCENT);
 }
 
-static void run_span_translucent(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
+static void run_span_translucent(ZvPixel *buf, ZvBitmap *fb, const uint8_t *cover)
 {
     (void)fb;
     (void)cover;
@@ -67,7 +68,7 @@ static void run_span_translucent(ZvPixel *buf, Framebuffer *fb, const uint8_t *c
         zv_span_solid(buf + (size_t)y * WIDTH, WIDTH, TRANSLUCENT);
 }
 
-static void run_span_opaque(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
+static void run_span_opaque(ZvPixel *buf, ZvBitmap *fb, const uint8_t *cover)
 {
     (void)fb;
     (void)cover;
@@ -75,24 +76,17 @@ static void run_span_opaque(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
         zv_span_solid(buf + (size_t)y * WIDTH, WIDTH, OPAQUE);
 }
 
-static void run_span_cover(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
+static void run_span_cover(ZvPixel *buf, ZvBitmap *fb, const uint8_t *cover)
 {
     (void)fb;
     for (int y = 0; y < HEIGHT; y++)
         zv_span_cover(buf + (size_t)y * WIDTH, WIDTH, TRANSLUCENT, cover);
 }
 
-static void run_draw2d(ZvPixel *buf, Framebuffer *fb, const uint8_t *cover)
-{
-    (void)buf;
-    (void)cover;
-    draw_fill_rect(fb, 0, 0, WIDTH, HEIGHT, 0x80402010u, BLEND_ALPHA);
-}
-
 typedef struct
 {
     const char *name;
-    void (*run)(ZvPixel *, Framebuffer *, const uint8_t *);
+    void (*run)(ZvPixel *, ZvBitmap *, const uint8_t *);
 } Case;
 
 static int compare_double(const void *a, const void *b)
@@ -111,16 +105,13 @@ int main(int argc, char **argv)
         {"zv_span_solid_translucent", run_span_translucent},
         {"zv_span_solid_opaque", run_span_opaque},
         {"zv_span_cover", run_span_cover},
-        {"draw2d_fill_rect_alpha", run_draw2d},
     };
 
-    if (!platform_init())
-        return 1;
 
     ZvPixel *buf = malloc(PIXELS * sizeof *buf);
     uint8_t *cover = malloc(WIDTH);
-    Framebuffer fb;
-    if (!buf || !cover || !framebuffer_alloc(&fb, WIDTH, HEIGHT))
+    ZvBitmap fb;
+    if (!buf || !cover || !zv_bitmap_alloc(&fb, WIDTH, HEIGHT))
         return 1;
     for (int i = 0; i < WIDTH; i++)
         cover[i] = (uint8_t)(i % 4 == 0 ? 0 : i % 4 == 1 ? 255
@@ -145,9 +136,9 @@ int main(int argc, char **argv)
                 buf[i] = 0xFF000000u | (rnd() & 0x00FFFFFFu);
                 fb.pixels[i] = buf[i];
             }
-            uint64_t t0 = time_nanos();
+            uint64_t t0 = zv_time_nanos();
             cases[c].run(buf, &fb, cover);
-            uint64_t dt = time_nanos() - t0;
+            uint64_t dt = zv_time_nanos() - t0;
             if (r >= 0)
                 ms[r] = (double)dt / 1e6;
             sink += buf[PIXELS / 2] + fb.pixels[PIXELS / 2];
@@ -164,7 +155,6 @@ int main(int argc, char **argv)
 
     free(buf);
     free(cover);
-    framebuffer_free(&fb);
-    platform_shutdown();
+    zv_bitmap_free(&fb);
     return 0;
 }

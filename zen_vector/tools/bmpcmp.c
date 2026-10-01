@@ -9,12 +9,12 @@ static int channel_diff(uint32_t a, uint32_t b, int shift)
     return x > y ? x - y : y - x;
 }
 
-bool zv_compare(const Framebuffer *a, const Framebuffer *b, int tolerance, ZvCompare *out, Framebuffer *diff)
+bool zv_compare(const ZvBitmap *a, const ZvBitmap *b, int tolerance, ZvCompare *out, ZvBitmap *diff)
 {
     if (!a || !b || !out || a->width != b->width || a->height != b->height)
         return false;
 
-    if (diff && !framebuffer_alloc(diff, a->width, a->height))
+    if (diff && !zv_bitmap_alloc(diff, a->width, a->height))
         return false;
 
     ZvCompare r = {a->width, a->height, (long long)a->width * a->height, 0, 0, 0, 0, 0, 0};

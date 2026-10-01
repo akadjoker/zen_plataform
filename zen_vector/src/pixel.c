@@ -230,32 +230,41 @@ void zv_surface_release(ZvSurface *surface)
     memset(surface, 0, sizeof *surface);
 }
 
-bool zv_surface_load(ZvSurface *surface, const Framebuffer *framebuffer)
+bool zv_surface_load_pixels(ZvSurface *surface, const uint32_t *pixels, int width, int height, int stride)
 {
-    if (!surface || !framebuffer || !surface->pixels || !framebuffer->pixels || surface->width != framebuffer->width ||
-        surface->height != framebuffer->height)
+    if (!surface || !pixels || !surface->pixels || surface->width != width || surface->height != height || stride < width)
         return false;
-    for (int y = 0; y < surface->height; y++)
+    for (int y = 0; y < height; y++)
     {
-        const uint32_t *src = framebuffer->pixels + (size_t)y * (size_t)framebuffer->stride;
+        const uint32_t *src = pixels + (size_t)y * (size_t)stride;
         ZvPixel *dst = surface->pixels + (size_t)y * (size_t)surface->stride;
-        for (int x = 0; x < surface->width; x++)
+        for (int x = 0; x < width; x++)
             dst[x] = zv_premultiply(src[x]);
     }
     return true;
 }
 
-bool zv_surface_store(const ZvSurface *surface, Framebuffer *framebuffer)
+bool zv_surface_store_pixels(const ZvSurface *surface, uint32_t *pixels, int width, int height, int stride)
 {
-    if (!surface || !framebuffer || !surface->pixels || !framebuffer->pixels || surface->width != framebuffer->width ||
-        surface->height != framebuffer->height)
+    if (!surface || !pixels || !surface->pixels || surface->width != width || surface->height != height || stride < width)
         return false;
-    for (int y = 0; y < surface->height; y++)
+    for (int y = 0; y < height; y++)
     {
         const ZvPixel *src = surface->pixels + (size_t)y * (size_t)surface->stride;
-        uint32_t *dst = framebuffer->pixels + (size_t)y * (size_t)framebuffer->stride;
-        for (int x = 0; x < surface->width; x++)
+        uint32_t *dst = pixels + (size_t)y * (size_t)stride;
+        for (int x = 0; x < width; x++)
             dst[x] = zv_unpremultiply(src[x]);
     }
     return true;
+}
+
+ZvSurface zv_surface_wrap(uint32_t *pixels, int width, int height, int stride)
+{
+    ZvSurface s;
+    s.pixels = pixels;
+    s.width = width;
+    s.height = height;
+    s.stride = stride;
+    s.allocator = NULL;
+    return s;
 }

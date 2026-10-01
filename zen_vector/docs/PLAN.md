@@ -6,7 +6,7 @@ Objetivo: biblioteca que desenha gráficos vetoriais com qualidade ao nível do 
 
 ## 1. Princípios
 
-- Depende só do `Framebuffer` do zen_platform. O zen_platform não muda (regra "só entra o que os engines usam").
+- Não depende de nada além de C11 e libm (o zen_platform deixou de ser necessário: a conversão de e para alpha direto recebe pixels crus, `zv_surface_load_pixels`/`zv_surface_store_pixels`).
 - Formato interno RGBA8 premultiplicado; conversão explícita na entrada e na saída.
 - Coordenadas em float na API, rasterização em ponto fixo.
 - Sem alocações escondidas: paths e buffers crescem por um alocador que o utilizador passa (ou um por omissão, explícito).

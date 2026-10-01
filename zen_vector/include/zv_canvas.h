@@ -193,7 +193,7 @@ extern "C"
     bool zv_canvas_draw_image_simple(ZvCanvas *c, const ZvSurface *image, float dx, float dy);
 
     /* Image data is straight 0xAARRGGBB in device pixels, like getImageData
-       with the layout of the Framebuffer. out must hold w*h pixels. */
+       out must hold w*h pixels. */
     void zv_canvas_get_image_data(const ZvCanvas *c, int x, int y, int w, int h, uint32_t *out);
     void zv_canvas_put_image_data(ZvCanvas *c, const uint32_t *data, int w, int h, int x, int y);
 

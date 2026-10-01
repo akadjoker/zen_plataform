@@ -1,3 +1,4 @@
+#include "zv_io.h"
 #include "zv_pixel.h"
 
 #include <stdio.h>
@@ -417,8 +418,8 @@ static void test_surface(void)
 
 static void test_conversion(void)
 {
-    Framebuffer fb;
-    CHECK(framebuffer_alloc(&fb, 256, 4));
+    ZvBitmap fb;
+    CHECK(zv_bitmap_alloc(&fb, 256, 4));
     for (int y = 0; y < 4; y++)
     {
         for (int x = 0; x < 256; x++)
@@ -426,31 +427,36 @@ static void test_conversion(void)
     }
     ZvSurface s;
     CHECK(zv_surface_init(&s, NULL, 256, 4));
-    CHECK(zv_surface_load(&s, &fb));
-    Framebuffer back;
-    CHECK(framebuffer_alloc(&back, 256, 4));
-    CHECK(zv_surface_store(&s, &back));
+    CHECK(zv_surface_load_pixels(&s, fb.pixels, fb.width, fb.height, fb.stride));
+    ZvBitmap back;
+    CHECK(zv_bitmap_alloc(&back, 256, 4));
+    CHECK(zv_surface_store_pixels(&s, back.pixels, back.width, back.height, back.stride));
     CHECK(memcmp(back.pixels, fb.pixels, 256u * 4u * 4u) == 0);
 
     fb.pixels[0] = 0x80FF8000u;
     fb.pixels[1] = 0x00ABCDEFu;
-    CHECK(zv_surface_load(&s, &fb));
+    CHECK(zv_surface_load_pixels(&s, fb.pixels, fb.width, fb.height, fb.stride));
     CHECK(s.pixels[0] == 0x80804000u && s.pixels[1] == 0u);
-    CHECK(zv_surface_store(&s, &back));
+    CHECK(zv_surface_store_pixels(&s, back.pixels, back.width, back.height, back.stride));
     CHECK(back.pixels[0] == 0x80FF8000u && back.pixels[1] == 0u);
 
-    Framebuffer wrong;
-    CHECK(framebuffer_alloc(&wrong, 255, 4));
-    CHECK(!zv_surface_load(&s, &wrong));
-    CHECK(!zv_surface_store(&s, &wrong));
-    CHECK(!zv_surface_load(NULL, &fb));
-    CHECK(!zv_surface_load(&s, NULL));
-    framebuffer_free(&wrong);
+    ZvBitmap wrong;
+    CHECK(zv_bitmap_alloc(&wrong, 255, 4));
+    CHECK(!zv_surface_load_pixels(&s, wrong.pixels, wrong.width, wrong.height, wrong.stride));
+    CHECK(!zv_surface_store_pixels(&s, wrong.pixels, wrong.width, wrong.height, wrong.stride));
+    CHECK(!zv_surface_load_pixels(NULL, fb.pixels, 256, 4, 256));
+    CHECK(!zv_surface_load_pixels(&s, NULL, 256, 4, 256));
+    CHECK(!zv_surface_load_pixels(&s, fb.pixels, 256, 4, 100)); /* stride below the width */
+    ZvSurface wrapped = zv_surface_wrap(fb.pixels, 256, 4, fb.stride);
+    CHECK(wrapped.pixels == fb.pixels && wrapped.allocator == NULL);
+    zv_surface_release(&wrapped); /* owns nothing: fb stays valid */
+    CHECK(fb.pixels[2] != 0);
+    zv_bitmap_free(&wrong);
 
     /* a framebuffer with a larger stride than its width */
-    Framebuffer strided;
-    CHECK(framebuffer_alloc(&strided, 40, 3));
-    Framebuffer view = {strided.pixels + 5, 30, 3, strided.stride};
+    ZvBitmap strided;
+    CHECK(zv_bitmap_alloc(&strided, 40, 3));
+    ZvBitmap view = {strided.pixels + 5, 30, 3, strided.stride};
     for (int y = 0; y < 3; y++)
     {
         for (int x = 0; x < 30; x++)
@@ -458,7 +464,7 @@ static void test_conversion(void)
     }
     ZvSurface s2;
     CHECK(zv_surface_init(&s2, NULL, 30, 3));
-    CHECK(zv_surface_load(&s2, &view));
+    CHECK(zv_surface_load_pixels(&s2, view.pixels, view.width, view.height, view.stride));
     bool consistent = true;
     for (int y = 0; y < 3; y++)
     {
@@ -471,11 +477,11 @@ static void test_conversion(void)
     CHECK(consistent);
     CHECK(strided.pixels[0] == 0u && strided.pixels[4] == 0u && strided.pixels[35] == 0u);
     zv_surface_release(&s2);
-    framebuffer_free(&strided);
+    zv_bitmap_free(&strided);
 
     zv_surface_release(&s);
-    framebuffer_free(&fb);
-    framebuffer_free(&back);
+    zv_bitmap_free(&fb);
+    zv_bitmap_free(&back);
 }
 
 int main(void)

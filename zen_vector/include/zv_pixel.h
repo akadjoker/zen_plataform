@@ -4,18 +4,25 @@
 /*
  * Pixel core of zen_vector.
  *
- * The internal pixel is RGBA8 with premultiplied alpha, laid out like the
- * zen_platform Framebuffer, 0xAARRGGBB, but with every colour channel already
- * multiplied by alpha. A valid premultiplied pixel has each colour channel less
- * than or equal to its alpha; every blending function assumes that, and the
- * result is then valid too. Conversion from and to the Framebuffer (straight
- * alpha) is explicit: zv_surface_load and zv_surface_store.
+ * zen_vector depends on nothing but C11 and libm. The internal pixel is RGBA8
+ * with premultiplied alpha, 0xAARRGGBB in a uint32_t (B, G, R, A in memory on
+ * little endian: the ARGB8888 of SDL, the BGRA of OpenGL and Direct3D, the
+ * Framebuffer of zen_platform), with every colour channel already multiplied
+ * by alpha. A valid premultiplied pixel has each colour channel less than or
+ * equal to its alpha; every blending function assumes that, and the result is
+ * then valid too. Conversion from and to straight alpha is explicit:
+ * zv_surface_load_pixels and zv_surface_store_pixels (zv_platform.h wraps them
+ * for the zen_platform Framebuffer).
+ *
+ * To show a surface: SDL_UpdateTexture on an SDL_PIXELFORMAT_ARGB8888 texture,
+ * or glTexImage2D with GL_BGRA / GL_UNSIGNED_BYTE; with the surface's alpha
+ * use premultiplied blending (GL_ONE, GL_ONE_MINUS_SRC_ALPHA). An opaque
+ * surface needs no conversion at all: its pixels are plain 0xFFRRGGBB.
  *
  * All the arithmetic is exact integer arithmetic, rounding to nearest.
  */
 
-#include "platform.h"
-
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -105,10 +112,15 @@ extern "C"
     bool zv_surface_init(ZvSurface *surface, const ZvAllocator *allocator, int width, int height);
     void zv_surface_release(ZvSurface *surface);
 
-    /* Converts between a Framebuffer (straight alpha) and a surface of the same
-       size. Return false when the sizes differ. */
-    bool zv_surface_load(ZvSurface *surface, const Framebuffer *framebuffer);
-    bool zv_surface_store(const ZvSurface *surface, Framebuffer *framebuffer);
+    /* Converts between straight 0xAARRGGBB pixels (width x height, stride in
+       pixels) and a surface of the same size. Return false when the sizes
+       differ or a pointer is NULL. */
+    bool zv_surface_load_pixels(ZvSurface *surface, const uint32_t *pixels, int width, int height, int stride);
+    bool zv_surface_store_pixels(const ZvSurface *surface, uint32_t *pixels, int width, int height, int stride);
+
+    /* Wraps external premultiplied pixels (an SDL surface locked, a texture
+       staging buffer) as a surface that owns nothing: release does nothing. */
+    ZvSurface zv_surface_wrap(uint32_t *pixels, int width, int height, int stride);
 
 #ifdef __cplusplus
 }
