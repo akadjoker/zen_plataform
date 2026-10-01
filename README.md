@@ -83,6 +83,24 @@ mouse_set_cursor(w, CURSOR_RESIZE_NWSE);
 time_sleep(16);                         // milliseconds
 ```
 
+### Gamepads
+
+```c
+for (int i = 0; i < GAMEPAD_MAX; i++)
+{
+    if (!gamepad_connected(i)) continue;
+    bool jump = gamepad_button_down(i, GAMEPAD_BUTTON_A);
+    float x = gamepad_axis(i, GAMEPAD_AXIS_LEFT_X);   // -1..1, no deadzone
+    float rt = gamepad_axis(i, GAMEPAD_AXIS_TRIGGER_RIGHT); // 0..1
+}
+```
+
+Polled; `window_begin_frame` refreshes the state. Layout and order follow
+SDL_GameController. Linux reads `/dev/input/event*` (evdev) and needs read
+permission on them, normally the `input` group. Pads are detected at startup and
+on hot-plug. Only pads that follow the kernel gamepad layout are listed; there is
+no mapping database.
+
 ### Event queue
 
 ```c

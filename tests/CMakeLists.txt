@@ -4,6 +4,8 @@ function(add_fake_test name)
     add_executable(${name} ${name}.c
         ${CMAKE_SOURCE_DIR}/src/core.c
         ${CMAKE_SOURCE_DIR}/src/error.c
+        ${CMAKE_SOURCE_DIR}/src/gamepad.c
+        ${CMAKE_SOURCE_DIR}/src/gamepad_stub.c
         ${CMAKE_SOURCE_DIR}/src/backend_fake.c)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
@@ -35,6 +37,7 @@ add_unit_test(test_fs ${FS_SRC})
 add_unit_test(test_path ${FS_SRC})
 add_unit_test(test_io ${FS_SRC})
 add_unit_test(test_fsys ${FS_SRC})
+add_unit_test(test_gamepad src/gamepad.c ${FS_SRC})
 add_unit_test(test_draw2d src/draw2d.c)
 add_unit_test(test_image src/draw2d.c src/image.c ${FS_SRC})
 

@@ -395,6 +395,57 @@ extern "C"
     PLATFORM_API int touch_id(PlatformWindow *w, int index); /* stable across down..up */
 
     /* ========================================================================== */
+    /*  Gamepads                                                                  */
+    /* ========================================================================== */
+
+    /* Polled like the keyboard. Devices are detected by platform_init and while
+       the application runs; window_begin_frame refreshes the state. The layout is
+       SDL_GameController's: a pad that does not follow the standard layout is not
+       listed. Index 0..GAMEPAD_MAX-1 is a slot that stays taken while the device
+       is connected. */
+    enum
+    {
+        GAMEPAD_MAX = 4
+    };
+
+    typedef enum
+    {
+        GAMEPAD_BUTTON_A,
+        GAMEPAD_BUTTON_B,
+        GAMEPAD_BUTTON_X,
+        GAMEPAD_BUTTON_Y,
+        GAMEPAD_BUTTON_BACK,
+        GAMEPAD_BUTTON_GUIDE,
+        GAMEPAD_BUTTON_START,
+        GAMEPAD_BUTTON_LEFT_STICK,
+        GAMEPAD_BUTTON_RIGHT_STICK,
+        GAMEPAD_BUTTON_LEFT_SHOULDER,
+        GAMEPAD_BUTTON_RIGHT_SHOULDER,
+        GAMEPAD_BUTTON_DPAD_UP,
+        GAMEPAD_BUTTON_DPAD_DOWN,
+        GAMEPAD_BUTTON_DPAD_LEFT,
+        GAMEPAD_BUTTON_DPAD_RIGHT,
+        GAMEPAD_BUTTON_COUNT
+    } GamepadButton;
+
+    /* Sticks are -1..1 with Y growing downwards; triggers are 0..1. No deadzone. */
+    typedef enum
+    {
+        GAMEPAD_AXIS_LEFT_X,
+        GAMEPAD_AXIS_LEFT_Y,
+        GAMEPAD_AXIS_RIGHT_X,
+        GAMEPAD_AXIS_RIGHT_Y,
+        GAMEPAD_AXIS_TRIGGER_LEFT,
+        GAMEPAD_AXIS_TRIGGER_RIGHT,
+        GAMEPAD_AXIS_COUNT
+    } GamepadAxis;
+
+    PLATFORM_API bool gamepad_connected(int index);
+    PLATFORM_API const char *gamepad_name(int index); /* NULL when not connected */
+    PLATFORM_API bool gamepad_button_down(int index, int button);
+    PLATFORM_API float gamepad_axis(int index, int axis);
+
+    /* ========================================================================== */
     /*  Time                                                                      */
     /* ========================================================================== */
 

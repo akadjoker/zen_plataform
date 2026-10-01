@@ -5,6 +5,7 @@
  */
 #include "core_internal.h"
 #include "error_internal.h"
+#include "gamepad_internal.h"
 #include "backend.h"
 
 #include <errno.h>
@@ -175,11 +176,15 @@ static uint64_t now_nanos(void)
 bool platform_init(void)
 {
     g_time_base = now_nanos();
-    return backend_init();
+    if (!backend_init())
+        return false;
+    gamepad_init();
+    return true;
 }
 
 void platform_shutdown(void)
 {
+    gamepad_shutdown();
     backend_shutdown();
 }
 
@@ -245,6 +250,7 @@ void window_begin_frame(PlatformWindow *w)
     s->fe_cursor = 0;
     /* keycode_q and char_q are not cleared here: the consumer drains them */
 
+    gamepad_poll();
     backend_pump_events(w->b, &w->core);
 
     if (s->close_request)

@@ -5,7 +5,7 @@ de depender do SDL2, passando a usar o `zen_platform`. Sem DLLs, build rápido e
 binários pequenos. **Regra: só entra o que os engines usam.** Fora do plano:
 threads, mutex, áudio, SDL_Renderer, logging, storage SDL3 completo.
 
-Estado: Fases 1 a 5 concluidas. Proxima: Fase 6.
+Estado: Fases 1 a 6 concluidas. Proxima: Fase 7.
 
 ## 1. Levantamento: o que os engines usam do SDL2
 
@@ -73,10 +73,11 @@ Não entra no zen (fica nos engines):
 - Fora do plano, porque nenhum engine usa: cursor com imagem propria, `CURSOR_WAIT`, `text_input_start/stop` (so aparece em exemplos do iGUI), `SDL_HasClipboardText` (equivale a `clipboard_get()[0] != 0`) e a direcao da roda (`MOUSEWHEEL_FLIPPED`).
 - `SDL_CaptureMouse`: no X11 o servidor ja entrega os eventos fora da janela enquanto um botao esta premido. O backend Win32 deve fazer `SetCapture` ao premir e `ReleaseCapture` ao largar, sem API publica.
 
-### Fase 6 - Gamepad
-- API: `gamepad_count`, `gamepad_connected`, `gamepad_name`, `gamepad_button_down/pressed`, `gamepad_axis`, e eventos de ligar/desligar.
-- Layout normalizado ao estilo `SDL_GameController`.
-- Backends: Linux evdev (`/dev/input/event*`), Win32 XInput, Web Gamepad API, Android `AInputEvent`.
+### Fase 6 - Gamepad (concluida em Linux; XInput na Fase 7)
+- API por polling, como o teclado: `gamepad_connected`, `gamepad_name`, `gamepad_button_down`, `gamepad_axis`. Ate `GAMEPAD_MAX` (4) comandos, com a ordem de botoes e eixos do `SDL_GameController`. Sticks de -1 a 1 com Y para baixo, gatilhos de 0 a 1, sem deadzone. As arestas (premido e largado neste frame) ficam a cargo do engine, como o Radion ja faz.
+- Linux (`gamepad_evdev.c`): le `/dev/input/event*`, deteta hot-plug com inotify (IN_CREATE, IN_ATTRIB e IN_DELETE), trata `SYN_DROPPED` e a desligacao do dispositivo. Reconhece o layout padrao do kernel (BTN_SOUTH/EAST/NORTH/WEST, ABS_X/Y/RX/RY, ABS_Z/RZ ou BTN_TL2/TR2 para os gatilhos, HAT0 ou BTN_DPAD para a cruz). Nao ha base de dados de mapeamentos: um comando que nao siga o layout do kernel nao aparece.
+- Fora do plano, porque nenhum engine usa: gamepad na Web e no Android, rumble, giroscopio, touchpad, LEDs, eventos de ligar e desligar, joysticks sem layout padrao.
+- Nao testado: o `ioctl` de sondagem e de ressincronizacao num dispositivo real. O container nao tem `uinput` nem `/dev/input`, por isso a deteccao, a leitura (via pipe), o hot-plug (inotify sobre um diretorio temporario) e a traducao dos eventos foram testados, mas a sondagem de um comando fisico nao.
 
 ### Fase 7 - Backend Win32 nativo
 - Janela, WGL com o GLConfig, input, I/O UTF-16, gamepad XInput.
@@ -88,6 +89,7 @@ Não entra no zen (fica nos engines):
 
 ### Fase 9 - Integração nos engines
 - `imgui_impl_zen` (backend de plataforma para o Dear ImGui) + o `imgui_impl_opengl3` existente.
+- Radion: o seu `GamepadButton` segue a ordem do raylib (LEFT_FACE_UP, ...) mas `Input::update` usa esse indice diretamente como `SDL_GameControllerButton`, que tem outra ordem. Ao migrar e preciso converter entre as duas; confirmar se o comportamento atual ja esta trocado.
 - Guia de migração `SDL_X -> zen_y` com base na tabela da secção 1.
 - Portar o Kinetix2D (o mais pequeno) primeiro, depois o Radion e o CocoShape.
 

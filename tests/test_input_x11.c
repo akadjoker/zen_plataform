@@ -250,6 +250,7 @@ int main(void)
         printf("SKIP %s\n", platform_get_error());
         return 77;
     }
+    CHECK(platform_get_error()[0] == '\0');
     g_dpy = XOpenDisplay(NULL);
     WindowConfig cfg = {.title = TITLE, .width = 64, .height = 64, .render = RENDER_PIXELS};
     PlatformWindow *w = window_create(&cfg);
