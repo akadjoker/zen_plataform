@@ -1,0 +1,6 @@
+# The pattern rotated 30 degrees, repeating both ways.
+size 64 64
+patternImage 16 16
+fillPattern repeat
+patternTransform 0.866 0.5 -0.5 0.866 32 10
+fillRect 0 0 64 64

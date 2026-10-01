@@ -20,6 +20,15 @@
      bezierCurveTo C1X C1Y C2X C2Y X Y
      closePath
      fill [nonzero|evenodd]     default nonzero
+     globalAlpha A              0..1
+     gradientLinear X0 Y0 X1 Y1
+     gradientRadial X0 Y0 R0 X1 Y1 R1
+     gradientStop T #rrggbb[aa] adds a stop to the gradient being built
+     fillGradient               fillStyle = that gradient
+     patternImage W H           builds the test picture (see make_pattern_image)
+     fillPattern REP            fillStyle = pattern of it: repeat, repeat-x, repeat-y, no-repeat
+     patternTransform A B C D E F
+     imageSmoothingEnabled true|false   bilinear or nearest for patterns
 
    Any other command is an error: a scene never renders partially. */
 

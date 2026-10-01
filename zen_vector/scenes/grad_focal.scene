@@ -1,0 +1,7 @@
+# Flash-style focal radial: inner circle of radius 0 at the focal point.
+size 64 64
+gradientRadial 44 32 0 32 32 30
+gradientStop 0 #ffff80
+gradientStop 1 #800000
+fillGradient
+fillRect 0 0 64 64

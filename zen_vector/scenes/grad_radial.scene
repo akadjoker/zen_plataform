@@ -1,0 +1,16 @@
+# Two-circle radial gradient with the inner circle off centre.
+size 64 64
+fillStyle #202020
+fillRect 0 0 64 64
+gradientRadial 24 24 4 32 32 28
+gradientStop 0 #ffffff
+gradientStop 0.6 #e04020
+gradientStop 1 #103060
+fillGradient
+beginPath
+moveTo 32 2
+lineTo 62 32
+lineTo 32 62
+lineTo 2 32
+closePath
+fill

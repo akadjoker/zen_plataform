@@ -48,6 +48,24 @@ function renderInPage(text) {
   const properties = new Set(['fillStyle', 'strokeStyle', 'lineWidth', 'lineCap', 'lineJoin', 'miterLimit',
     'globalAlpha', 'globalCompositeOperation', 'lineDashOffset', 'imageSmoothingEnabled']);
   let canvas = null, ctx = null;
+  let gradient = null, patternImage = null, pattern = null;
+  const makePatternImage = (w, h) => {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    const img = g.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        img.data[i] = w > 1 ? Math.floor(x * 255 / (w - 1)) : 0;
+        img.data[i + 1] = h > 1 ? Math.floor(y * 255 / (h - 1)) : 0;
+        img.data[i + 2] = (((x >> 2) + (y >> 2)) & 1) ? 255 : 0;
+        img.data[i + 3] = (x < Math.floor(w / 2) && y < Math.floor(h / 2)) ? 128 : 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  };
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -65,6 +83,15 @@ function renderInPage(text) {
       continue;
     }
     if (!ctx) throw new Error(where + "'" + cmd + "' before size");
+    const nums = args.map(Number);
+    if (cmd === 'gradientLinear') { gradient = ctx.createLinearGradient(...nums); continue; }
+    if (cmd === 'gradientRadial') { gradient = ctx.createRadialGradient(...nums); continue; }
+    if (cmd === 'gradientStop') { gradient.addColorStop(Number(args[0]), args[1]); continue; }
+    if (cmd === 'fillGradient') { ctx.fillStyle = gradient; continue; }
+    if (cmd === 'strokeGradient') { ctx.strokeStyle = gradient; continue; }
+    if (cmd === 'patternImage') { patternImage = makePatternImage(nums[0], nums[1]); continue; }
+    if (cmd === 'fillPattern') { pattern = ctx.createPattern(patternImage, args[0]); ctx.fillStyle = pattern; continue; }
+    if (cmd === 'patternTransform') { pattern.setTransform(new DOMMatrix(nums)); continue; }
     if (properties.has(cmd)) {
       const value = args.join(' ');
       ctx[cmd] = /^-?[0-9.]+$/.test(value) ? Number(value) : (value === 'true' ? true : value === 'false' ? false : value);

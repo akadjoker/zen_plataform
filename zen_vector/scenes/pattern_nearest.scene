@@ -1,0 +1,9 @@
+# The pattern scaled up 4x with smoothing off: hard pixel edges.
+size 64 64
+fillStyle #ffffff
+fillRect 0 0 64 64
+imageSmoothingEnabled false
+patternImage 8 8
+fillPattern repeat-x
+patternTransform 4 0 0 4 2 10
+fillRect 0 0 64 64

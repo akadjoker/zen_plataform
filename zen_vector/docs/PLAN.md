@@ -1,6 +1,6 @@
 # Plano: zen_vector (rasterizador vetorial com APIs Canvas 2D e Flash)
 
-Estado: Fases 0 a 3 concluídas (ver `FASE0.md`, `FASE1.md`, `FASE3.md`). Próxima: Fase 4.
+Estado: Fases 0 a 4 concluídas (ver `FASE0.md`, `FASE1.md`, `FASE3.md`, `FASE4.md`). Próxima: Fase 5.
 
 Objetivo: biblioteca que desenha gráficos vetoriais com qualidade ao nível do Canvas do browser sobre um `Framebuffer` do zen_platform, sem dependências de terceiros. Serve de base à ferramenta de animação estilo Flash.
 

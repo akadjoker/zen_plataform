@@ -1,5 +1,5 @@
 #include "scene.h"
-#include "zv_raster.h"
+#include "zv_fill.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -12,7 +12,11 @@ typedef struct
 {
     ZvSurface surface;
     bool have_size;
-    ZvPixel fill;
+    ZvPaint fill;     /* current fillStyle */
+    ZvPaint gradient; /* gradient being built */
+    ZvPaint pattern;  /* pattern being built */
+    ZvSurface pattern_image;
+    uint32_t global_alpha;
     ZvPath path;
     ZvPolyline poly;
     ZvRasterizer raster;
@@ -113,7 +117,35 @@ static bool fill_path(Scene *sc, const ZvPath *path, ZvFillRule rule)
     zv_polyline_clear(&sc->poly);
     if (!zv_path_flatten(path, NULL, ZV_FLATTEN_TOLERANCE, &sc->poly))
         return false;
-    return zv_fill_polyline_solid(&sc->surface, &sc->poly, rule, sc->fill, NULL, &sc->raster);
+    ZvPaint paint = sc->fill;
+    paint.alpha = sc->global_alpha;
+    ZvPaintContext ctx;
+    if (!zv_paint_prepare(&ctx, &paint, NULL, NULL))
+        return false;
+    bool ok = zv_fill_polyline(&sc->surface, &sc->poly, rule, &ctx, NULL, &sc->raster);
+    zv_paint_release(&ctx);
+    return ok;
+}
+
+/* The pattern test image: red grows with x, green with y, blue is a 4x4
+   checkerboard, the top-left quarter is half transparent. The browser builds
+   the same picture in ref_render.js. */
+static bool make_pattern_image(ZvSurface *s, int w, int h)
+{
+    if (!zv_surface_init(s, NULL, w, h))
+        return false;
+    for (int y = 0; y < h; y++)
+    {
+        for (int x = 0; x < w; x++)
+        {
+            uint32_t r = w > 1 ? (uint32_t)(x * 255 / (w - 1)) : 0;
+            uint32_t g = h > 1 ? (uint32_t)(y * 255 / (h - 1)) : 0;
+            uint32_t b = (((x >> 2) + (y >> 2)) & 1) ? 255u : 0u;
+            uint32_t a = (x < w / 2 && y < h / 2) ? 128u : 255u;
+            s->pixels[y * s->stride + x] = zv_premultiply(a << 24 | r << 16 | g << 8 | b);
+        }
+    }
+    return true;
 }
 
 static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, size_t errcap)
@@ -141,7 +173,100 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
         uint32_t straight;
         if (count != 2 || !parse_color(tokens[1], &straight))
             return fail(err, errcap, line, "fillStyle needs #rrggbb or #rrggbbaa", NULL);
-        sc->fill = zv_premultiply(straight);
+        sc->fill = zv_paint_solid(straight);
+        return true;
+    }
+    if (strcmp(cmd, "globalAlpha") == 0)
+    {
+        if (!parse_floats(tokens, count, 1, v, line, err, errcap, "globalAlpha needs a value") || v[0] < 0.0f || v[0] > 1.0f)
+            return fail(err, errcap, line, "globalAlpha needs a value from 0 to 1", NULL);
+        sc->global_alpha = (uint32_t)(v[0] * 255.0f + 0.5f);
+        return true;
+    }
+    if (strcmp(cmd, "gradientLinear") == 0)
+    {
+        if (!parse_floats(tokens, count, 4, v, line, err, errcap, "gradientLinear needs x0 y0 x1 y1"))
+            return false;
+        sc->gradient = zv_paint_linear(v[0], v[1], v[2], v[3]);
+        return true;
+    }
+    if (strcmp(cmd, "gradientRadial") == 0)
+    {
+        if (!parse_floats(tokens, count, 6, v, line, err, errcap, "gradientRadial needs x0 y0 r0 x1 y1 r1"))
+            return false;
+        sc->gradient = zv_paint_radial(v[0], v[1], v[2], v[3], v[4], v[5]);
+        return true;
+    }
+    if (strcmp(cmd, "gradientStop") == 0)
+    {
+        uint32_t straight;
+        if (count != 3 || !parse_float(tokens[1], &v[0]) || !parse_color(tokens[2], &straight))
+            return fail(err, errcap, line, "gradientStop needs offset #rrggbb[aa]", NULL);
+        if (sc->gradient.type == ZV_PAINT_SOLID)
+            return fail(err, errcap, line, "gradientStop before a gradient", NULL);
+        if (!zv_paint_add_stop(&sc->gradient, v[0], straight))
+            return fail(err, errcap, line, "bad gradient stop", NULL);
+        return true;
+    }
+    if (strcmp(cmd, "fillGradient") == 0)
+    {
+        if (count != 1 || sc->gradient.type == ZV_PAINT_SOLID)
+            return fail(err, errcap, line, "fillGradient needs a gradient", NULL);
+        sc->fill = sc->gradient;
+        return true;
+    }
+    if (strcmp(cmd, "patternImage") == 0)
+    {
+        int w, h;
+        if (count != 3 || !parse_int(tokens[1], &w) || !parse_int(tokens[2], &h) || w <= 0 || h <= 0 || w > 1024 || h > 1024)
+            return fail(err, errcap, line, "patternImage needs w h", NULL);
+        zv_surface_release(&sc->pattern_image);
+        if (!make_pattern_image(&sc->pattern_image, w, h))
+            return fail(err, errcap, line, "out of memory", NULL);
+        return true;
+    }
+    if (strcmp(cmd, "fillPattern") == 0)
+    {
+        if (count != 2 || !sc->pattern_image.pixels)
+            return fail(err, errcap, line, "fillPattern needs a repetition after patternImage", NULL);
+        bool rx, ry;
+        if (strcmp(tokens[1], "repeat") == 0)
+            rx = ry = true;
+        else if (strcmp(tokens[1], "repeat-x") == 0)
+        {
+            rx = true;
+            ry = false;
+        }
+        else if (strcmp(tokens[1], "repeat-y") == 0)
+        {
+            rx = false;
+            ry = true;
+        }
+        else if (strcmp(tokens[1], "no-repeat") == 0)
+            rx = ry = false;
+        else
+            return fail(err, errcap, line, "fillPattern needs repeat, repeat-x, repeat-y or no-repeat", NULL);
+        sc->pattern = zv_paint_pattern(&sc->pattern_image, rx, ry, sc->pattern.filter);
+        sc->fill = sc->pattern;
+        return true;
+    }
+    if (strcmp(cmd, "patternTransform") == 0)
+    {
+        if (!parse_floats(tokens, count, 6, v, line, err, errcap, "patternTransform needs a b c d e f"))
+            return false;
+        if (sc->fill.type != ZV_PAINT_PATTERN)
+            return fail(err, errcap, line, "patternTransform before fillPattern", NULL);
+        sc->fill.matrix = zv_matrix_make(v[0], v[1], v[2], v[3], v[4], v[5]);
+        sc->pattern.matrix = sc->fill.matrix;
+        return true;
+    }
+    if (strcmp(cmd, "imageSmoothingEnabled") == 0)
+    {
+        if (count != 2 || (strcmp(tokens[1], "true") != 0 && strcmp(tokens[1], "false") != 0))
+            return fail(err, errcap, line, "imageSmoothingEnabled needs true or false", NULL);
+        sc->pattern.filter = tokens[1][0] == 't' ? ZV_FILTER_BILINEAR : ZV_FILTER_NEAREST;
+        if (sc->fill.type == ZV_PAINT_PATTERN)
+            sc->fill.filter = sc->pattern.filter;
         return true;
     }
     if (strcmp(cmd, "fillRect") == 0)
@@ -216,7 +341,11 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
 
     Scene sc;
     memset(&sc, 0, sizeof sc);
-    sc.fill = 0xFF000000u;
+    sc.fill = zv_paint_solid(0xFF000000u);
+    sc.gradient = zv_paint_solid(0);
+    sc.pattern = zv_paint_solid(0);
+    sc.pattern.filter = ZV_FILTER_BILINEAR;
+    sc.global_alpha = 255;
     zv_path_init(&sc.path, NULL);
     zv_polyline_init(&sc.poly, NULL);
     zv_rasterizer_init(&sc.raster, NULL);
@@ -262,6 +391,7 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
             zv_surface_store(&sc.surface, out);
     }
     zv_rasterizer_release(&sc.raster);
+    zv_surface_release(&sc.pattern_image);
     zv_polyline_release(&sc.poly);
     zv_path_release(&sc.path);
     zv_surface_release(&sc.surface);

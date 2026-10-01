@@ -1,0 +1,8 @@
+# Linear gradient with three stops, diagonal, over the whole canvas.
+size 64 48
+gradientLinear 8 8 56 40
+gradientStop 0 #ff0000
+gradientStop 0.5 #00ff00
+gradientStop 1 #0000ff
+fillGradient
+fillRect 0 0 64 48

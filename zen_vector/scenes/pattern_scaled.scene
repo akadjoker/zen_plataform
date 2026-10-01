@@ -1,0 +1,8 @@
+# The pattern scaled up 3x with bilinear filtering and no repetition.
+size 64 64
+fillStyle #ffffff
+fillRect 0 0 64 64
+patternImage 16 16
+fillPattern no-repeat
+patternTransform 3 0 0 3 8 8
+fillRect 0 0 64 64
