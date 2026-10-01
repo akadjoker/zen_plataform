@@ -1,0 +1,33 @@
+# Zigzags with the three joins, miter limit in play on the sharpest corner.
+size 160 120
+fillStyle #ffffff
+fillRect 0 0 160 120
+strokeStyle #203060
+lineWidth 10
+lineJoin miter
+beginPath
+moveTo 10 30
+lineTo 40 10
+lineTo 50 30
+lineTo 80 12
+lineTo 110 30
+lineTo 150 10
+stroke
+lineJoin round
+beginPath
+moveTo 10 70
+lineTo 40 50
+lineTo 50 70
+lineTo 80 52
+lineTo 110 70
+lineTo 150 50
+stroke
+lineJoin bevel
+beginPath
+moveTo 10 110
+lineTo 40 90
+lineTo 50 110
+lineTo 80 92
+lineTo 110 110
+lineTo 150 90
+stroke

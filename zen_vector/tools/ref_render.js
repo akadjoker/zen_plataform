@@ -46,7 +46,7 @@ function writeBmp(path, width, height, rgba) {
 // Runs inside the page. Returns { width, height, data } with data as base64 RGBA.
 function renderInPage(text) {
   const properties = new Set(['fillStyle', 'strokeStyle', 'lineWidth', 'lineCap', 'lineJoin', 'miterLimit',
-    'globalAlpha', 'globalCompositeOperation', 'lineDashOffset', 'imageSmoothingEnabled']);
+    'globalAlpha', 'globalCompositeOperation', 'lineDashOffset', 'imageSmoothingEnabled', 'shadowColor', 'shadowBlur', 'shadowOffsetX', 'shadowOffsetY', 'textAlign', 'textBaseline']);
   let canvas = null, ctx = null;
   let gradient = null, patternImage = null, pattern = null;
   const makePatternImage = (w, h) => {
@@ -92,6 +92,11 @@ function renderInPage(text) {
     if (cmd === 'patternImage') { patternImage = makePatternImage(nums[0], nums[1]); continue; }
     if (cmd === 'fillPattern') { pattern = ctx.createPattern(patternImage, args[0]); ctx.fillStyle = pattern; continue; }
     if (cmd === 'patternTransform') { pattern.setTransform(new DOMMatrix(nums)); continue; }
+    if (cmd === 'setLineDash') { ctx.setLineDash(nums); continue; }
+    if (cmd === 'drawImage') { ctx.drawImage(patternImage, ...nums); continue; }
+    if (cmd === 'font') { ctx.font = nums[0] + 'px ZvTestFont'; continue; }
+    if (cmd === 'fillText' || cmd === 'strokeText') { ctx[cmd](args.slice(2).join(' '), nums[0], nums[1]); continue; }
+    if (cmd === 'arc' || cmd === 'ellipse') { ctx[cmd](...args.map((a) => (a === 'true' ? true : a === 'false' ? false : Number(a)))); continue; }
     if (properties.has(cmd)) {
       const value = args.join(' ');
       ctx[cmd] = /^-?[0-9.]+$/.test(value) ? Number(value) : (value === 'true' ? true : value === 'false' ? false : value);
@@ -118,6 +123,14 @@ function renderInPage(text) {
   let status = 0;
   try {
     const page = await browser.newPage({ deviceScaleFactor: 1 });
+    const fontPath = process.env.ZV_SCENE_FONT || '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+    const fontData = fs.readFileSync(fontPath).toString('base64');
+    await page.setContent('<html><body></body></html>');
+    await page.evaluate(async (data) => {
+      const face = new FontFace('ZvTestFont', 'url(data:font/ttf;base64,' + data + ')');
+      await face.load();
+      document.fonts.add(face);
+    }, fontData);
     for (let i = 0; i < args.length; i += 2) {
       try {
         const result = await page.evaluate(renderInPage, fs.readFileSync(args[i], 'utf8'));

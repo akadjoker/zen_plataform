@@ -1,0 +1,20 @@
+# Text filled and stroked with the test font.
+size 220 120
+fillStyle #ffffff
+fillRect 0 0 220 120
+fillStyle #202020
+font 28
+fillText 10 40 Hello zen
+font 16
+textAlign center
+fillText 110 70 centered text
+textAlign right
+textBaseline top
+fillStyle #a02020
+fillText 210 75 right
+textAlign left
+textBaseline alphabetic
+strokeStyle #2040a0
+lineWidth 1
+font 36
+strokeText 10 112 ABC xyz

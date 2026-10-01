@@ -1,0 +1,31 @@
+# arc, arcTo, ellipse and roundRect filled and stroked.
+size 160 120
+fillStyle #ffffff
+fillRect 0 0 160 120
+fillStyle #d04040
+beginPath
+arc 30 30 22 0.5 5.2
+fill
+strokeStyle #000000
+lineWidth 2
+beginPath
+moveTo 70 10
+arcTo 110 10 110 50 20
+lineTo 110 50
+stroke
+fillStyle #4080c0
+beginPath
+ellipse 130 30 20 10 0.6 0 6.2831853
+fill
+fillStyle #40a040
+beginPath
+roundRect 10.5 70.5 60 40 12
+fill
+strokeStyle #202020
+lineWidth 3
+beginPath
+roundRect 90 70 60 40 20
+stroke
+beginPath
+arc 120 90 10 3.14159 6.28318 true
+stroke

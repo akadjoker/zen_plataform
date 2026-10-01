@@ -1,0 +1,24 @@
+# Nested clips: a circle clip then a rotated square, saved and restored.
+size 100 100
+fillStyle #ffffff
+fillRect 0 0 100 100
+save
+beginPath
+arc 50 50 40 0 6.2831853
+clip
+fillStyle #e0a020
+fillRect 0 0 100 100
+save
+translate 50 50
+rotate 0.785398
+beginPath
+rect -25 -25 50 50
+clip
+fillStyle #2060c0
+fillRect -100 -100 200 200
+restore
+fillStyle #20a060
+fillRect 0 0 100 20
+restore
+fillStyle #000000
+fillRect 0 90 100 10

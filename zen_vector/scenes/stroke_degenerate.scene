@@ -1,0 +1,35 @@
+# Zero-length subpaths, repeated points, a reversal, square cap on a single point.
+size 80 60
+fillStyle #ffffff
+fillRect 0 0 80 60
+strokeStyle #000000
+lineWidth 10
+lineCap round
+beginPath
+moveTo 15 15
+lineTo 15 15
+stroke
+lineCap square
+beginPath
+moveTo 40 15
+lineTo 40 15
+stroke
+lineCap butt
+beginPath
+moveTo 65 15
+lineTo 65 15
+stroke
+lineJoin round
+lineWidth 6
+beginPath
+moveTo 10 45
+lineTo 40 45
+lineTo 40 45
+lineTo 20 45
+stroke
+lineJoin miter
+beginPath
+moveTo 50 45
+lineTo 70 45
+lineTo 50 45
+stroke

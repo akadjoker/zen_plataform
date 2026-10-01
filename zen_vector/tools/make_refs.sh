@@ -7,4 +7,4 @@ for scene in "$here"/scenes/*.scene; do
     name="$(basename "$scene" .scene)"
     args="$args $scene $here/refs/$name.bmp"
 done
-node "$here/tools/ref_render.js" $args
+ZV_SCENE_FONT="$here/fonts/DejaVuSans.ttf" node "$here/tools/ref_render.js" $args

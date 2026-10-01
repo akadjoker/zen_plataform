@@ -1,25 +1,37 @@
 #include "scene.h"
-#include "zv_fill.h"
+#include "zv_canvas.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_TOKENS 8
+#define MAX_TOKENS 40
+
+#ifndef ZV_SCENE_FONT
+#define ZV_SCENE_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+#endif
+
+static const char *g_font_path = ZV_SCENE_FONT;
+
+void zv_scene_set_font_path(const char *path)
+{
+    g_font_path = path ? path : ZV_SCENE_FONT;
+}
 
 typedef struct
 {
     ZvSurface surface;
+    ZvCanvas canvas;
     bool have_size;
-    ZvPaint fill;     /* current fillStyle */
-    ZvPaint gradient; /* gradient being built */
-    ZvPaint pattern;  /* pattern being built */
+    ZvPaint gradient;
     ZvSurface pattern_image;
-    uint32_t global_alpha;
-    ZvPath path;
-    ZvPolyline poly;
-    ZvRasterizer raster;
+    ZvPaint pattern;
+    ZvFilter pattern_filter;
+    ZvFont font;
+    uint8_t *font_data;
+    size_t font_size;
+    bool font_loaded;
 } Scene;
 
 static bool fail(char *err, size_t errcap, int line, const char *fmt, const char *arg)
@@ -75,10 +87,7 @@ static bool parse_color(const char *s, uint32_t *out)
             return false;
         v = v << 4 | (uint32_t)d;
     }
-    if (len == 7)
-        *out = 0xFF000000u | v;
-    else
-        *out = (v & 0xFFu) << 24 | v >> 8;
+    *out = len == 7 ? 0xFF000000u | v : (v & 0xFFu) << 24 | v >> 8;
     return true;
 }
 
@@ -100,10 +109,10 @@ static int tokenize(char *line, char *tokens[], int max)
     return n;
 }
 
-static bool parse_floats(char *tokens[], int count, int needed, float *v, int line, char *err, size_t errcap, const char *usage)
+static bool args(char *tokens[], int count, int needed, float *v, int line, char *err, size_t errcap)
 {
     if (count != needed + 1)
-        return fail(err, errcap, line, "%s", usage);
+        return fail(err, errcap, line, "%s takes a different number of arguments", tokens[0]);
     for (int i = 0; i < needed; i++)
     {
         if (!parse_float(tokens[i + 1], &v[i]))
@@ -112,24 +121,6 @@ static bool parse_floats(char *tokens[], int count, int needed, float *v, int li
     return true;
 }
 
-static bool fill_path(Scene *sc, const ZvPath *path, ZvFillRule rule)
-{
-    zv_polyline_clear(&sc->poly);
-    if (!zv_path_flatten(path, NULL, ZV_FLATTEN_TOLERANCE, &sc->poly))
-        return false;
-    ZvPaint paint = sc->fill;
-    paint.alpha = sc->global_alpha;
-    ZvPaintContext ctx;
-    if (!zv_paint_prepare(&ctx, &paint, NULL, NULL))
-        return false;
-    bool ok = zv_fill_polyline(&sc->surface, &sc->poly, rule, &ctx, NULL, &sc->raster);
-    zv_paint_release(&ctx);
-    return ok;
-}
-
-/* The pattern test image: red grows with x, green with y, blue is a 4x4
-   checkerboard, the top-left quarter is half transparent. The browser builds
-   the same picture in ref_render.js. */
 static bool make_pattern_image(ZvSurface *s, int w, int h)
 {
     if (!zv_surface_init(s, NULL, w, h))
@@ -148,10 +139,32 @@ static bool make_pattern_image(ZvSurface *s, int w, int h)
     return true;
 }
 
+static bool load_font(Scene *sc)
+{
+    if (sc->font_loaded)
+        return true;
+    size_t size = 0;
+    uint8_t *data = file_read(g_font_path, &size);
+    if (!data)
+        return false;
+    sc->font_data = malloc(size);
+    if (!sc->font_data)
+    {
+        fs_free(data);
+        return false;
+    }
+    memcpy(sc->font_data, data, size);
+    fs_free(data);
+    sc->font_size = size;
+    sc->font_loaded = zv_font_init(&sc->font, sc->font_data, sc->font_size, NULL);
+    return sc->font_loaded;
+}
+
 static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, size_t errcap)
 {
     const char *cmd = tokens[0];
-    float v[6];
+    float v[8];
+    ZvCanvas *c = &sc->canvas;
 
     if (strcmp(cmd, "size") == 0)
     {
@@ -162,38 +175,270 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
             return fail(err, errcap, line, "size may appear only once", NULL);
         if (!zv_surface_init(&sc->surface, NULL, w, h))
             return fail(err, errcap, line, "out of memory", NULL);
+        zv_canvas_init(c, &sc->surface, NULL);
         sc->have_size = true;
         return true;
     }
     if (!sc->have_size)
         return fail(err, errcap, line, "'%s' before size", cmd);
 
-    if (strcmp(cmd, "fillStyle") == 0)
+#define NUM(n) \
+    if (!args(tokens, count, n, v, line, err, errcap)) \
+        return false;
+#define OOM(x) ((x) || fail(err, errcap, line, "out of memory", NULL))
+
+    if (strcmp(cmd, "fillStyle") == 0 || strcmp(cmd, "strokeStyle") == 0 || strcmp(cmd, "shadowColor") == 0)
     {
         uint32_t straight;
         if (count != 2 || !parse_color(tokens[1], &straight))
-            return fail(err, errcap, line, "fillStyle needs #rrggbb or #rrggbbaa", NULL);
-        sc->fill = zv_paint_solid(straight);
+            return fail(err, errcap, line, "%s needs #rrggbb or #rrggbbaa", cmd);
+        if (cmd[0] == 'f')
+            zv_canvas_set_fill_color(c, straight);
+        else if (cmd[1] == 't')
+            zv_canvas_set_stroke_color(c, straight);
+        else
+            zv_canvas_set_shadow(c, straight, c->state.shadow_blur, c->state.shadow_x, c->state.shadow_y);
+        return true;
+    }
+    if (strcmp(cmd, "shadowBlur") == 0)
+    {
+        NUM(1);
+        zv_canvas_set_shadow(c, c->state.shadow_color, v[0], c->state.shadow_x, c->state.shadow_y);
+        return true;
+    }
+    if (strcmp(cmd, "shadowOffsetX") == 0)
+    {
+        NUM(1);
+        zv_canvas_set_shadow(c, c->state.shadow_color, c->state.shadow_blur, v[0], c->state.shadow_y);
+        return true;
+    }
+    if (strcmp(cmd, "shadowOffsetY") == 0)
+    {
+        NUM(1);
+        zv_canvas_set_shadow(c, c->state.shadow_color, c->state.shadow_blur, c->state.shadow_x, v[0]);
+        return true;
+    }
+    if (strcmp(cmd, "lineWidth") == 0)
+    {
+        NUM(1);
+        zv_canvas_set_line_width(c, v[0]);
+        return true;
+    }
+    if (strcmp(cmd, "miterLimit") == 0)
+    {
+        NUM(1);
+        zv_canvas_set_miter_limit(c, v[0]);
+        return true;
+    }
+    if (strcmp(cmd, "lineDashOffset") == 0)
+    {
+        NUM(1);
+        zv_canvas_set_line_dash_offset(c, v[0]);
         return true;
     }
     if (strcmp(cmd, "globalAlpha") == 0)
     {
-        if (!parse_floats(tokens, count, 1, v, line, err, errcap, "globalAlpha needs a value") || v[0] < 0.0f || v[0] > 1.0f)
-            return fail(err, errcap, line, "globalAlpha needs a value from 0 to 1", NULL);
-        sc->global_alpha = (uint32_t)(v[0] * 255.0f + 0.5f);
+        NUM(1);
+        zv_canvas_set_global_alpha(c, v[0]);
         return true;
     }
+    if (strcmp(cmd, "lineCap") == 0)
+    {
+        if (count != 2)
+            return fail(err, errcap, line, "lineCap needs a value", NULL);
+        if (strcmp(tokens[1], "butt") == 0)
+            zv_canvas_set_line_cap(c, ZV_CAP_BUTT);
+        else if (strcmp(tokens[1], "round") == 0)
+            zv_canvas_set_line_cap(c, ZV_CAP_ROUND);
+        else if (strcmp(tokens[1], "square") == 0)
+            zv_canvas_set_line_cap(c, ZV_CAP_SQUARE);
+        else
+            return fail(err, errcap, line, "unknown lineCap '%s'", tokens[1]);
+        return true;
+    }
+    if (strcmp(cmd, "lineJoin") == 0)
+    {
+        if (count != 2)
+            return fail(err, errcap, line, "lineJoin needs a value", NULL);
+        if (strcmp(tokens[1], "miter") == 0)
+            zv_canvas_set_line_join(c, ZV_JOIN_MITER);
+        else if (strcmp(tokens[1], "round") == 0)
+            zv_canvas_set_line_join(c, ZV_JOIN_ROUND);
+        else if (strcmp(tokens[1], "bevel") == 0)
+            zv_canvas_set_line_join(c, ZV_JOIN_BEVEL);
+        else
+            return fail(err, errcap, line, "unknown lineJoin '%s'", tokens[1]);
+        return true;
+    }
+    if (strcmp(cmd, "setLineDash") == 0)
+    {
+        float d[ZV_MAX_DASHES];
+        if (count - 1 > ZV_MAX_DASHES / 2)
+            return fail(err, errcap, line, "too many dashes", NULL);
+        for (int i = 1; i < count; i++)
+        {
+            if (!parse_float(tokens[i], &d[i - 1]))
+                return fail(err, errcap, line, "'%s' is not a number", tokens[i]);
+        }
+        zv_canvas_set_line_dash(c, d, count - 1);
+        return true;
+    }
+    if (strcmp(cmd, "globalCompositeOperation") == 0)
+    {
+        ZvCompositeOp op;
+        if (count != 2 || !zv_composite_op_parse(tokens[1], &op))
+            return fail(err, errcap, line, "unknown composite operation", NULL);
+        zv_canvas_set_composite_op(c, op);
+        return true;
+    }
+    if (strcmp(cmd, "imageSmoothingEnabled") == 0)
+    {
+        if (count != 2 || (strcmp(tokens[1], "true") != 0 && strcmp(tokens[1], "false") != 0))
+            return fail(err, errcap, line, "imageSmoothingEnabled needs true or false", NULL);
+        zv_canvas_set_image_smoothing(c, tokens[1][0] == 't');
+        sc->pattern_filter = tokens[1][0] == 't' ? ZV_FILTER_BILINEAR : ZV_FILTER_NEAREST;
+        return true;
+    }
+    if (strcmp(cmd, "translate") == 0)
+    {
+        NUM(2);
+        zv_canvas_translate(c, v[0], v[1]);
+        return true;
+    }
+    if (strcmp(cmd, "scale") == 0)
+    {
+        NUM(2);
+        zv_canvas_scale(c, v[0], v[1]);
+        return true;
+    }
+    if (strcmp(cmd, "rotate") == 0)
+    {
+        NUM(1);
+        zv_canvas_rotate(c, v[0]);
+        return true;
+    }
+    if (strcmp(cmd, "transform") == 0)
+    {
+        NUM(6);
+        zv_canvas_transform(c, v[0], v[1], v[2], v[3], v[4], v[5]);
+        return true;
+    }
+    if (strcmp(cmd, "setTransform") == 0)
+    {
+        NUM(6);
+        zv_canvas_set_transform(c, v[0], v[1], v[2], v[3], v[4], v[5]);
+        return true;
+    }
+    if (strcmp(cmd, "resetTransform") == 0)
+    {
+        zv_canvas_reset_transform(c);
+        return true;
+    }
+    if (strcmp(cmd, "save") == 0)
+    {
+        zv_canvas_save(c);
+        return true;
+    }
+    if (strcmp(cmd, "restore") == 0)
+    {
+        zv_canvas_restore(c);
+        return true;
+    }
+    if (strcmp(cmd, "fillRect") == 0)
+    {
+        NUM(4);
+        return OOM(zv_canvas_fill_rect(c, v[0], v[1], v[2], v[3]));
+    }
+    if (strcmp(cmd, "strokeRect") == 0)
+    {
+        NUM(4);
+        return OOM(zv_canvas_stroke_rect(c, v[0], v[1], v[2], v[3]));
+    }
+    if (strcmp(cmd, "clearRect") == 0)
+    {
+        NUM(4);
+        return OOM(zv_canvas_clear_rect(c, v[0], v[1], v[2], v[3]));
+    }
+    if (strcmp(cmd, "beginPath") == 0)
+    {
+        zv_canvas_begin_path(c);
+        return true;
+    }
+    if (strcmp(cmd, "closePath") == 0)
+        return OOM(zv_canvas_close_path(c));
+    if (strcmp(cmd, "moveTo") == 0)
+    {
+        NUM(2);
+        return OOM(zv_canvas_move_to(c, v[0], v[1]));
+    }
+    if (strcmp(cmd, "lineTo") == 0)
+    {
+        NUM(2);
+        return OOM(zv_canvas_line_to(c, v[0], v[1]));
+    }
+    if (strcmp(cmd, "quadraticCurveTo") == 0)
+    {
+        NUM(4);
+        return OOM(zv_canvas_quadratic_curve_to(c, v[0], v[1], v[2], v[3]));
+    }
+    if (strcmp(cmd, "bezierCurveTo") == 0)
+    {
+        NUM(6);
+        return OOM(zv_canvas_bezier_curve_to(c, v[0], v[1], v[2], v[3], v[4], v[5]));
+    }
+    if (strcmp(cmd, "rect") == 0)
+    {
+        NUM(4);
+        return OOM(zv_canvas_rect(c, v[0], v[1], v[2], v[3]));
+    }
+    if (strcmp(cmd, "roundRect") == 0)
+    {
+        NUM(5);
+        return OOM(zv_canvas_round_rect(c, v[0], v[1], v[2], v[3], &v[4], 1));
+    }
+    if (strcmp(cmd, "arc") == 0)
+    {
+        bool ccw = count == 7 && strcmp(tokens[6], "true") == 0;
+        if (ccw)
+            count--;
+        NUM(5);
+        return OOM(zv_canvas_arc(c, v[0], v[1], v[2], v[3], v[4], ccw));
+    }
+    if (strcmp(cmd, "arcTo") == 0)
+    {
+        NUM(5);
+        return OOM(zv_canvas_arc_to(c, v[0], v[1], v[2], v[3], v[4]));
+    }
+    if (strcmp(cmd, "ellipse") == 0)
+    {
+        bool ccw = count == 9 && strcmp(tokens[8], "true") == 0;
+        if (ccw)
+            count--;
+        NUM(7);
+        return OOM(zv_canvas_ellipse(c, v[0], v[1], v[2], v[3], v[4], v[5], v[6], ccw));
+    }
+    if (strcmp(cmd, "fill") == 0 || strcmp(cmd, "clip") == 0)
+    {
+        ZvFillRule rule = ZV_FILL_NONZERO;
+        if (count == 2 && strcmp(tokens[1], "evenodd") == 0)
+            rule = ZV_FILL_EVENODD;
+        else if (count == 2 && strcmp(tokens[1], "nonzero") == 0)
+            rule = ZV_FILL_NONZERO;
+        else if (count != 1)
+            return fail(err, errcap, line, "%s takes nonzero or evenodd", cmd);
+        return OOM(cmd[0] == 'f' ? zv_canvas_fill(c, rule) : zv_canvas_clip(c, rule));
+    }
+    if (strcmp(cmd, "stroke") == 0)
+        return OOM(zv_canvas_stroke(c));
     if (strcmp(cmd, "gradientLinear") == 0)
     {
-        if (!parse_floats(tokens, count, 4, v, line, err, errcap, "gradientLinear needs x0 y0 x1 y1"))
-            return false;
+        NUM(4);
         sc->gradient = zv_paint_linear(v[0], v[1], v[2], v[3]);
         return true;
     }
     if (strcmp(cmd, "gradientRadial") == 0)
     {
-        if (!parse_floats(tokens, count, 6, v, line, err, errcap, "gradientRadial needs x0 y0 r0 x1 y1 r1"))
-            return false;
+        NUM(6);
         sc->gradient = zv_paint_radial(v[0], v[1], v[2], v[3], v[4], v[5]);
         return true;
     }
@@ -202,17 +447,18 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
         uint32_t straight;
         if (count != 3 || !parse_float(tokens[1], &v[0]) || !parse_color(tokens[2], &straight))
             return fail(err, errcap, line, "gradientStop needs offset #rrggbb[aa]", NULL);
-        if (sc->gradient.type == ZV_PAINT_SOLID)
-            return fail(err, errcap, line, "gradientStop before a gradient", NULL);
-        if (!zv_paint_add_stop(&sc->gradient, v[0], straight))
+        if (sc->gradient.type == ZV_PAINT_SOLID || !zv_paint_add_stop(&sc->gradient, v[0], straight))
             return fail(err, errcap, line, "bad gradient stop", NULL);
         return true;
     }
-    if (strcmp(cmd, "fillGradient") == 0)
+    if (strcmp(cmd, "fillGradient") == 0 || strcmp(cmd, "strokeGradient") == 0)
     {
-        if (count != 1 || sc->gradient.type == ZV_PAINT_SOLID)
-            return fail(err, errcap, line, "fillGradient needs a gradient", NULL);
-        sc->fill = sc->gradient;
+        if (sc->gradient.type == ZV_PAINT_SOLID)
+            return fail(err, errcap, line, "%s needs a gradient", cmd);
+        if (cmd[0] == 'f')
+            zv_canvas_set_fill_paint(c, &sc->gradient);
+        else
+            zv_canvas_set_stroke_paint(c, &sc->gradient);
         return true;
     }
     if (strcmp(cmd, "patternImage") == 0)
@@ -221,9 +467,7 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
         if (count != 3 || !parse_int(tokens[1], &w) || !parse_int(tokens[2], &h) || w <= 0 || h <= 0 || w > 1024 || h > 1024)
             return fail(err, errcap, line, "patternImage needs w h", NULL);
         zv_surface_release(&sc->pattern_image);
-        if (!make_pattern_image(&sc->pattern_image, w, h))
-            return fail(err, errcap, line, "out of memory", NULL);
-        return true;
+        return OOM(make_pattern_image(&sc->pattern_image, w, h));
     }
     if (strcmp(cmd, "fillPattern") == 0)
     {
@@ -246,88 +490,74 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
             rx = ry = false;
         else
             return fail(err, errcap, line, "fillPattern needs repeat, repeat-x, repeat-y or no-repeat", NULL);
-        sc->pattern = zv_paint_pattern(&sc->pattern_image, rx, ry, sc->pattern.filter);
-        sc->fill = sc->pattern;
+        sc->pattern = zv_paint_pattern(&sc->pattern_image, rx, ry, sc->pattern_filter);
+        zv_canvas_set_fill_paint(c, &sc->pattern);
         return true;
     }
     if (strcmp(cmd, "patternTransform") == 0)
     {
-        if (!parse_floats(tokens, count, 6, v, line, err, errcap, "patternTransform needs a b c d e f"))
-            return false;
-        if (sc->fill.type != ZV_PAINT_PATTERN)
-            return fail(err, errcap, line, "patternTransform before fillPattern", NULL);
-        sc->fill.matrix = zv_matrix_make(v[0], v[1], v[2], v[3], v[4], v[5]);
-        sc->pattern.matrix = sc->fill.matrix;
+        NUM(6);
+        sc->pattern.matrix = zv_matrix_make(v[0], v[1], v[2], v[3], v[4], v[5]);
+        if (c->state.fill.type == ZV_PAINT_PATTERN)
+            c->state.fill.matrix = sc->pattern.matrix;
         return true;
     }
-    if (strcmp(cmd, "imageSmoothingEnabled") == 0)
+    if (strcmp(cmd, "drawImage") == 0)
     {
-        if (count != 2 || (strcmp(tokens[1], "true") != 0 && strcmp(tokens[1], "false") != 0))
-            return fail(err, errcap, line, "imageSmoothingEnabled needs true or false", NULL);
-        sc->pattern.filter = tokens[1][0] == 't' ? ZV_FILTER_BILINEAR : ZV_FILTER_NEAREST;
-        if (sc->fill.type == ZV_PAINT_PATTERN)
-            sc->fill.filter = sc->pattern.filter;
+        NUM(8);
+        if (!sc->pattern_image.pixels)
+            return fail(err, errcap, line, "drawImage needs patternImage first", NULL);
+        return OOM(zv_canvas_draw_image(c, &sc->pattern_image, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]));
+    }
+    if (strcmp(cmd, "font") == 0)
+    {
+        NUM(1);
+        if (!load_font(sc))
+            return fail(err, errcap, line, "cannot load the font %s", g_font_path);
+        zv_canvas_set_font(c, &sc->font, v[0]);
         return true;
     }
-    if (strcmp(cmd, "fillRect") == 0)
+    if (strcmp(cmd, "textAlign") == 0)
     {
-        if (!parse_floats(tokens, count, 4, v, line, err, errcap, "fillRect needs x y w h"))
-            return false;
-        ZvPath rect;
-        zv_path_init(&rect, NULL);
-        bool ok = zv_path_move_to(&rect, v[0], v[1]) && zv_path_line_to(&rect, v[0] + v[2], v[1]) &&
-                  zv_path_line_to(&rect, v[0] + v[2], v[1] + v[3]) && zv_path_line_to(&rect, v[0], v[1] + v[3]) && zv_path_close(&rect) &&
-                  fill_path(sc, &rect, ZV_FILL_NONZERO);
-        zv_path_release(&rect);
-        return ok || fail(err, errcap, line, "out of memory", NULL);
+        static const char *const names[] = {"start", "end", "left", "right", "center"};
+        for (int i = 0; i < 5; i++)
+        {
+            if (count == 2 && strcmp(tokens[1], names[i]) == 0)
+            {
+                zv_canvas_set_text_align(c, (ZvTextAlign)i);
+                return true;
+            }
+        }
+        return fail(err, errcap, line, "unknown textAlign", NULL);
     }
-    if (strcmp(cmd, "beginPath") == 0)
+    if (strcmp(cmd, "textBaseline") == 0)
     {
-        if (count != 1)
-            return fail(err, errcap, line, "beginPath takes no arguments", NULL);
-        zv_path_clear(&sc->path);
-        return true;
+        static const char *const names[] = {"alphabetic", "top", "middle", "bottom", "hanging", "ideographic"};
+        for (int i = 0; i < 6; i++)
+        {
+            if (count == 2 && strcmp(tokens[1], names[i]) == 0)
+            {
+                zv_canvas_set_text_baseline(c, (ZvTextBaseline)i);
+                return true;
+            }
+        }
+        return fail(err, errcap, line, "unknown textBaseline", NULL);
     }
-    if (strcmp(cmd, "moveTo") == 0)
+    if (strcmp(cmd, "fillText") == 0 || strcmp(cmd, "strokeText") == 0)
     {
-        if (!parse_floats(tokens, count, 2, v, line, err, errcap, "moveTo needs x y"))
-            return false;
-        return zv_path_move_to(&sc->path, v[0], v[1]) || fail(err, errcap, line, "out of memory", NULL);
-    }
-    if (strcmp(cmd, "lineTo") == 0)
-    {
-        if (!parse_floats(tokens, count, 2, v, line, err, errcap, "lineTo needs x y"))
-            return false;
-        return zv_path_line_to(&sc->path, v[0], v[1]) || fail(err, errcap, line, "out of memory", NULL);
-    }
-    if (strcmp(cmd, "quadraticCurveTo") == 0)
-    {
-        if (!parse_floats(tokens, count, 4, v, line, err, errcap, "quadraticCurveTo needs cx cy x y"))
-            return false;
-        return zv_path_quad_to(&sc->path, v[0], v[1], v[2], v[3]) || fail(err, errcap, line, "out of memory", NULL);
-    }
-    if (strcmp(cmd, "bezierCurveTo") == 0)
-    {
-        if (!parse_floats(tokens, count, 6, v, line, err, errcap, "bezierCurveTo needs c1x c1y c2x c2y x y"))
-            return false;
-        return zv_path_cubic_to(&sc->path, v[0], v[1], v[2], v[3], v[4], v[5]) || fail(err, errcap, line, "out of memory", NULL);
-    }
-    if (strcmp(cmd, "closePath") == 0)
-    {
-        if (count != 1)
-            return fail(err, errcap, line, "closePath takes no arguments", NULL);
-        return zv_path_close(&sc->path) || fail(err, errcap, line, "out of memory", NULL);
-    }
-    if (strcmp(cmd, "fill") == 0)
-    {
-        ZvFillRule rule = ZV_FILL_NONZERO;
-        if (count == 2 && strcmp(tokens[1], "evenodd") == 0)
-            rule = ZV_FILL_EVENODD;
-        else if (count == 2 && strcmp(tokens[1], "nonzero") == 0)
-            rule = ZV_FILL_NONZERO;
-        else if (count != 1)
-            return fail(err, errcap, line, "fill takes nonzero or evenodd", NULL);
-        return fill_path(sc, &sc->path, rule) || fail(err, errcap, line, "out of memory", NULL);
+        if (count < 4 || !parse_float(tokens[1], &v[0]) || !parse_float(tokens[2], &v[1]))
+            return fail(err, errcap, line, "%s needs x y text", cmd);
+        if (!c->state.font)
+            return fail(err, errcap, line, "%s before font", cmd);
+        char text[512];
+        text[0] = '\0';
+        for (int i = 3; i < count; i++)
+        {
+            if (i > 3)
+                strncat(text, " ", sizeof text - strlen(text) - 1);
+            strncat(text, tokens[i], sizeof text - strlen(text) - 1);
+        }
+        return OOM(cmd[0] == 'f' ? zv_canvas_fill_text(c, text, v[0], v[1]) : zv_canvas_stroke_text(c, text, v[0], v[1]));
     }
     return fail(err, errcap, line, "unknown command '%s'", cmd);
 }
@@ -341,14 +571,9 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
 
     Scene sc;
     memset(&sc, 0, sizeof sc);
-    sc.fill = zv_paint_solid(0xFF000000u);
     sc.gradient = zv_paint_solid(0);
     sc.pattern = zv_paint_solid(0);
-    sc.pattern.filter = ZV_FILTER_BILINEAR;
-    sc.global_alpha = 255;
-    zv_path_init(&sc.path, NULL);
-    zv_polyline_init(&sc.poly, NULL);
-    zv_rasterizer_init(&sc.raster, NULL);
+    sc.pattern_filter = ZV_FILTER_BILINEAR;
 
     size_t len = strlen(text);
     char *copy = malloc(len + 1);
@@ -364,7 +589,6 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
         if (next)
             *next++ = '\0';
         line_no++;
-
         char *p = line;
         while (*p == ' ' || *p == '\t' || *p == '\r')
             p++;
@@ -390,10 +614,12 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
         else
             zv_surface_store(&sc.surface, out);
     }
-    zv_rasterizer_release(&sc.raster);
+    if (sc.have_size)
+        zv_canvas_release(&sc.canvas);
+    if (sc.font_loaded)
+        zv_font_release(&sc.font);
+    free(sc.font_data);
     zv_surface_release(&sc.pattern_image);
-    zv_polyline_release(&sc.poly);
-    zv_path_release(&sc.path);
     zv_surface_release(&sc.surface);
     return ok;
 }

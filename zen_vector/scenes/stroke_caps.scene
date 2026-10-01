@@ -1,0 +1,50 @@
+# Lines with the three caps and widths from 0.1 to 50 pixels.
+size 160 160
+fillStyle #ffffff
+fillRect 0 0 160 160
+strokeStyle #000000
+lineCap butt
+lineWidth 50
+beginPath
+moveTo 40 30
+lineTo 120 30
+stroke
+lineCap round
+lineWidth 20
+beginPath
+moveTo 40 75
+lineTo 120 75
+stroke
+lineCap square
+lineWidth 8
+beginPath
+moveTo 40 100
+lineTo 120 100
+stroke
+lineCap butt
+lineWidth 2.5
+beginPath
+moveTo 20 115.5
+lineTo 140 115.5
+stroke
+lineWidth 1
+beginPath
+moveTo 20 125.5
+lineTo 140 125.5
+stroke
+lineWidth 0.5
+beginPath
+moveTo 20 135
+lineTo 140 135
+stroke
+lineWidth 0.1
+beginPath
+moveTo 20 145
+lineTo 140 148
+stroke
+lineCap round
+lineWidth 1.5
+beginPath
+moveTo 20 152
+lineTo 140 156
+stroke

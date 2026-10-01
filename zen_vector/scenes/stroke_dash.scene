@@ -1,0 +1,23 @@
+# Dashes with an offset, round caps, around a rectangle and a curve.
+size 120 120
+fillStyle #ffffff
+fillRect 0 0 120 120
+strokeStyle #a02020
+lineWidth 4
+setLineDash 12 6 3 6
+lineDashOffset 5
+strokeRect 15.5 15.5 90 50
+lineCap round
+setLineDash 1 9
+lineWidth 5
+beginPath
+moveTo 10 110
+bezierCurveTo 40 70 80 70 110 110
+stroke
+setLineDash 7
+lineWidth 2
+lineCap butt
+beginPath
+moveTo 10 80
+lineTo 110 80
+stroke

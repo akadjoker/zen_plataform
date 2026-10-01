@@ -1,6 +1,6 @@
 # Plano: zen_vector (rasterizador vetorial com APIs Canvas 2D e Flash)
 
-Estado: Fases 0 a 4 concluídas (ver `FASE0.md`, `FASE1.md`, `FASE3.md`, `FASE4.md`). Próxima: Fase 5.
+Estado: todas as fases concluídas (ver `FASE0.md`, `FASE1.md`, `FASE3.md`, `FASE4.md`, `FASE5-11.md`).
 
 Objetivo: biblioteca que desenha gráficos vetoriais com qualidade ao nível do Canvas do browser sobre um `Framebuffer` do zen_platform, sem dependências de terceiros. Serve de base à ferramenta de animação estilo Flash.
 
@@ -95,8 +95,8 @@ Fora deste plano (pertencem à ferramenta de animação): timeline, MCP, export 
 - **Linguagem:** decidido na Fase 1: C, como o zen_platform. Razões em `FASE1.md`. Uma camada C++ fina por cima fica em aberto para as fases 7 e 8, se for útil.
 - **Referência para as imagens:** Chrome headless (o Canvas real), Skia ou Cairo. A especificação do Canvas não define o anti-aliasing ao pixel, por isso nunca haverá igualdade exata com o Chrome; a tolerância tem de ser definida com dados na Fase 0, não à partida.
 - **Testes públicos do Canvas:** os web-platform-tests têm testes de canvas 2D; precisamos de verificar quais se podem usar fora do browser e em que licença.
-- **Threads:** o zen_platform deixou threads de fora. Na Fase 9 é preciso decidir se o zen_vector tem uma camada de threads própria. Na Web, pthreads exigem SharedArrayBuffer e cabeçalhos COOP/COEP.
+- **Threads:** decidido na Fase 9: sem threads nem tiles (ver `FASE5-11.md`).
 - **Semântica exata do Flash:** `focalPointRatio`, `scaleMode` dos traços, `pixelHinting`, interpolação `linearRGB` dos gradientes. Fontes a confirmar: a referência de ActionScript 3 da Adobe (verificar se ainda está acessível) e o código do NME e do OpenFL.
 - **Licenças:** se algum código do NME, OpenFL ou AGG for portado e não apenas estudado, verificar as licenças de cada um antes.
-- **Subconjunto de `globalCompositeOperation` e `blendMode`:** depende do que a ferramenta de animação vai precisar; definir antes da Fase 7.
+- **Subconjunto de `globalCompositeOperation` e `blendMode`:** definido na Fase 7 (15 operações) e na Fase 8 (9 modos).
 - **Texto complexo:** shaping (árabe, ligaduras, etc.) normalmente exige HarfBuzz, que é uma dependência. Fica fora até haver decisão.

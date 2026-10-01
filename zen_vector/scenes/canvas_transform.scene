@@ -1,0 +1,17 @@
+# Transforms: rotated and scaled fills, setTransform and transform.
+size 120 120
+fillStyle #ffffff
+fillRect 0 0 120 120
+translate 60 60
+rotate 0.3
+fillStyle #c04040
+fillRect -30 -20 60 40
+setTransform 1 0.5 0 1 10 70
+fillStyle #4040c0
+fillRect 0 0 40 30
+resetTransform
+transform 0.5 0 0 2 80 10
+fillStyle #40a040
+beginPath
+arc 20 20 15 0 6.2831853
+fill
