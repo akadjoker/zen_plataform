@@ -75,8 +75,9 @@ jobs:
         run: |
           $bad = @()
           foreach ($exe in Get-ChildItem build/examples/Release/*.exe, build/tests/Release/*.exe) {
-            $deps = (& dumpbin /dependents $exe.FullName) -join "`n"
-            if ($deps -match '(?i)vcruntime|msvcp|msvcr|ucrtbase|api-ms-win-crt') { $bad += $exe.Name }
+            $dlls = (& dumpbin /dependents $exe.FullName | Select-String -Pattern '^\s+\S+\.dll\s*$' | ForEach-Object { $_.Line.Trim() })
+            Write-Host "$($exe.Name): $($dlls -join ', ')"
+            if ($dlls | Where-Object { $_ -match '(?i)^(vcruntime|msvcp|msvcr|ucrtbase|api-ms-win-crt)' }) { $bad += $exe.Name }
           }
           if ($bad.Count -gt 0) { Write-Error "runtime DLL dependency in: $($bad -join ', ')"; exit 1 }
           Write-Host "no runtime DLL dependency"

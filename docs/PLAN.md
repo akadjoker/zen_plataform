@@ -5,7 +5,7 @@ de depender do SDL2, passando a usar o `zen_platform`. Sem DLLs, build rápido e
 binários pequenos. **Regra: só entra o que os engines usam.** Fora do plano:
 threads, mutex, áudio, SDL_Renderer, logging, storage SDL3 completo.
 
-Estado: Fases 1 a 6 concluidas. Proxima: Fase 7.
+Estado: Fases 1 a 7 concluidas, com CI em Linux, Windows (MSVC e MinGW), Web e Android. Proxima: Fase 8.
 
 ## 1. Levantamento: o que os engines usam do SDL2
 
@@ -79,9 +79,14 @@ Não entra no zen (fica nos engines):
 - Fora do plano, porque nenhum engine usa: gamepad na Web e no Android, rumble, giroscopio, touchpad, LEDs, eventos de ligar e desligar, joysticks sem layout padrao.
 - Nao testado: o `ioctl` de sondagem e de ressincronizacao num dispositivo real. O container nao tem `uinput` nem `/dev/input`, por isso a deteccao, a leitura (via pipe), o hot-plug (inotify sobre um diretorio temporario) e a traducao dos eventos foram testados, mas a sondagem de um comando fisico nao.
 
-### Fase 7 - Backend Win32 nativo
-- Janela, WGL com o GLConfig, input, I/O UTF-16, gamepad XInput.
-- Runtime estático (`/MT`, `-static`). Teste: o `.exe` não importa DLLs fora do sistema.
+### Fase 7 - Backend Win32 nativo e CI (concluida)
+- `backend_win32.c`: janela, WGL com o `GLConfig` (perfil core, compat ou ES, versao, debug, MSAA), rato com modo relativo (`ClipCursor` mais recentrar) e captura (`SetCapture` enquanto ha botoes premidos), cursores, monitores, clipboard em UTF-8, icone, pixeis por GDI, arrastar ficheiros, limites de tamanho, ecra inteiro, opacidade.
+- As teclas traduzem-se pelo scancode fisico (mais a flag de extendida), por isso uma tecla mantem o significado em qualquer layout, incluindo AZERTY. Resolve no Windows o problema que ficou em aberto no X11.
+- Eventos gerados fora do `pump` (por exemplo `WM_SIZE` dentro de `ShowWindow`) ficam em fila e sao entregues no frame seguinte.
+- `io_win32.c` e `fs_win32.c` (UTF-16, `FindFirstFileExW`), XInput carregado em tempo de execucao com a rescan de 1 s dos comandos desligados.
+- Runtime estatico: `/MT` no MSVC e `-static` no MinGW. O CI verifica que os executaveis nao importam DLLs fora do sistema.
+- CI (`.github/workflows/ci.yml`): Linux com X11 e sanitizers, fake backend, Windows com MSVC e MinGW, Web com Emscripten e Android com o NDK. Uma tag `v*` publica um release com um zip por plataforma.
+- Limitacoes: sem toque (`WM_TOUCH`), sem IME, sem caminhos acima de `MAX_PATH` com o prefixo `\\?\`, sem contexto GL 3.3 em maquinas so com o OpenGL 1.1 da Microsoft (o teste do CI trata isso como esperado).
 
 ### Fase 8 - Web e Android completos
 - Web: IDBFS (`syncfs` no arranque, no `fs_sync` e no `pagehide`), `--preload-file`.
