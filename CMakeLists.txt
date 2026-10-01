@@ -6,14 +6,19 @@ option(PLATFORM_USE_FAKE    "Force the fake backend" OFF)
 option(PLATFORM_SANITIZE    "Build with ASan + UBSan (debug)" OFF)
 # BUILD_SHARED_LIBS (CMake builtin): ON -> .so/.dll, OFF -> .a/.lib
 
-set(CORE_SRC src/core.c src/error.c src/os.c src/draw2d.c src/image.c)
+set(CORE_SRC src/core.c src/error.c src/io.c src/os.c src/draw2d.c src/image.c)
+if(WIN32)
+    list(APPEND CORE_SRC src/io_win32.c)
+else()
+    list(APPEND CORE_SRC src/io_posix.c)
+endif()
 
 if(PLATFORM_USE_FAKE)
     set(BACKEND_SRC src/backend_fake.c)
 elseif(EMSCRIPTEN)
     set(BACKEND_SRC src/backend_web.c)
 elseif(ANDROID)
-    set(BACKEND_SRC src/backend_android.c
+    set(BACKEND_SRC src/backend_android.c src/io_android.c
         ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
 elseif(WIN32)
     set(BACKEND_SRC src/backend_win32.c)

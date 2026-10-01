@@ -1,18 +1,15 @@
 /*
- * os_backend.h - the two filesystem concerns that cannot be portable. os.c calls
- * these; a platform that needs to route reads (Android = AAssetManager) provides
- * real implementations, everyone else gets the no-op defaults in os.c.
+ * os_backend.h - the filesystem concerns that cannot be portable. A platform
+ * that routes them (Android = AAssetManager) provides real implementations,
+ * everyone else gets the no-op defaults in os.c.
  */
 #ifndef OS_BACKEND_H
 #define OS_BACKEND_H
 
-#include <stddef.h>
-#include <stdint.h>
+#include "platform.h"
 
-/* Read a shipped asset. Returns a malloc'd, NUL-terminated buffer (size excludes
-   the terminator) or NULL when this platform does not route assets, in which case
-   os.c falls back to reading a real file under the asset root. */
-uint8_t *os_backend_asset_read(const char *path, size_t *out_size);
+/* Shipped asset as a read-only stream, or NULL when not routed or missing. */
+IoStream *os_backend_asset_open(const char *path);
 
 /* 1 exists, 0 missing, -1 not routed (os.c then checks the filesystem). */
 int os_backend_asset_exists(const char *path);

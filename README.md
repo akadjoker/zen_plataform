@@ -118,6 +118,11 @@ framebuffer_free(&rt);
 ### Filesystem
 
 ```c
+IoStream *s = io_open_file("save.dat", "rb");        // no stdio: POSIX fd / AAsset
+io_read(s, buf, n); io_seek(s, 0, IO_SEEK_END); io_close(s);
+void *all = io_load_file("level.bin", &size);        // NUL-terminated, fs_free
+io_save_file("save.dat", data, size);                // atomic: .tmp + fsync + rename
+IoStream *a = io_open_asset("tex/a.png");            // APK on Android, asset root elsewhere
 uint8_t *data = file_read("file.bin", &size);   // heap-allocated, free with fs_free
 char *text = file_read_text("doc.txt");
 file_write("out.bin", data, size);

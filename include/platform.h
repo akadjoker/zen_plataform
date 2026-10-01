@@ -396,6 +396,33 @@ extern "C"
        dir_ work on real, writable paths. asset and file read results are
        heap-allocated; release them with fs_free. */
 
+    typedef struct IoStream IoStream;
+
+    typedef enum
+    {
+        IO_SEEK_SET,
+        IO_SEEK_CUR,
+        IO_SEEK_END
+    } IoWhence;
+
+    /* mode as fopen: "r" "w" "a", optional '+', 'b' ignored. On Android a relative
+       path is tried under the internal data dir, then (read-only) in the APK assets. */
+    PLATFORM_API IoStream *io_open_file(const char *path, const char *mode);
+    PLATFORM_API IoStream *io_open_asset(const char *path);
+    PLATFORM_API IoStream *io_open_memory(const void *mem, size_t size);
+    PLATFORM_API size_t io_read(IoStream *s, void *dst, size_t n);
+    PLATFORM_API size_t io_write(IoStream *s, const void *src, size_t n);
+    PLATFORM_API int64_t io_seek(IoStream *s, int64_t offset, IoWhence whence);
+    PLATFORM_API int64_t io_tell(IoStream *s);
+    PLATFORM_API int64_t io_size(IoStream *s);
+    PLATFORM_API bool io_eof(IoStream *s);
+    PLATFORM_API bool io_flush(IoStream *s);
+    PLATFORM_API bool io_close(IoStream *s);
+    /* Whole-stream loads are NUL-terminated (size excludes it); free with fs_free. */
+    PLATFORM_API void *io_load(IoStream *s, size_t *out_size, bool close);
+    PLATFORM_API void *io_load_file(const char *path, size_t *out_size);
+    PLATFORM_API bool io_save_file(const char *path, const void *data, size_t size);
+
     PLATFORM_API uint8_t *asset_read(const char *path, size_t *out_size);
     PLATFORM_API char *asset_read_text(const char *path); /* NUL-terminated */
     PLATFORM_API bool asset_exists(const char *path);

@@ -1,9 +1,9 @@
 /*
- * os.c - portable OS/filesystem core. stdio for file I/O, string logic for paths,
- * POSIX for directories. The parts that cannot be portable (Android assets, web
- * MEMFS) route through os_backend hooks added in a later phase; until then asset_*
- * reads from a configured root on the real filesystem.
+ * os.c - portable OS/filesystem core: file helpers over io.c, string logic for
+ * paths, POSIX for directories.
  */
+#define _POSIX_C_SOURCE 200809L
+
 #include "platform.h"
 #include "os_backend.h"
 #include "error_internal.h"
@@ -30,131 +30,26 @@
 #define PATH_CAP 4096
 #endif
 
-/* ---- whole-file read, the one place bytes come off disk ---- */
-
-static uint8_t *read_whole(const char *path, size_t *out_size, bool text)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-    if (fseek(f, 0, SEEK_END) != 0)
-    {
-        fclose(f);
-        return NULL;
-    }
-    long len = ftell(f);
-    if (len < 0)
-    {
-        fclose(f);
-        return NULL;
-    }
-    rewind(f);
-
-    uint8_t *buf = malloc((size_t)len + (text ? 1 : 0));
-    if (!buf)
-    {
-        fclose(f);
-        return NULL;
-    }
-    size_t got = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    if (got != (size_t)len)
-    {
-        free(buf);
-        return NULL;
-    }
-    if (text)
-        buf[len] = '\0';
-    if (out_size)
-        *out_size = (size_t)len;
-    return buf;
-}
-
-/* ---- asset root ---- */
-
-static char g_asset_root[PATH_CAP];
-
-void asset_set_root(const char *path)
-{
-    if (!path)
-    {
-        g_asset_root[0] = '\0';
-        return;
-    }
-    snprintf(g_asset_root, sizeof g_asset_root, "%s", path);
-}
-
-static void asset_join(const char *path, char *out, size_t cap)
-{
-    const char *root = g_asset_root[0] ? g_asset_root : dir_app();
-    if (root && root[0])
-        snprintf(out, cap, "%s/%s", root, path);
-    else
-        snprintf(out, cap, "%s", path);
-}
-
-/* Backend-routed first (Android assets), then the asset root on disk. The backend
-   buffer is always NUL-terminated, so it serves both the bytes and text paths. */
-static uint8_t *asset_load(const char *path, size_t *out_size, bool text)
-{
-    size_t n = 0;
-    uint8_t *routed = os_backend_asset_read(path, &n);
-    if (routed)
-    {
-        if (out_size)
-            *out_size = n;
-        return routed;
-    }
-    char full[PATH_CAP];
-    asset_join(path, full, sizeof full);
-    return read_whole(full, out_size, text);
-}
-
-uint8_t *asset_read(const char *path, size_t *out_size)
-{
-    return asset_load(path, out_size, false);
-}
-
-char *asset_read_text(const char *path)
-{
-    return (char *)asset_load(path, NULL, true);
-}
-
-bool asset_exists(const char *path)
-{
-    int routed = os_backend_asset_exists(path);
-    if (routed >= 0)
-        return routed != 0;
-    char full[PATH_CAP];
-    asset_join(path, full, sizeof full);
-    return file_exists(full);
-}
-
 /* ---- read-write files ---- */
 
 uint8_t *file_read(const char *path, size_t *out_size)
 {
-    return read_whole(path, out_size, false);
+    return io_load_file(path, out_size);
 }
 
 char *file_read_text(const char *path)
 {
-    return (char *)read_whole(path, NULL, true);
+    return io_load_file(path, NULL);
 }
 
 bool file_write(const char *path, const void *data, size_t size)
 {
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return false;
-    size_t put = (size && data) ? fwrite(data, 1, size, f) : 0;
-    fclose(f);
-    return put == size;
+    return io_save_file(path, data, size);
 }
 
 bool file_write_text(const char *path, const char *text)
 {
-    return file_write(path, text, text ? strlen(text) : 0);
+    return io_save_file(path, text, text ? strlen(text) : 0);
 }
 
 void fs_free(void *data)
@@ -593,10 +488,9 @@ void dir_list_free(DirList *list)
 
 /* Default OS-backend hooks: no routing. The Android backend overrides these. */
 #if !defined(__ANDROID__)
-uint8_t *os_backend_asset_read(const char *path, size_t *out_size)
+IoStream *os_backend_asset_open(const char *path)
 {
     (void)path;
-    (void)out_size;
     return NULL;
 }
 int os_backend_asset_exists(const char *path)

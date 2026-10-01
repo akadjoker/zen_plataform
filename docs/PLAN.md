@@ -5,7 +5,7 @@ de depender do SDL2, passando a usar o `zen_platform`. Sem DLLs, build rápido e
 binários pequenos. **Regra: só entra o que os engines usam.** Fora do plano:
 threads, mutex, áudio, SDL_Renderer, logging, storage SDL3 completo.
 
-Estado: Fase 1 concluida (Erros + paths). Proxima: Fase 2.
+Estado: Fases 1 e 2 concluidas. Proxima: Fase 3.
 
 ## 1. Levantamento: o que os engines usam do SDL2
 
@@ -45,7 +45,7 @@ Não entra no zen (fica nos engines):
 - `path_join`, `path_normalize`, `path_is_absolute`, `path_relative`, `path_absolute`.
 - Testes de tabela.
 
-### Fase 2 - I/O sem `fopen`
+### Fase 2 - I/O sem `fopen` (concluida; `io_win32.c` fica para a Fase 7)
 - `IoStream` mínimo: abrir ficheiro (`r`, `w`, `a`), memória só de leitura, asset; `read/write/seek/tell/size/close`.
 - `io_load_file` e `io_save_file`. A escrita é atómica: `.tmp`, depois `fsync`, depois `rename`.
 - `file_read`/`file_write`/`asset_*` passam a assentar nesta camada.

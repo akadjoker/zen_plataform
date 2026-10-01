@@ -12,6 +12,7 @@
 
 #include <android_native_app_glue.h>
 #include <android/keycodes.h>
+#include <android/asset_manager.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <EGL/egl.h>
@@ -670,35 +671,9 @@ bool backend_monitor_info(int index, MonitorInfo *out)
 /*  os_backend hooks - assets come from the APK, data from internal storage   */
 /* ========================================================================== */
 
-uint8_t *os_backend_asset_read(const char *path, size_t *out_size)
+AAssetManager *android_asset_manager(void)
 {
-    if (!g_app)
-        return NULL;
-    AAsset *a = AAssetManager_open(g_app->activity->assetManager, path, AASSET_MODE_BUFFER);
-    if (!a)
-        return NULL;
-    off_t len = AAsset_getLength(a);
-    uint8_t *buf = malloc((size_t)len + 1);
-    if (buf)
-    {
-        AAsset_read(a, buf, (size_t)len);
-        buf[len] = '\0';
-        if (out_size)
-            *out_size = (size_t)len;
-    }
-    AAsset_close(a);
-    return buf;
-}
-
-int os_backend_asset_exists(const char *path)
-{
-    if (!g_app)
-        return -1;
-    AAsset *a = AAssetManager_open(g_app->activity->assetManager, path, AASSET_MODE_UNKNOWN);
-    if (!a)
-        return 0;
-    AAsset_close(a);
-    return 1;
+    return (g_app && g_app->activity) ? g_app->activity->assetManager : NULL;
 }
 
 const char *os_backend_data_dir(void)
