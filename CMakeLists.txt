@@ -6,7 +6,7 @@ option(PLATFORM_USE_FAKE    "Force the fake backend" OFF)
 option(PLATFORM_SANITIZE    "Build with ASan + UBSan (debug)" OFF)
 # BUILD_SHARED_LIBS (CMake builtin): ON -> .so/.dll, OFF -> .a/.lib
 
-set(CORE_SRC src/core.c src/os.c src/draw2d.c src/image.c)
+set(CORE_SRC src/core.c src/error.c src/os.c src/draw2d.c src/image.c)
 
 if(PLATFORM_USE_FAKE)
     set(BACKEND_SRC src/backend_fake.c)

@@ -5,7 +5,7 @@ de depender do SDL2, passando a usar o `zen_platform`. Sem DLLs, build rápido e
 binários pequenos. **Regra: só entra o que os engines usam.** Fora do plano:
 threads, mutex, áudio, SDL_Renderer, logging, storage SDL3 completo.
 
-Estado: Fase 1 em curso (Erros + paths).
+Estado: Fase 1 concluida (Erros + paths). Proxima: Fase 2.
 
 ## 1. Levantamento: o que os engines usam do SDL2
 
@@ -40,7 +40,7 @@ Não entra no zen (fica nos engines):
 
 ## 3. Fases
 
-### Fase 1 - Erros + paths
+### Fase 1 - Erros + paths (concluida)
 - `platform_get_error()` (thread-local).
 - `path_join`, `path_normalize`, `path_is_absolute`, `path_relative`, `path_absolute`.
 - Testes de tabela.

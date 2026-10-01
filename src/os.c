@@ -6,10 +6,12 @@
  */
 #include "platform.h"
 #include "os_backend.h"
+#include "error_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <strings.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -238,6 +240,230 @@ bool path_has_extension(const char *path, const char *ext)
     if (ext[0] == '.')
         ext++;
     return strcasecmp(e, ext) == 0;
+}
+
+/* ---- path builders ---- */
+
+static bool is_sep(char c)
+{
+#if defined(_WIN32)
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+/* "/" (posix), "C:/" "C:" "//" (win32); 0 for a relative path */
+static size_t root_len(const char *p)
+{
+#if defined(_WIN32)
+    if (isalpha((unsigned char)p[0]) && p[1] == ':')
+        return is_sep(p[2]) ? 3 : 2;
+    if (is_sep(p[0]) && is_sep(p[1]))
+        return 2;
+#endif
+    return is_sep(p[0]) ? 1 : 0;
+}
+
+static bool name_eq(const char *a, const char *b, size_t n)
+{
+#if defined(_WIN32)
+    return _strnicmp(a, b, n) == 0;
+#else
+    return strncmp(a, b, n) == 0;
+#endif
+}
+
+static size_t component_len(const char *s)
+{
+    size_t n = 0;
+    while (s[n] && !is_sep(s[n]))
+        n++;
+    return n;
+}
+
+static bool path_fail(char *out, size_t cap)
+{
+    if (cap)
+        out[0] = '\0';
+    return error_set("path too long");
+}
+
+static bool path_put(char *out, size_t cap, const char *src, size_t n)
+{
+    if (n >= cap)
+        return path_fail(out, cap);
+    memmove(out, src, n);
+    out[n] = '\0';
+    return true;
+}
+
+bool path_is_absolute(const char *path)
+{
+    if (!path)
+        return false;
+    size_t root = root_len(path);
+#if defined(_WIN32)
+    if (root == 2 && path[1] == ':')
+        return false;
+#endif
+    return root > 0;
+}
+
+bool path_join(char *out, size_t cap, const char *a, const char *b)
+{
+    char res[PATH_CAP];
+    if (!a)
+        a = "";
+    if (!b)
+        b = "";
+    if (!a[0] || path_is_absolute(b))
+        return path_put(out, cap, b, strlen(b));
+
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t sep = (is_sep(a[la - 1]) || !b[0]) ? 0 : 1;
+    if (la + sep + lb >= sizeof res)
+        return path_fail(out, cap);
+    memcpy(res, a, la);
+    if (sep)
+        res[la] = '/';
+    memcpy(res + la + sep, b, lb);
+    return path_put(out, cap, res, la + sep + lb);
+}
+
+bool path_normalize(char *out, size_t cap, const char *path)
+{
+    char res[PATH_CAP];
+    if (!path)
+        path = "";
+    size_t root = root_len(path);
+    bool absolute = path_is_absolute(path);
+    size_t n = 0;
+    for (; n < root; n++)
+        res[n] = is_sep(path[n]) ? '/' : path[n];
+
+    const char *p = path + root;
+    for (;;)
+    {
+        while (is_sep(*p))
+            p++;
+        if (!*p)
+            break;
+        const char *name = p;
+        size_t len = component_len(p);
+        p += len;
+
+        if (len == 1 && name[0] == '.')
+            continue;
+        if (len == 2 && name[0] == '.' && name[1] == '.')
+        {
+            size_t last = n;
+            while (last > root && res[last - 1] != '/')
+                last--;
+            bool parent_is_dotdot = n - last == 2 && res[last] == '.' && res[last + 1] == '.';
+            if (n > root && !parent_is_dotdot)
+            {
+                n = last > root ? last - 1 : root;
+                continue;
+            }
+            if (absolute)
+                continue;
+        }
+
+        size_t sep = n > root ? 1 : 0;
+        if (n + sep + len >= sizeof res)
+            return path_fail(out, cap);
+        if (sep)
+            res[n++] = '/';
+        memcpy(res + n, name, len);
+        n += len;
+    }
+    if (n == 0)
+        res[n++] = '.';
+    return path_put(out, cap, res, n);
+}
+
+bool path_absolute(char *out, size_t cap, const char *path)
+{
+    char cwd[PATH_CAP];
+    char joined[PATH_CAP];
+    if (path_is_absolute(path))
+        return path_normalize(out, cap, path);
+    if (!getcwd(cwd, sizeof cwd))
+    {
+        if (cap)
+            out[0] = '\0';
+        return error_set("getcwd failed: %s", strerror(errno));
+    }
+    if (!path_join(joined, sizeof joined, cwd, path))
+        return path_fail(out, cap);
+    return path_normalize(out, cap, joined);
+}
+
+bool path_relative(char *out, size_t cap, const char *path, const char *base)
+{
+    char p[PATH_CAP];
+    char b[PATH_CAP];
+    char res[PATH_CAP];
+    if (!path_absolute(p, sizeof p, path) || !path_absolute(b, sizeof b, base))
+    {
+        if (cap)
+            out[0] = '\0';
+        return false;
+    }
+
+    size_t root = root_len(p);
+    if (root != root_len(b) || !name_eq(p, b, root))
+    {
+        if (cap)
+            out[0] = '\0';
+        return error_set("no relative path from '%s' to '%s'", b, p);
+    }
+
+    size_t i = root;
+    size_t j = root;
+    for (;;)
+    {
+        size_t lp = component_len(p + i);
+        size_t lb = component_len(b + j);
+        if (lp == 0 || lp != lb || !name_eq(p + i, b + j, lp))
+            break;
+        i += lp;
+        j += lb;
+        if (p[i] == '/')
+            i++;
+        if (b[j] == '/')
+            j++;
+    }
+
+    size_t n = 0;
+    while (b[j])
+    {
+        size_t lb = component_len(b + j);
+        if (n + 3 >= sizeof res)
+            return path_fail(out, cap);
+        if (n)
+            res[n++] = '/';
+        res[n++] = '.';
+        res[n++] = '.';
+        j += lb;
+        if (b[j] == '/')
+            j++;
+    }
+    size_t rest = strlen(p + i);
+    if (rest)
+    {
+        if (n + 1 + rest >= sizeof res)
+            return path_fail(out, cap);
+        if (n)
+            res[n++] = '/';
+        memcpy(res + n, p + i, rest);
+        n += rest;
+    }
+    if (n == 0)
+        res[n++] = '.';
+    return path_put(out, cap, res, n);
 }
 
 /* ---- directories ---- */

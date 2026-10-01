@@ -123,6 +123,13 @@ char *text = file_read_text("doc.txt");
 file_write("out.bin", data, size);
 bool exists = file_exists("path");
 const char *cwd = dir_current();
+
+char path[512];
+path_join(path, sizeof path, "assets", "tex/a.png");     // "assets/tex/a.png"
+path_normalize(path, sizeof path, "a/./b/../c");         // "a/c"
+path_relative(path, sizeof path, "/p/assets/a.png", "/p"); // "assets/a.png"
+if (!path_absolute(path, sizeof path, "save.dat"))
+    printf("%s\n", platform_get_error());
 ```
 
 ## Examples
