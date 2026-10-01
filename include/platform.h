@@ -356,7 +356,7 @@ extern "C"
 
     /* Next key from this frame's press queue, in order. 0 when empty. */
     PLATFORM_API int key_get_pressed(PlatformWindow *w);
-    /* MOD_* mask of the modifier keys held now. */
+    /* KEYMOD_* mask of the modifier keys held now. */
     PLATFORM_API int key_mods(PlatformWindow *w);
     /* Next codepoint from the text-input queue. 0 when empty. Independent of the
        key queue, so it carries layout and composed input correctly. */
@@ -696,10 +696,10 @@ extern "C"
 
     enum
     {
-        MOD_SHIFT = 1,
-        MOD_CTRL = 2,
-        MOD_ALT = 4,
-        MOD_SUPER = 8
+        KEYMOD_SHIFT = 1,
+        KEYMOD_CTRL = 2,
+        KEYMOD_ALT = 4,
+        KEYMOD_SUPER = 8
     };
 
     enum

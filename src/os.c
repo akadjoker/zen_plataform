@@ -12,7 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#if defined(_WIN32)
+#define strcasecmp _stricmp
+#else
 #include <strings.h>
+#endif
 #include <errno.h>
 
 #if defined(_WIN32)

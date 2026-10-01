@@ -2,7 +2,12 @@
 
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <direct.h>
+#define getcwd _getcwd
+#else
 #include <unistd.h>
+#endif
 
 static int g_pass, g_fail;
 
@@ -50,7 +55,9 @@ static void test_normalize(void)
         {"../a", "../a"},
         {"../../a/../b", "../../b"},
         {"/", "/"},
+#if !defined(_WIN32)
         {"//", "/"},
+#endif
         {"/..", "/"},
         {"/../a", "/a"},
         {"/a/b/../../..", "/"},
@@ -107,6 +114,11 @@ static void test_absolute(void)
     char want[1200];
     char out[1200];
     CHECK(getcwd(cwd, sizeof cwd) != NULL);
+    for (char *p = cwd; *p; p++)
+    {
+        if (*p == '\\')
+            *p = '/';
+    }
 
     CHECK(path_is_absolute("/x"));
     CHECK(!path_is_absolute("x"));

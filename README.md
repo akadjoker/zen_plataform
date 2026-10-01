@@ -77,7 +77,7 @@ bool pressed = key_pressed(w, KEY_R);   // single-frame edge
 int mx = mouse_x(w), my = mouse_y(w);
 int dx, dy;  mouse_delta(w, &dx, &dy);
 bool left_click = mouse_button_released(w, MOUSE_LEFT);
-int mods = key_mods(w);                 // MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_SUPER held now
+int mods = key_mods(w);                 // KEYMOD_SHIFT | KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER held now
 bool numpad7 = key_down(w, KEY_KP_7);
 mouse_set_cursor(w, CURSOR_RESIZE_NWSE);
 time_sleep(16);                         // milliseconds

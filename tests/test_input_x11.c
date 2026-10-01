@@ -165,10 +165,10 @@ static void test_modifiers(PlatformWindow *w)
     CHECK(key_mods(w) == 0);
     send_key(shift, true, 0);
     CHECK(wait_pressed(w, KEY_LEFT_SHIFT));
-    CHECK(key_mods(w) == MOD_SHIFT);
+    CHECK(key_mods(w) == KEYMOD_SHIFT);
     send_key(ctrl, true, ShiftMask);
     CHECK(wait_pressed(w, KEY_RIGHT_CONTROL));
-    CHECK(key_mods(w) == (MOD_SHIFT | MOD_CTRL));
+    CHECK(key_mods(w) == (KEYMOD_SHIFT | KEYMOD_CTRL));
 
     send_key(a, true, ShiftMask | ControlMask);
     window_begin_frame(w);
@@ -187,13 +187,13 @@ static void test_modifiers(PlatformWindow *w)
             window_begin_frame(w);
         }
     }
-    CHECK(mods == (MOD_SHIFT | MOD_CTRL));
+    CHECK(mods == (KEYMOD_SHIFT | KEYMOD_CTRL));
 
     send_key(a, false, ShiftMask | ControlMask);
     CHECK(wait_released(w, KEY_A));
     send_key(shift, false, ShiftMask | ControlMask);
     CHECK(wait_released(w, KEY_LEFT_SHIFT));
-    CHECK(key_mods(w) == MOD_CTRL);
+    CHECK(key_mods(w) == KEYMOD_CTRL);
     send_key(ctrl, false, ControlMask);
     CHECK(wait_released(w, KEY_RIGHT_CONTROL));
     CHECK(key_mods(w) == 0);
@@ -208,7 +208,7 @@ static void test_focus_loss(PlatformWindow *w)
     CHECK(wait_pressed(w, KEY_LEFT_ALT));
     send_key(a, true, Mod1Mask);
     CHECK(wait_pressed(w, KEY_A));
-    CHECK(key_mods(w) == MOD_ALT);
+    CHECK(key_mods(w) == KEYMOD_ALT);
 
     send_focus_out();
     CHECK(wait_released(w, KEY_LEFT_ALT));

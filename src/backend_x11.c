@@ -244,13 +244,13 @@ static int translate_mods(unsigned int state)
 {
     int mods = 0;
     if (state & ShiftMask)
-        mods |= MOD_SHIFT;
+        mods |= KEYMOD_SHIFT;
     if (state & ControlMask)
-        mods |= MOD_CTRL;
+        mods |= KEYMOD_CTRL;
     if (state & Mod1Mask)
-        mods |= MOD_ALT;
+        mods |= KEYMOD_ALT;
     if (state & Mod4Mask)
-        mods |= MOD_SUPER;
+        mods |= KEYMOD_SUPER;
     return mods;
 }
 

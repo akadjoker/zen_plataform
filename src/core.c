@@ -13,6 +13,13 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 /* ---- ring buffers ---- */
 
 static void keycode_push(InputState *s, int key)
@@ -168,9 +175,20 @@ static uint64_t g_time_base; /* nanoseconds at platform_init */
 
 static uint64_t now_nanos(void)
 {
+#if defined(_WIN32)
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    if (freq.QuadPart == 0)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    uint64_t whole = (uint64_t)counter.QuadPart / (uint64_t)freq.QuadPart;
+    uint64_t rest = (uint64_t)counter.QuadPart % (uint64_t)freq.QuadPart;
+    return whole * 1000000000ull + rest * 1000000000ull / (uint64_t)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
 }
 
 bool platform_init(void)
@@ -480,13 +498,13 @@ int key_mods(PlatformWindow *w)
     const bool *k = w->core.in.key_down;
     int mods = 0;
     if (k[KEY_LEFT_SHIFT] || k[KEY_RIGHT_SHIFT])
-        mods |= MOD_SHIFT;
+        mods |= KEYMOD_SHIFT;
     if (k[KEY_LEFT_CONTROL] || k[KEY_RIGHT_CONTROL])
-        mods |= MOD_CTRL;
+        mods |= KEYMOD_CTRL;
     if (k[KEY_LEFT_ALT] || k[KEY_RIGHT_ALT])
-        mods |= MOD_ALT;
+        mods |= KEYMOD_ALT;
     if (k[KEY_LEFT_SUPER] || k[KEY_RIGHT_SUPER])
-        mods |= MOD_SUPER;
+        mods |= KEYMOD_SUPER;
     return mods;
 }
 
@@ -644,10 +662,27 @@ double time_seconds(void)
 
 void time_sleep(uint32_t milliseconds)
 {
+#if defined(_WIN32)
+    static HANDLE timer;
+    if (!timer)
+        timer = CreateWaitableTimerExW(NULL, NULL, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    if (timer)
+    {
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)milliseconds * 10000;
+        if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+        {
+            WaitForSingleObject(timer, INFINITE);
+            return;
+        }
+    }
+    Sleep(milliseconds);
+#else
     struct timespec ts = {(time_t)(milliseconds / 1000), (long)(milliseconds % 1000) * 1000000L};
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
     {
     }
+#endif
 }
 
 /* ========================================================================== */

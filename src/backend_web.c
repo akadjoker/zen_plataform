@@ -150,13 +150,13 @@ static int translate_kb_mods(const EmscriptenKeyboardEvent *e)
 {
     int mods = 0;
     if (e->shiftKey)
-        mods |= MOD_SHIFT;
+        mods |= KEYMOD_SHIFT;
     if (e->ctrlKey)
-        mods |= MOD_CTRL;
+        mods |= KEYMOD_CTRL;
     if (e->altKey)
-        mods |= MOD_ALT;
+        mods |= KEYMOD_ALT;
     if (e->metaKey)
-        mods |= MOD_SUPER;
+        mods |= KEYMOD_SUPER;
     return mods;
 }
 

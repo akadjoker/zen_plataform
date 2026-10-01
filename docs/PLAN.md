@@ -66,7 +66,7 @@ Não entra no zen (fica nos engines):
 
 ### Fase 5 - Input em falta (concluida em X11; Web e Android escritos mas nao compilados)
 - Teclas que o Radion mapeia e o zen nao tinha: teclado numerico (`KEY_KP_0`..`KEY_KP_9`, decimal, as quatro operacoes, enter, igual), `KEY_MENU` e `KEY_SCROLL_LOCK`. Em X11 traduzem-se tambem os keysyms de navegacao (`KP_Home`, `KP_End`...) que o servidor entrega com o NumLock desligado. A Web e o Android passam a mapear tambem NumLock, PrintScreen e Pause (e, no Android, Insert, CapsLock e Meta).
-- `key_mods(w)`: mascara `MOD_*` das teclas premidas agora, o equivalente ao `SDL_GetModState`. O campo `mods` dos eventos de tecla ja existia.
+- `key_mods(w)`: mascara `KEYMOD_*` das teclas premidas agora, o equivalente ao `SDL_GetModState`. O campo `mods` dos eventos de tecla ja existia.
 - O core liberta todas as teclas e botoes do rato quando a janela perde o foco, para um modificador nao ficar preso depois de um Alt-Tab.
 - Cursores `CURSOR_RESIZE_NWSE`, `CURSOR_RESIZE_NESW` e `CURSOR_RESIZE_ALL`. No X11 os cursores passam a ser criados uma vez e partilhados por todas as janelas, em vez de criados e libertados a cada mudanca.
 - `time_sleep(milliseconds)`.

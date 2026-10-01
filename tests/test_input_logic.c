@@ -161,21 +161,21 @@ static void test_key_mods(PlatformWindow *w)
 
     fake_key(w, KEY_LEFT_SHIFT, true, false);
     window_begin_frame(w);
-    CHECK(key_mods(w) == MOD_SHIFT);
+    CHECK(key_mods(w) == KEYMOD_SHIFT);
 
     fake_key(w, KEY_RIGHT_CONTROL, true, false);
     fake_key(w, KEY_LEFT_ALT, true, false);
     fake_key(w, KEY_RIGHT_SUPER, true, false);
     window_begin_frame(w);
-    CHECK(key_mods(w) == (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_SUPER));
+    CHECK(key_mods(w) == (KEYMOD_SHIFT | KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER));
 
     fake_key(w, KEY_LEFT_SHIFT, false, false);
     window_begin_frame(w);
-    CHECK(key_mods(w) == (MOD_CTRL | MOD_ALT | MOD_SUPER));
+    CHECK(key_mods(w) == (KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER));
 
     fake_key(w, KEY_A, true, false);
     window_begin_frame(w);
-    CHECK(key_mods(w) == (MOD_CTRL | MOD_ALT | MOD_SUPER));
+    CHECK(key_mods(w) == (KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER));
 }
 
 static void test_focus_loss_releases(PlatformWindow *w)
@@ -184,7 +184,7 @@ static void test_focus_loss_releases(PlatformWindow *w)
     fake_key(w, KEY_W, true, false);
     fake_mouse_button(w, MOUSE_LEFT, true);
     window_begin_frame(w);
-    CHECK(key_down(w, KEY_W) && key_mods(w) == MOD_CTRL && mouse_button_down(w, MOUSE_LEFT));
+    CHECK(key_down(w, KEY_W) && key_mods(w) == KEYMOD_CTRL && mouse_button_down(w, MOUSE_LEFT));
 
     Event gained = {.type = EVENT_WINDOW_FOCUS};
     gained.data.focus.gained = true;

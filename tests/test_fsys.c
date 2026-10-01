@@ -6,7 +6,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#include <direct.h>
+#include <stdlib.h>
+#define getcwd _getcwd
+
+static int setenv(const char *name, const char *value, int overwrite)
+{
+    (void)overwrite;
+    return _putenv_s(name, value);
+}
+
+static int unsetenv(const char *name)
+{
+    return _putenv_s(name, "");
+}
+
+#define LINKS 0
+#else
 #include <unistd.h>
+#define LINKS 3
+#endif
 
 static int g_pass, g_fail;
 
@@ -137,25 +158,29 @@ static void test_enumerate(void)
     CHECK(file_write_text(ROOT "/e/one.txt", "1"));
     CHECK(file_write_text(ROOT "/e/sub/two.txt", "2"));
     CHECK(file_write_text(ROOT "/e/sub/deep/three.txt", "3"));
+#if LINKS
     CHECK(symlink("..", ROOT "/e/sub/up") == 0);
     CHECK(symlink("one.txt", ROOT "/e/link.txt") == 0);
     CHECK(symlink("nowhere", ROOT "/e/dangling") == 0);
+#endif
 
     Seen s;
     memset(&s, 0, sizeof s);
     CHECK(fs_enumerate_directory(ROOT "/e", false, collect, &s));
-    CHECK(s.total == 4);
-    CHECK(s.files == 2 && s.dirs == 1 && s.others == 1);
+    CHECK(s.total == 2 + (LINKS ? 2 : 0));
+    CHECK(s.files == 1 + (LINKS ? 1 : 0) && s.dirs == 1 && s.others == (LINKS ? 1 : 0));
     CHECK(has(&s, ROOT "/e/one.txt") && has(&s, ROOT "/e/sub"));
 
     memset(&s, 0, sizeof s);
     CHECK(fs_enumerate_directory(ROOT "/e/", true, collect, &s));
-    CHECK(s.total == 8);
-    CHECK(s.dirs == 3);
+    CHECK(s.total == 5 + (LINKS ? 3 : 0));
+    CHECK(s.dirs == 2 + (LINKS ? 1 : 0));
     CHECK(has(&s, ROOT "/e/sub/deep/three.txt"));
     CHECK(has(&s, ROOT "/e/sub/two.txt"));
+#if LINKS
     CHECK(has(&s, ROOT "/e/sub/up"));
     CHECK(!has(&s, ROOT "/e/sub/up/one.txt"));
+#endif
 
     memset(&s, 0, sizeof s);
     s.stop_after = 3;
@@ -178,9 +203,11 @@ static void test_enumerate(void)
     CHECK(!dir_list(ROOT "/missing", &list));
     CHECK(list.count == 0 && list.paths == NULL);
 
+#if LINKS
     CHECK(fs_remove_path(ROOT "/e/dangling"));
     CHECK(fs_remove_path(ROOT "/e/link.txt"));
     CHECK(fs_remove_path(ROOT "/e/sub/up"));
+#endif
     CHECK(fs_remove_path(ROOT "/e/sub/deep/three.txt"));
     CHECK(fs_remove_path(ROOT "/e/sub/deep"));
     CHECK(fs_remove_path(ROOT "/e/sub/two.txt"));
@@ -204,6 +231,58 @@ static void test_base_path(void)
     CHECK(strncmp(app, base, n - 1) == 0 && strlen(app) == n - 1);
 }
 
+#if defined(_WIN32)
+static void test_pref_path(void)
+{
+    char out[1024];
+    char want[1200];
+
+    snprintf(want, sizeof want, "%s/" ROOT "/appdata", g_abs);
+    CHECK(setenv("APPDATA", want, 1) == 0);
+    CHECK(fs_get_pref_path(out, sizeof out, "Org", "App"));
+    snprintf(want, sizeof want, "%s/" ROOT "/appdata/Org/App/", g_abs);
+    CHECK_STR(out, want);
+    CHECK(dir_exists(ROOT "/appdata/Org/App"));
+    CHECK(fs_get_pref_path(out, sizeof out, "Org", "App"));
+    CHECK_STR(out, want);
+
+    CHECK(fs_get_pref_path(out, sizeof out, "", "Solo"));
+    snprintf(want, sizeof want, "%s/" ROOT "/appdata/Solo/", g_abs);
+    CHECK_STR(out, want);
+    CHECK(fs_get_pref_path(out, sizeof out, NULL, "Solo2"));
+    CHECK(dir_exists(ROOT "/appdata/Solo2"));
+
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", ""));
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", NULL));
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", ".."));
+    CHECK(!fs_get_pref_path(out, sizeof out, "../x", "App"));
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", "a/b"));
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", "a:b"));
+    CHECK(out[0] == '\0');
+    CHECK(!fs_get_pref_path(out, 8, "Org", "App"));
+
+    unsetenv("APPDATA");
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", "App"));
+    CHECK(strstr(platform_get_error(), "APPDATA") != NULL);
+}
+
+static void test_temp_path(void)
+{
+    char out[1024];
+    char want[1200];
+    snprintf(want, sizeof want, "%s/" ROOT "/tmp/", g_abs);
+    for (char *p = want; *p; p++)
+    {
+        if (*p == '/')
+            *p = '\\';
+    }
+    CHECK(setenv("TMP", want, 1) == 0);
+    CHECK(fs_get_temp_path(out, sizeof out));
+    snprintf(want, sizeof want, "%s/" ROOT "/tmp", g_abs);
+    CHECK_STR(out, want);
+    CHECK(!fs_get_temp_path(out, 3));
+}
+#else
 static void test_pref_path(void)
 {
     char out[1024];
@@ -264,9 +343,12 @@ static void test_temp_path(void)
     CHECK(!fs_get_temp_path(out, 3));
 }
 
+#endif
+
 static void cleanup(void)
 {
     static const char *dirs[] = {
+        ROOT "/appdata/Org/App", ROOT "/appdata/Org", ROOT "/appdata/Solo", ROOT "/appdata/Solo2", ROOT "/appdata", ROOT "/tmp",
         ROOT "/xdg/Org/App", ROOT "/xdg/Org", ROOT "/xdg/Solo", ROOT "/xdg/Solo2", ROOT "/xdg",
         ROOT "/home/.local/share/Org/App", ROOT "/home/.local/share/Org", ROOT "/home/.local/share",
         ROOT "/home/.local", ROOT "/home", ROOT "/f.txt", ROOT};
@@ -278,6 +360,11 @@ int main(void)
 {
     if (!getcwd(g_abs, sizeof g_abs))
         return 1;
+    for (char *p = g_abs; *p; p++)
+    {
+        if (*p == '\\')
+            *p = '/';
+    }
     fs_create_directory(ROOT);
 
     test_path_info();
