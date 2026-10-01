@@ -9,6 +9,7 @@
  */
 #include "core_internal.h"
 #include "backend.h"
+#include "error_internal.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -16,7 +17,7 @@
 #include <X11/keysym.h>
 #include <X11/cursorfont.h>
 #include <X11/extensions/Xrandr.h>
-#include <X11/Xresource.h> 
+#include <X11/Xresource.h>
 #include <GL/glx.h>
 
 #include <stdio.h>
@@ -33,6 +34,18 @@ typedef int (*glXSwapIntervalSGIProc)(int);
 #define GLX_CONTEXT_MINOR_VERSION_ARB 0x2092
 #define GLX_CONTEXT_PROFILE_MASK_ARB 0x9126
 #define GLX_CONTEXT_CORE_PROFILE_BIT_ARB 0x00000001
+#ifndef GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB
+#define GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB 0x00000002
+#endif
+#ifndef GLX_CONTEXT_ES2_PROFILE_BIT_EXT
+#define GLX_CONTEXT_ES2_PROFILE_BIT_EXT 0x00000004
+#endif
+#ifndef GLX_CONTEXT_FLAGS_ARB
+#define GLX_CONTEXT_FLAGS_ARB 0x2094
+#endif
+#ifndef GLX_CONTEXT_DEBUG_BIT_ARB
+#define GLX_CONTEXT_DEBUG_BIT_ARB 0x00000001
+#endif
 
 /* ---- global connection ---- */
 
@@ -52,9 +65,12 @@ static struct
     Atom CLIPBOARD, TARGETS, XSEL_DATA;
 
     glXCreateContextAttribsARBProc create_context;
+    bool has_es_profile;
     glXSwapIntervalEXTProc swap_ext;
     glXSwapIntervalMESAProc swap_mesa;
     glXSwapIntervalSGIProc swap_sgi;
+
+    Cursor cursors[CURSOR_COUNT]; /* created on first use, shared by every window */
 
     Window helper;        /* unmapped window that owns the CLIPBOARD selection */
     char *clipboard_text; /* what we last set; also the get() return buffer */
@@ -98,6 +114,8 @@ static int translate_keysym(KeySym ks)
         return KEY_ZERO + (int)(ks - XK_0);
     if (ks >= XK_F1 && ks <= XK_F12)
         return KEY_F1 + (int)(ks - XK_F1);
+    if (ks >= XK_KP_0 && ks <= XK_KP_9)
+        return KEY_KP_0 + (int)(ks - XK_KP_0);
 
     switch (ks)
     {
@@ -161,6 +179,46 @@ static int translate_keysym(KeySym ks)
         return KEY_PRINT_SCREEN;
     case XK_Pause:
         return KEY_PAUSE;
+    case XK_Scroll_Lock:
+        return KEY_SCROLL_LOCK;
+    case XK_Menu:
+        return KEY_MENU;
+    case XK_KP_Insert:
+        return KEY_KP_0;
+    case XK_KP_End:
+        return KEY_KP_1;
+    case XK_KP_Down:
+        return KEY_KP_2;
+    case XK_KP_Page_Down:
+        return KEY_KP_3;
+    case XK_KP_Left:
+        return KEY_KP_4;
+    case XK_KP_Begin:
+        return KEY_KP_5;
+    case XK_KP_Right:
+        return KEY_KP_6;
+    case XK_KP_Home:
+        return KEY_KP_7;
+    case XK_KP_Up:
+        return KEY_KP_8;
+    case XK_KP_Page_Up:
+        return KEY_KP_9;
+    case XK_KP_Delete:
+    case XK_KP_Decimal:
+    case XK_KP_Separator:
+        return KEY_KP_DECIMAL;
+    case XK_KP_Divide:
+        return KEY_KP_DIVIDE;
+    case XK_KP_Multiply:
+        return KEY_KP_MULTIPLY;
+    case XK_KP_Subtract:
+        return KEY_KP_SUBTRACT;
+    case XK_KP_Add:
+        return KEY_KP_ADD;
+    case XK_KP_Enter:
+        return KEY_KP_ENTER;
+    case XK_KP_Equal:
+        return KEY_KP_EQUAL;
     case XK_Shift_L:
         return KEY_LEFT_SHIFT;
     case XK_Control_L:
@@ -186,13 +244,13 @@ static int translate_mods(unsigned int state)
 {
     int mods = 0;
     if (state & ShiftMask)
-        mods |= MOD_SHIFT;
+        mods |= KEYMOD_SHIFT;
     if (state & ControlMask)
-        mods |= MOD_CTRL;
+        mods |= KEYMOD_CTRL;
     if (state & Mod1Mask)
-        mods |= MOD_ALT;
+        mods |= KEYMOD_ALT;
     if (state & Mod4Mask)
-        mods |= MOD_SUPER;
+        mods |= KEYMOD_SUPER;
     return mods;
 }
 
@@ -246,7 +304,22 @@ static void refresh_wm_state(BackendWindow *b)
 /*  GL context                                                                */
 /* ========================================================================== */
 
-static GLXFBConfig choose_fbconfig(const WindowConfig *cfg)
+static bool glx_has_extension(const char *name)
+{
+    const char *list = glXQueryExtensionsString(g.dpy, g.screen);
+    size_t n = strlen(name);
+    for (const char *p = list; p && *p;)
+    {
+        const char *end = strchr(p, ' ');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == n && strncmp(p, name, n) == 0)
+            return true;
+        p = end ? end + 1 : p + len;
+    }
+    return false;
+}
+
+static GLXFBConfig choose_fbconfig(const GLConfig *gl)
 {
     int attribs[] = {
         GLX_X_RENDERABLE, True,
@@ -256,33 +329,97 @@ static GLXFBConfig choose_fbconfig(const WindowConfig *cfg)
         GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, GLX_ALPHA_SIZE, 8,
         GLX_DEPTH_SIZE, 24, GLX_STENCIL_SIZE, 8,
         GLX_DOUBLEBUFFER, True,
-        GLX_SAMPLE_BUFFERS, cfg->msaa > 0 ? 1 : 0,
-        GLX_SAMPLES, cfg->msaa > 0 ? cfg->msaa : 0,
+        GLX_SAMPLE_BUFFERS, gl->msaa > 0 ? 1 : 0,
+        GLX_SAMPLES, gl->msaa > 0 ? gl->msaa : 0,
         None};
 
     int count = 0;
     GLXFBConfig *configs = glXChooseFBConfig(g.dpy, g.screen, attribs, &count);
     if (!configs || count == 0)
+    {
+        if (configs)
+            XFree(configs);
+        error_set("no framebuffer configuration with RGBA8, depth 24, stencil 8 and %d samples", gl->msaa);
         return NULL;
+    }
     GLXFBConfig chosen = configs[0];
     XFree(configs);
     return chosen;
 }
 
-static GLXContext create_context(GLXFBConfig fb, int major, int minor)
+static bool g_context_failed;
+
+static int context_error_handler(Display *dpy, XErrorEvent *ev)
 {
-    if (g.create_context)
+    (void)dpy;
+    (void)ev;
+    g_context_failed = true;
+    return 0;
+}
+
+static GLXContext create_context(GLXFBConfig fb, const GLConfig *gl)
+{
+    GLProfile profile = gl->profile == GL_PROFILE_DEFAULT ? GL_PROFILE_CORE : gl->profile;
+    int major = gl->major;
+    int minor = gl->minor;
+    if (major == 0)
     {
-        int attribs[] = {
-            GLX_CONTEXT_MAJOR_VERSION_ARB, major > 0 ? major : 3,
-            GLX_CONTEXT_MINOR_VERSION_ARB, major > 0 ? minor : 3,
-            GLX_CONTEXT_PROFILE_MASK_ARB, GLX_CONTEXT_CORE_PROFILE_BIT_ARB,
-            None};
-        GLXContext c = g.create_context(g.dpy, fb, NULL, True, attribs);
-        if (c)
-            return c;
+        major = 3;
+        minor = profile == GL_PROFILE_ES ? 0 : 3;
     }
-    return glXCreateNewContext(g.dpy, fb, GLX_RGBA_TYPE, NULL, True);
+
+    const char *name = "core";
+    int mask = GLX_CONTEXT_CORE_PROFILE_BIT_ARB;
+    if (profile == GL_PROFILE_COMPAT)
+    {
+        name = "compatibility";
+        mask = GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
+    }
+    else if (profile == GL_PROFILE_ES)
+    {
+        name = "ES";
+        mask = GLX_CONTEXT_ES2_PROFILE_BIT_EXT;
+        if (!g.has_es_profile)
+        {
+            error_set("GLX_EXT_create_context_es2_profile is not supported");
+            return NULL;
+        }
+    }
+    if (!g.create_context)
+    {
+        error_set("GLX_ARB_create_context is not supported");
+        return NULL;
+    }
+
+    int attribs[9];
+    int n = 0;
+    attribs[n++] = GLX_CONTEXT_MAJOR_VERSION_ARB;
+    attribs[n++] = major;
+    attribs[n++] = GLX_CONTEXT_MINOR_VERSION_ARB;
+    attribs[n++] = minor;
+    attribs[n++] = GLX_CONTEXT_PROFILE_MASK_ARB;
+    attribs[n++] = mask;
+    if (gl->debug)
+    {
+        attribs[n++] = GLX_CONTEXT_FLAGS_ARB;
+        attribs[n++] = GLX_CONTEXT_DEBUG_BIT_ARB;
+    }
+    attribs[n] = None;
+
+    g_context_failed = false;
+    XErrorHandler previous = XSetErrorHandler(context_error_handler);
+    GLXContext c = g.create_context(g.dpy, fb, NULL, True, attribs);
+    XSync(g.dpy, False);
+    XSetErrorHandler(previous);
+
+    if (g_context_failed || !c)
+    {
+        if (c)
+            glXDestroyContext(g.dpy, c);
+        error_set("cannot create an OpenGL %s %d.%d context%s", name, major, minor, gl->debug ? " with debug" : "");
+        return NULL;
+    }
+    return c;
 }
 
 /* ========================================================================== */
@@ -293,7 +430,7 @@ bool backend_init(void)
 {
     g.dpy = XOpenDisplay(NULL);
     if (!g.dpy)
-        return false;
+        return error_set("cannot open the X display");
     g.screen = DefaultScreen(g.dpy);
     g.root = RootWindow(g.dpy, g.screen);
     g.ctx = XUniqueContext();
@@ -325,6 +462,7 @@ bool backend_init(void)
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
 
     g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
+    g.has_es_profile = glx_has_extension("GLX_EXT_create_context_es2_profile");
     g.swap_ext = (glXSwapIntervalEXTProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
     g.swap_mesa = (glXSwapIntervalMESAProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalMESA");
     g.swap_sgi = (glXSwapIntervalSGIProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalSGI");
@@ -334,6 +472,11 @@ bool backend_init(void)
 void backend_shutdown(void)
 {
     free(g.clipboard_text);
+    for (int i = 0; i < CURSOR_COUNT; i++)
+    {
+        if (g.cursors[i])
+            XFreeCursor(g.dpy, g.cursors[i]);
+    }
     if (g.helper)
         XDestroyWindow(g.dpy, g.helper);
     if (g.xim)
@@ -367,16 +510,22 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     {
         vi = &vinfo;
         if (!XMatchVisualInfo(g.dpy, g.screen, DefaultDepth(g.dpy, g.screen), TrueColor, vi))
+        {
+            error_set("no TrueColor visual");
             return NULL;
+        }
     }
     else
     {
-        fb = choose_fbconfig(cfg);
+        fb = choose_fbconfig(&cfg->gl);
         if (!fb)
             return NULL;
         vi = glXGetVisualFromFBConfig(g.dpy, fb);
         if (!vi)
+        {
+            error_set("the framebuffer configuration has no visual");
             return NULL;
+        }
     }
 
     BackendWindow *b = calloc(1, sizeof *b);
@@ -464,11 +613,10 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
     else
     {
-        b->glc = create_context(fb, cfg->gl_major, cfg->gl_minor);
+        b->glc = create_context(fb, &cfg->gl);
         if (!b->glc)
         {
-            XDestroyWindow(g.dpy, b->win);
-            free(b);
+            backend_destroy(b);
             return NULL;
         }
         glXMakeCurrent(g.dpy, b->win, b->glc);
@@ -543,8 +691,6 @@ void backend_destroy(BackendWindow *b)
     XDeleteContext(g.dpy, b->win, g.ctx);
     if (b->hidden_cursor)
         XFreeCursor(g.dpy, b->hidden_cursor);
-    if (b->active_cursor)
-        XFreeCursor(g.dpy, b->active_cursor);
     XDestroyWindow(g.dpy, b->win);
     XFreeColormap(g.dpy, b->colormap);
     free(b);
@@ -973,19 +1119,22 @@ void backend_set_title(BackendWindow *b, const char *title)
 void backend_set_size_limits(BackendWindow *b, int minw, int minh, int maxw, int maxh)
 {
     XSizeHints *hints = XAllocSizeHints();
-    if (!hints) return;
+    if (!hints)
+        return;
 
     hints->flags = 0;
 
-    if (minw > 0 || minh > 0) {
+    if (minw > 0 || minh > 0)
+    {
         hints->flags |= PMinSize;
-        hints->min_width  = minw > 0 ? minw : 1;
+        hints->min_width = minw > 0 ? minw : 1;
         hints->min_height = minh > 0 ? minh : 1;
     }
 
-    if (maxw > 0 || maxh > 0) {
+    if (maxw > 0 || maxh > 0)
+    {
         hints->flags |= PMaxSize;
-        hints->max_width  = maxw > 0 ? maxw : 32767;
+        hints->max_width = maxw > 0 ? maxw : 32767;
         hints->max_height = maxh > 0 ? maxh : 32767;
     }
 
@@ -1106,8 +1255,10 @@ void backend_set_icon(BackendWindow *b, int w, int h, const uint8_t *rgba)
 
 void backend_set_opacity(BackendWindow *b, float a)
 {
-    if (a < 0.0f) a = 0.0f;
-    if (a > 1.0f) a = 1.0f;
+    if (a < 0.0f)
+        a = 0.0f;
+    if (a > 1.0f)
+        a = 1.0f;
     uint32_t value = (uint32_t)((double)a * 4294967295.0);
     XChangeProperty(g.dpy, b->win, g.NET_WM_WINDOW_OPACITY, XA_CARDINAL, 32,
                     PropModeReplace, (unsigned char *)&value, 1);
@@ -1140,38 +1291,45 @@ static Cursor make_hidden_cursor(BackendWindow *b)
     return b->hidden_cursor;
 }
 
-void backend_set_cursor(BackendWindow *b, int cursor)
+static unsigned int cursor_shape(int cursor)
 {
-    unsigned int shape;
     switch (cursor)
     {
     case CURSOR_IBEAM:
-        shape = XC_xterm;
-        break;
+        return XC_xterm;
     case CURSOR_CROSSHAIR:
-        shape = XC_crosshair;
-        break;
+        return XC_crosshair;
     case CURSOR_HAND:
-        shape = XC_hand2;
-        break;
+        return XC_hand2;
     case CURSOR_RESIZE_EW:
-        shape = XC_sb_h_double_arrow;
-        break;
+        return XC_sb_h_double_arrow;
     case CURSOR_RESIZE_NS:
-        shape = XC_sb_v_double_arrow;
-        break;
+        return XC_sb_v_double_arrow;
+    case CURSOR_RESIZE_NWSE:
+        return XC_top_left_corner;
+    case CURSOR_RESIZE_NESW:
+        return XC_top_right_corner;
+    case CURSOR_RESIZE_ALL:
+        return XC_fleur;
     case CURSOR_NOT_ALLOWED:
-        shape = XC_X_cursor;
-        break;
+        return XC_X_cursor;
     default:
-        shape = XC_left_ptr;
-        break;
+        return XC_left_ptr;
     }
-    if (b->active_cursor)
-        XFreeCursor(g.dpy, b->active_cursor);
-    b->active_cursor = XCreateFontCursor(g.dpy, shape);
+}
+
+void backend_set_cursor(BackendWindow *b, int cursor)
+{
+    if (cursor < 0 || cursor >= CURSOR_COUNT)
+        cursor = CURSOR_DEFAULT;
+    if (!g.cursors[cursor])
+        g.cursors[cursor] = XCreateFontCursor(g.dpy, cursor_shape(cursor));
+    b->active_cursor = g.cursors[cursor];
     if (b->cursor_mode == MOUSE_MODE_NORMAL)
+    {
         XDefineCursor(g.dpy, b->win, b->active_cursor);
+        XFlush(g.dpy);
+    }
 }
 
 void backend_set_mouse_mode(BackendWindow *b, int mode)

@@ -1,24 +1,44 @@
 cmake_minimum_required(VERSION 3.16)
+
 project(platform LANGUAGES C)
+
+# Static CRT: executables and the library depend on no runtime DLL (vcruntime, ...).
+# MSVC is only defined once the compiler is known, so this goes after project().
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 option(PLATFORM_BUILD_TESTS "Build unit tests" ON)
 option(PLATFORM_USE_FAKE    "Force the fake backend" OFF)
 option(PLATFORM_SANITIZE    "Build with ASan + UBSan (debug)" OFF)
 # BUILD_SHARED_LIBS (CMake builtin): ON -> .so/.dll, OFF -> .a/.lib
 
-set(CORE_SRC src/core.c src/os.c src/draw2d.c src/image.c)
+set(CORE_SRC src/core.c src/error.c src/gamepad.c src/io.c src/os.c src/draw2d.c src/image.c)
+if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT EMSCRIPTEN AND NOT PLATFORM_USE_FAKE)
+    list(APPEND CORE_SRC src/gamepad_evdev.c)
+elseif(WIN32 AND NOT PLATFORM_USE_FAKE)
+    list(APPEND CORE_SRC src/gamepad_xinput.c)
+else()
+    list(APPEND CORE_SRC src/gamepad_stub.c)
+endif()
+if(WIN32)
+    list(APPEND CORE_SRC src/io_win32.c src/fs_win32.c src/win32_util.c)
+else()
+    list(APPEND CORE_SRC src/io_posix.c src/fs_posix.c)
+endif()
 
 if(PLATFORM_USE_FAKE)
     set(BACKEND_SRC src/backend_fake.c)
 elseif(EMSCRIPTEN)
     set(BACKEND_SRC src/backend_web.c)
 elseif(ANDROID)
-    set(BACKEND_SRC src/backend_android.c
+    set(BACKEND_SRC src/backend_android.c src/io_android.c
         ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
 elseif(WIN32)
     set(BACKEND_SRC src/backend_win32.c)
 elseif(UNIX)
     set(BACKEND_SRC src/backend_x11.c)
+    set(PLATFORM_BACKEND_X11 ON)
 else()
     message(FATAL_ERROR "Unsupported platform")
 endif()
@@ -46,6 +66,10 @@ if(PLATFORM_SANITIZE)
     endif()
 endif()
 target_link_libraries(platform PUBLIC platform_sanitize)
+if(MSVC)
+    target_compile_options(platform PUBLIC /utf-8)
+    target_compile_definitions(platform PUBLIC _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # native libs per platform
 if(EMSCRIPTEN)
@@ -57,7 +81,10 @@ elseif(ANDROID)
     # Keep the activity entry point the glue exports from being stripped from the .so.
     target_link_options(platform PUBLIC "-u" "ANativeActivity_onCreate")
 elseif(WIN32)
-    target_link_libraries(platform PUBLIC opengl32 gdi32 user32)
+    target_link_libraries(platform PUBLIC opengl32 gdi32 user32 shell32)
+    if(MINGW)
+        target_link_options(platform PUBLIC -static)
+    endif()
 elseif(UNIX AND NOT PLATFORM_USE_FAKE)
     find_package(X11 REQUIRED)
     target_link_libraries(platform PUBLIC X11 Xrandr GL ${CMAKE_DL_LIBS})
@@ -69,6 +96,9 @@ if(PLATFORM_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT ANDROID)
 endif()
 
 option(PLATFORM_BUILD_EXAMPLES "Build examples" ON)
-if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX))
+if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_subdirectory(examples)
 endif()
+
+install(TARGETS platform ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+install(FILES include/platform.h include/platform_export.h DESTINATION include)

@@ -6,6 +6,9 @@
  */
 #include "platform.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <GL/gl.h>
 #include <stdio.h>
 
@@ -58,8 +61,7 @@ int main(void)
         .height = 480,
         .x = WINDOW_POS_CENTERED,
         .y = WINDOW_POS_CENTERED,
-        .gl_major = 3,
-        .gl_minor = 3,
+        .gl = {.major = 3, .minor = 3},
         .resizable = true,
         .vsync = true,
     };

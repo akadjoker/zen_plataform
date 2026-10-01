@@ -31,7 +31,7 @@ int main(void)
     if (!platform_init())
         return 1;
 
-    WindowConfig cfg = {.title = "hello_android", .gl_major = 3, .gl_minor = 0, .vsync = true};
+    WindowConfig cfg = {.title = "hello_android", .gl = {.major = 3, .minor = 0}, .vsync = true};
     PlatformWindow *w = window_create(&cfg);
     if (!w)
         return 1;

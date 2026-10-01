@@ -28,6 +28,27 @@ cmake ..
 make
 ```
 
+On Windows, from a Visual Studio developer prompt:
+
+```sh
+cmake -S . -B build -A x64
+cmake --build build --config Release
+ctest --test-dir build -C Release
+```
+
+The CRT is linked statically (`/MT`; `-static` with MinGW), so the executables
+import only DLLs that ship with Windows: no vcruntime, no SDL, no GLFW.
+
+### Releases
+
+CI builds Linux, Windows (MSVC and MinGW), Web and Android on every push. Pushing a
+tag that starts with `v` (for example `v0.1.0`) publishes a GitHub release with one
+zip per platform: the static library, `platform.h`, and the examples.
+A tag with a hyphen (`v0.1.0-rc1`) is marked as a pre-release.
+
+Without a local tag, run the workflow by hand (Actions, CI, Run workflow) and type the
+version in `release_version`; the release is created on the chosen commit.
+
 ### Options
 
 | Flag | Default | Description |
@@ -43,7 +64,7 @@ make
 | Platform | Backend | Notes |
 |---|---|---|
 | Linux / X11 | `backend_x11.c` | requires X11 + Xrandr + GL/GLX dev packages |
-| Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32 |
+| Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |
 | macOS/iOS | `backend_cocoa.mm` | Obj-C++, in progress |
@@ -57,9 +78,11 @@ if (!platform_init()) return 1;
 
 WindowConfig cfg = {
     .title = "Hello", .width = 640, .height = 480,
-    .render = RENDER_GL
+    .render = RENDER_GL,
+    .gl = { .profile = GL_PROFILE_CORE, .major = 4, .minor = 5, .msaa = 4, .debug = true }
 };
 PlatformWindow *w = window_create(&cfg);
+if (!w) fprintf(stderr, "%s\n", platform_get_error());
 
 app_run(w, frame_callback, user_data);
 
@@ -75,7 +98,29 @@ bool pressed = key_pressed(w, KEY_R);   // single-frame edge
 int mx = mouse_x(w), my = mouse_y(w);
 int dx, dy;  mouse_delta(w, &dx, &dy);
 bool left_click = mouse_button_released(w, MOUSE_LEFT);
+int mods = key_mods(w);                 // KEYMOD_SHIFT | KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER held now
+bool numpad7 = key_down(w, KEY_KP_7);
+mouse_set_cursor(w, CURSOR_RESIZE_NWSE);
+time_sleep(16);                         // milliseconds
 ```
+
+### Gamepads
+
+```c
+for (int i = 0; i < GAMEPAD_MAX; i++)
+{
+    if (!gamepad_connected(i)) continue;
+    bool jump = gamepad_button_down(i, GAMEPAD_BUTTON_A);
+    float x = gamepad_axis(i, GAMEPAD_AXIS_LEFT_X);   // -1..1, no deadzone
+    float rt = gamepad_axis(i, GAMEPAD_AXIS_TRIGGER_RIGHT); // 0..1
+}
+```
+
+Polled; `window_begin_frame` refreshes the state. Layout and order follow
+SDL_GameController. Linux reads `/dev/input/event*` (evdev) and needs read
+permission on them, normally the `input` group. Pads are detected at startup and
+on hot-plug. Only pads that follow the kernel gamepad layout are listed; there is
+no mapping database.
 
 ### Event queue
 
@@ -118,11 +163,33 @@ framebuffer_free(&rt);
 ### Filesystem
 
 ```c
+IoStream *s = io_open_file("save.dat", "rb");        // no stdio: POSIX fd / AAsset
+io_read(s, buf, n); io_seek(s, 0, IO_SEEK_END); io_close(s);
+void *all = io_load_file("level.bin", &size);        // NUL-terminated, fs_free
+io_save_file("save.dat", data, size);                // atomic: .tmp + fsync + rename
+IoStream *a = io_open_asset("tex/a.png");            // APK on Android, asset root elsewhere
 uint8_t *data = file_read("file.bin", &size);   // heap-allocated, free with fs_free
 char *text = file_read_text("doc.txt");
 file_write("out.bin", data, size);
 bool exists = file_exists("path");
 const char *cwd = dir_current();
+
+char save[512];
+fs_get_pref_path(save, sizeof save, "MyOrg", "MyGame");  // created, ends with '/'
+fs_get_base_path(base, sizeof base);                      // executable dir, ends with '/'
+PathInfo info;
+if (fs_get_path_info("save.dat", &info) && info.type == PATH_TYPE_FILE)
+    printf("%lld bytes\n", (long long)info.size);
+fs_create_directory("a/b/c");                             // recursive
+fs_rename_path("a.tmp", "a.dat");
+fs_enumerate_directory("assets", true, on_entry, NULL);   // bool on_entry(path, type, user)
+
+char path[512];
+path_join(path, sizeof path, "assets", "tex/a.png");     // "assets/tex/a.png"
+path_normalize(path, sizeof path, "a/./b/../c");         // "a/c"
+path_relative(path, sizeof path, "/p/assets/a.png", "/p"); // "assets/a.png"
+if (!path_absolute(path, sizeof path, "save.dat"))
+    printf("%s\n", platform_get_error());
 ```
 
 ## Examples

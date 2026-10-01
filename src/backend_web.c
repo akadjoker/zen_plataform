@@ -9,6 +9,7 @@
  */
 #include "core_internal.h"
 #include "backend.h"
+#include "error_internal.h"
 
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
@@ -77,6 +78,8 @@ static int translate_code(const char *code)
         return KEY_A + (code[3] - 'A');
     if (strncmp(code, "Digit", 5) == 0 && code[5])
         return KEY_ZERO + (code[5] - '0');
+    if (strncmp(code, "Numpad", 6) == 0 && code[6] >= '0' && code[6] <= '9' && !code[7])
+        return KEY_KP_0 + (code[6] - '0');
     if (code[0] == 'F' && code[1] >= '1' && code[1] <= '9')
     {
         int n = atoi(code + 1);
@@ -124,6 +127,18 @@ static int translate_code(const char *code)
         {"MetaLeft", KEY_LEFT_SUPER},
         {"MetaRight", KEY_RIGHT_SUPER},
         {"CapsLock", KEY_CAPS_LOCK},
+        {"NumLock", KEY_NUM_LOCK},
+        {"ScrollLock", KEY_SCROLL_LOCK},
+        {"PrintScreen", KEY_PRINT_SCREEN},
+        {"Pause", KEY_PAUSE},
+        {"ContextMenu", KEY_MENU},
+        {"NumpadDecimal", KEY_KP_DECIMAL},
+        {"NumpadDivide", KEY_KP_DIVIDE},
+        {"NumpadMultiply", KEY_KP_MULTIPLY},
+        {"NumpadSubtract", KEY_KP_SUBTRACT},
+        {"NumpadAdd", KEY_KP_ADD},
+        {"NumpadEnter", KEY_KP_ENTER},
+        {"NumpadEqual", KEY_KP_EQUAL},
     };
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
         if (strcmp(code, map[i].name) == 0)
@@ -135,13 +150,13 @@ static int translate_kb_mods(const EmscriptenKeyboardEvent *e)
 {
     int mods = 0;
     if (e->shiftKey)
-        mods |= MOD_SHIFT;
+        mods |= KEYMOD_SHIFT;
     if (e->ctrlKey)
-        mods |= MOD_CTRL;
+        mods |= KEYMOD_CTRL;
     if (e->altKey)
-        mods |= MOD_ALT;
+        mods |= KEYMOD_ALT;
     if (e->metaKey)
-        mods |= MOD_SUPER;
+        mods |= KEYMOD_SUPER;
     return mods;
 }
 
@@ -317,6 +332,19 @@ void backend_shutdown(void)
 {
 }
 
+/* WebGL2 is GLES 3.0 and WebGL1 is GLES 2.0; nothing else exists in a browser. */
+static bool web_gl_version(const GLConfig *gl, int *webgl_major)
+{
+    int major = gl->major ? gl->major : 3;
+    int minor = gl->major ? gl->minor : 0;
+    if (gl->profile != GL_PROFILE_DEFAULT && gl->profile != GL_PROFILE_ES)
+        return error_set("only OpenGL ES contexts are available on the web");
+    if ((major != 2 && major != 3) || minor > 0)
+        return error_set("OpenGL ES %d.%d is not available on the web", major, minor);
+    *webgl_major = major == 3 ? 2 : 1;
+    return true;
+}
+
 BackendWindow *backend_create(const WindowConfig *cfg)
 {
     BackendWindow *b = calloc(1, sizeof *b);
@@ -335,11 +363,18 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
     else
     {
+        int webgl_major;
+        if (!web_gl_version(&cfg->gl, &webgl_major))
+        {
+            free(b);
+            return NULL;
+        }
+
         EmscriptenWebGLContextAttributes attrs;
         emscripten_webgl_init_context_attributes(&attrs);
-        attrs.majorVersion = 2; /* WebGL2 == GLES 3.0 */
+        attrs.majorVersion = webgl_major;
         attrs.minorVersion = 0;
-        attrs.antialias = cfg->msaa > 0;
+        attrs.antialias = cfg->gl.msaa > 0;
         attrs.alpha = false;
         attrs.depth = true;
         attrs.stencil = true;
@@ -347,6 +382,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         b->gl = emscripten_webgl_create_context(CANVAS_TARGET, &attrs);
         if (b->gl <= 0)
         {
+            error_set("cannot create a WebGL %d context", attrs.majorVersion);
             free(b);
             return NULL;
         }
@@ -686,6 +722,15 @@ void backend_set_cursor(BackendWindow *b, int cursor)
         break;
     case CURSOR_RESIZE_NS:
         css = "ns-resize";
+        break;
+    case CURSOR_RESIZE_NWSE:
+        css = "nwse-resize";
+        break;
+    case CURSOR_RESIZE_NESW:
+        css = "nesw-resize";
+        break;
+    case CURSOR_RESIZE_ALL:
+        css = "move";
         break;
     case CURSOR_NOT_ALLOWED:
         css = "not-allowed";

@@ -1,18 +1,23 @@
 /*
- * os.c - portable OS/filesystem core. stdio for file I/O, string logic for paths,
- * POSIX for directories. The parts that cannot be portable (Android assets, web
- * MEMFS) route through os_backend hooks added in a later phase; until then asset_*
- * reads from a configured root on the real filesystem.
+ * os.c - portable OS/filesystem core: file helpers over io.c, string logic for
+ * paths. Directory and stat work lives in fs_posix.c.
  */
+#define _POSIX_C_SOURCE 200809L
+
 #include "platform.h"
 #include "os_backend.h"
+#include "error_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#if defined(_WIN32)
+#define strcasecmp _stricmp
+#else
 #include <strings.h>
+#endif
 #include <errno.h>
-#include <sys/stat.h>
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -20,7 +25,6 @@
 #define getcwd _getcwd
 #define chdir _chdir
 #else
-#include <dirent.h>
 #include <unistd.h>
 #endif
 
@@ -28,131 +32,26 @@
 #define PATH_CAP 4096
 #endif
 
-/* ---- whole-file read, the one place bytes come off disk ---- */
-
-static uint8_t *read_whole(const char *path, size_t *out_size, bool text)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-    if (fseek(f, 0, SEEK_END) != 0)
-    {
-        fclose(f);
-        return NULL;
-    }
-    long len = ftell(f);
-    if (len < 0)
-    {
-        fclose(f);
-        return NULL;
-    }
-    rewind(f);
-
-    uint8_t *buf = malloc((size_t)len + (text ? 1 : 0));
-    if (!buf)
-    {
-        fclose(f);
-        return NULL;
-    }
-    size_t got = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    if (got != (size_t)len)
-    {
-        free(buf);
-        return NULL;
-    }
-    if (text)
-        buf[len] = '\0';
-    if (out_size)
-        *out_size = (size_t)len;
-    return buf;
-}
-
-/* ---- asset root ---- */
-
-static char g_asset_root[PATH_CAP];
-
-void asset_set_root(const char *path)
-{
-    if (!path)
-    {
-        g_asset_root[0] = '\0';
-        return;
-    }
-    snprintf(g_asset_root, sizeof g_asset_root, "%s", path);
-}
-
-static void asset_join(const char *path, char *out, size_t cap)
-{
-    const char *root = g_asset_root[0] ? g_asset_root : dir_app();
-    if (root && root[0])
-        snprintf(out, cap, "%s/%s", root, path);
-    else
-        snprintf(out, cap, "%s", path);
-}
-
-/* Backend-routed first (Android assets), then the asset root on disk. The backend
-   buffer is always NUL-terminated, so it serves both the bytes and text paths. */
-static uint8_t *asset_load(const char *path, size_t *out_size, bool text)
-{
-    size_t n = 0;
-    uint8_t *routed = os_backend_asset_read(path, &n);
-    if (routed)
-    {
-        if (out_size)
-            *out_size = n;
-        return routed;
-    }
-    char full[PATH_CAP];
-    asset_join(path, full, sizeof full);
-    return read_whole(full, out_size, text);
-}
-
-uint8_t *asset_read(const char *path, size_t *out_size)
-{
-    return asset_load(path, out_size, false);
-}
-
-char *asset_read_text(const char *path)
-{
-    return (char *)asset_load(path, NULL, true);
-}
-
-bool asset_exists(const char *path)
-{
-    int routed = os_backend_asset_exists(path);
-    if (routed >= 0)
-        return routed != 0;
-    char full[PATH_CAP];
-    asset_join(path, full, sizeof full);
-    return file_exists(full);
-}
-
 /* ---- read-write files ---- */
 
 uint8_t *file_read(const char *path, size_t *out_size)
 {
-    return read_whole(path, out_size, false);
+    return io_load_file(path, out_size);
 }
 
 char *file_read_text(const char *path)
 {
-    return (char *)read_whole(path, NULL, true);
+    return io_load_file(path, NULL);
 }
 
 bool file_write(const char *path, const void *data, size_t size)
 {
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return false;
-    size_t put = (size && data) ? fwrite(data, 1, size, f) : 0;
-    fclose(f);
-    return put == size;
+    return io_save_file(path, data, size);
 }
 
 bool file_write_text(const char *path, const char *text)
 {
-    return file_write(path, text, text ? strlen(text) : 0);
+    return io_save_file(path, text, text ? strlen(text) : 0);
 }
 
 void fs_free(void *data)
@@ -164,26 +63,26 @@ void fs_free(void *data)
 
 bool file_exists(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 && !S_ISDIR(st.st_mode);
+    PathInfo info;
+    return fs_get_path_info(path, &info) && info.type != PATH_TYPE_DIRECTORY;
 }
 
 bool dir_exists(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    PathInfo info;
+    return fs_get_path_info(path, &info) && info.type == PATH_TYPE_DIRECTORY;
 }
 
 int64_t file_size(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 ? (int64_t)st.st_size : -1;
+    PathInfo info;
+    return fs_get_path_info(path, &info) ? info.size : -1;
 }
 
 int64_t file_mod_time(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 ? (int64_t)st.st_mtime : -1;
+    PathInfo info;
+    return fs_get_path_info(path, &info) ? info.modify_time_ns / 1000000000 : -1;
 }
 
 /* ---- path string helpers ---- */
@@ -240,32 +139,248 @@ bool path_has_extension(const char *path, const char *ext)
     return strcasecmp(e, ext) == 0;
 }
 
-/* ---- directories ---- */
+/* ---- path builders ---- */
 
-static char g_path_buf[PATH_CAP];
+static bool is_sep(char c)
+{
+#if defined(_WIN32)
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+static size_t root_len(const char *p)
+{
+#if defined(_WIN32)
+    if (isalpha((unsigned char)p[0]) && p[1] == ':')
+        return is_sep(p[2]) ? 3 : 2;
+    if (is_sep(p[0]) && is_sep(p[1]))
+        return 2;
+#endif
+    return is_sep(p[0]) ? 1 : 0;
+}
+
+static bool name_eq(const char *a, const char *b, size_t n)
+{
+#if defined(_WIN32)
+    return _strnicmp(a, b, n) == 0;
+#else
+    return strncmp(a, b, n) == 0;
+#endif
+}
+
+static size_t component_len(const char *s)
+{
+    size_t n = 0;
+    while (s[n] && !is_sep(s[n]))
+        n++;
+    return n;
+}
+
+static bool path_fail(char *out, size_t cap)
+{
+    if (cap)
+        out[0] = '\0';
+    return error_set("path too long");
+}
+
+static bool path_put(char *out, size_t cap, const char *src, size_t n)
+{
+    if (n >= cap)
+        return path_fail(out, cap);
+    memmove(out, src, n);
+    out[n] = '\0';
+    return true;
+}
+
+bool path_is_absolute(const char *path)
+{
+    if (!path)
+        return false;
+    size_t root = root_len(path);
+#if defined(_WIN32)
+    if (root == 2 && path[1] == ':')
+        return false;
+#endif
+    return root > 0;
+}
+
+bool path_join(char *out, size_t cap, const char *a, const char *b)
+{
+    char res[PATH_CAP];
+    if (!a)
+        a = "";
+    if (!b)
+        b = "";
+    if (!a[0] || path_is_absolute(b))
+        return path_put(out, cap, b, strlen(b));
+
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t sep = (is_sep(a[la - 1]) || !b[0]) ? 0 : 1;
+    if (la + sep + lb >= sizeof res)
+        return path_fail(out, cap);
+    memcpy(res, a, la);
+    if (sep)
+        res[la] = '/';
+    memcpy(res + la + sep, b, lb);
+    return path_put(out, cap, res, la + sep + lb);
+}
+
+bool path_normalize(char *out, size_t cap, const char *path)
+{
+    char res[PATH_CAP];
+    if (!path)
+        path = "";
+    size_t root = root_len(path);
+    bool absolute = path_is_absolute(path);
+    size_t n = 0;
+    for (; n < root; n++)
+        res[n] = is_sep(path[n]) ? '/' : path[n];
+
+    const char *p = path + root;
+    for (;;)
+    {
+        while (is_sep(*p))
+            p++;
+        if (!*p)
+            break;
+        const char *name = p;
+        size_t len = component_len(p);
+        p += len;
+
+        if (len == 1 && name[0] == '.')
+            continue;
+        if (len == 2 && name[0] == '.' && name[1] == '.')
+        {
+            size_t last = n;
+            while (last > root && res[last - 1] != '/')
+                last--;
+            bool parent_is_dotdot = n - last == 2 && res[last] == '.' && res[last + 1] == '.';
+            if (n > root && !parent_is_dotdot)
+            {
+                n = last > root ? last - 1 : root;
+                continue;
+            }
+            if (absolute)
+                continue;
+        }
+
+        size_t sep = n > root ? 1 : 0;
+        if (n + sep + len >= sizeof res)
+            return path_fail(out, cap);
+        if (sep)
+            res[n++] = '/';
+        memcpy(res + n, name, len);
+        n += len;
+    }
+    if (n == 0)
+        res[n++] = '.';
+    return path_put(out, cap, res, n);
+}
+
+bool path_absolute(char *out, size_t cap, const char *path)
+{
+    char cwd[PATH_CAP];
+    char joined[PATH_CAP];
+    if (path_is_absolute(path))
+        return path_normalize(out, cap, path);
+    if (!getcwd(cwd, sizeof cwd))
+    {
+        if (cap)
+            out[0] = '\0';
+        return error_set("getcwd failed: %s", strerror(errno));
+    }
+    if (!path_join(joined, sizeof joined, cwd, path))
+        return path_fail(out, cap);
+    return path_normalize(out, cap, joined);
+}
+
+bool path_relative(char *out, size_t cap, const char *path, const char *base)
+{
+    char p[PATH_CAP];
+    char b[PATH_CAP];
+    char res[PATH_CAP];
+    if (!path_absolute(p, sizeof p, path) || !path_absolute(b, sizeof b, base))
+    {
+        if (cap)
+            out[0] = '\0';
+        return false;
+    }
+
+    size_t root = root_len(p);
+    if (root != root_len(b) || !name_eq(p, b, root))
+    {
+        if (cap)
+            out[0] = '\0';
+        return error_set("no relative path from '%s' to '%s'", b, p);
+    }
+
+    size_t i = root;
+    size_t j = root;
+    for (;;)
+    {
+        size_t lp = component_len(p + i);
+        size_t lb = component_len(b + j);
+        if (lp == 0 || lp != lb || !name_eq(p + i, b + j, lp))
+            break;
+        i += lp;
+        j += lb;
+        if (p[i] == '/')
+            i++;
+        if (b[j] == '/')
+            j++;
+    }
+
+    size_t n = 0;
+    while (b[j])
+    {
+        size_t lb = component_len(b + j);
+        if (n + 3 >= sizeof res)
+            return path_fail(out, cap);
+        if (n)
+            res[n++] = '/';
+        res[n++] = '.';
+        res[n++] = '.';
+        j += lb;
+        if (b[j] == '/')
+            j++;
+    }
+    size_t rest = strlen(p + i);
+    if (rest)
+    {
+        if (n + 1 + rest >= sizeof res)
+            return path_fail(out, cap);
+        if (n)
+            res[n++] = '/';
+        memcpy(res + n, p + i, rest);
+        n += rest;
+    }
+    if (n == 0)
+        res[n++] = '.';
+    return path_put(out, cap, res, n);
+}
+
+/* ---- directories ---- */
 
 const char *dir_current(void)
 {
-    if (!getcwd(g_path_buf, sizeof g_path_buf))
-        g_path_buf[0] = '\0';
-    return g_path_buf;
+    static char cwd[PATH_CAP];
+    if (!getcwd(cwd, sizeof cwd))
+        cwd[0] = '\0';
+    return cwd;
 }
 
 const char *dir_app(void)
 {
-#if defined(_WIN32)
-    /* Filled in by the Win32 backend later; cwd is the desktop fallback. */
-    return dir_current();
-#else
-    ssize_t n = readlink("/proc/self/exe", g_path_buf, sizeof g_path_buf - 1);
-    if (n <= 0)
+    static char app[PATH_CAP];
+    if (!fs_get_base_path(app, sizeof app))
         return dir_current();
-    g_path_buf[n] = '\0';
-    char *sep = strrchr(g_path_buf, '/');
-    if (sep)
-        *sep = '\0';
-    return g_path_buf;
-#endif
+    size_t n = strlen(app);
+    if (n > 1 && app[n - 1] == '/')
+        app[n - 1] = '\0';
+    return app;
 }
 
 const char *dir_data(void)
@@ -279,33 +394,45 @@ bool dir_change(const char *path)
     return chdir(path) == 0;
 }
 
-static bool make_one(const char *path)
-{
-#if defined(_WIN32)
-    return _mkdir(path) == 0 || errno == EEXIST;
-#else
-    return mkdir(path, 0777) == 0 || dir_exists(path);
-#endif
-}
-
 bool dir_make(const char *path)
 {
-    char tmp[PATH_CAP];
-    snprintf(tmp, sizeof tmp, "%s", path);
-    for (char *p = tmp + 1; *p; p++)
-    {
-        if (*p == '/')
-        {
-            *p = '\0';
-            if (tmp[0] && !make_one(tmp))
-                return false;
-            *p = '/';
-        }
-    }
-    return make_one(tmp);
+    return fs_create_directory(path);
 }
 
-#if !defined(_WIN32)
+typedef struct
+{
+    DirList *list;
+    int cap;
+    bool failed;
+} ListState;
+
+static bool list_add(const char *path, PathType type, void *user)
+{
+    (void)type;
+    ListState *ls = user;
+    DirList *list = ls->list;
+    if (list->count == ls->cap)
+    {
+        int cap = ls->cap ? ls->cap * 2 : 16;
+        char **grown = realloc(list->paths, (size_t)cap * sizeof *grown);
+        if (!grown)
+        {
+            ls->failed = true;
+            return false;
+        }
+        list->paths = grown;
+        ls->cap = cap;
+    }
+    char *copy = malloc(strlen(path) + 1);
+    if (!copy)
+    {
+        ls->failed = true;
+        return false;
+    }
+    list->paths[list->count++] = strcpy(copy, path);
+    return true;
+}
+
 bool dir_list(const char *path, DirList *out)
 {
     if (!out)
@@ -313,47 +440,14 @@ bool dir_list(const char *path, DirList *out)
     out->paths = NULL;
     out->count = 0;
 
-    DIR *d = opendir(path);
-    if (!d)
-        return false;
-
-    int cap = 0;
-    struct dirent *e;
-    while ((e = readdir(d)))
-    {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-            continue;
-        if (out->count == cap)
-        {
-            cap = cap ? cap * 2 : 16;
-            char **grown = realloc(out->paths, (size_t)cap * sizeof *grown);
-            if (!grown)
-            {
-                closedir(d);
-                dir_list_free(out);
-                return false;
-            }
-            out->paths = grown;
-        }
-        char full[PATH_CAP];
-        snprintf(full, sizeof full, "%s/%s", path, e->d_name);
-        out->paths[out->count++] = strdup(full);
-    }
-    closedir(d);
-    return true;
+    ListState ls = {out, 0, false};
+    bool ok = fs_enumerate_directory(path, false, list_add, &ls);
+    if (ok && ls.failed)
+        ok = error_set("out of memory");
+    if (!ok)
+        dir_list_free(out);
+    return ok;
 }
-#else
-bool dir_list(const char *path, DirList *out)
-{
-    (void)path;
-    if (out)
-    {
-        out->paths = NULL;
-        out->count = 0;
-    }
-    return false; /* Win32 listing wired up with the Win32 backend phase */
-}
-#endif
 
 void dir_list_free(DirList *list)
 {
@@ -368,10 +462,9 @@ void dir_list_free(DirList *list)
 
 /* Default OS-backend hooks: no routing. The Android backend overrides these. */
 #if !defined(__ANDROID__)
-uint8_t *os_backend_asset_read(const char *path, size_t *out_size)
+IoStream *os_backend_asset_open(const char *path)
 {
     (void)path;
-    (void)out_size;
     return NULL;
 }
 int os_backend_asset_exists(const char *path)

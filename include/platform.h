@@ -45,6 +45,27 @@ extern "C"
 #define WINDOW_POS_UNDEFINED (-2) /* let the system choose the position   */
 #define MONITOR_CURRENT (-1)      /* the monitor the window is mostly on  */
 
+    typedef enum
+    {
+        GL_PROFILE_DEFAULT, /* core on desktop, ES on web and android */
+        GL_PROFILE_CORE,
+        GL_PROFILE_COMPAT,
+        GL_PROFILE_ES
+    } GLProfile;
+
+    /* Zero means default: 3.3 core on desktop, ES 3.0 on web and android, no MSAA,
+       no debug. The framebuffer is always RGBA8 with 24-bit depth, 8-bit stencil
+       and double buffering. A request the platform cannot satisfy makes
+       window_create fail (see platform_get_error); it is never downgraded.
+       debug is ignored on the web. */
+    typedef struct
+    {
+        GLProfile profile;
+        int major, minor;
+        int msaa; /* sample count, 0 to disable */
+        bool debug;
+    } GLConfig;
+
     typedef struct
     {
         const char *title;
@@ -53,10 +74,9 @@ extern "C"
         int monitor;       /* index, or MONITOR_CURRENT */
         WindowMode mode;
         RenderMode render; /* RENDER_GL (default) or RENDER_PIXELS */
-        int gl_major, gl_minor;
+        GLConfig gl;
         bool resizable;
         bool vsync;
-        int msaa; /* sample count, 0 to disable */
     } WindowConfig;
 
     typedef struct
@@ -175,6 +195,9 @@ extern "C"
        creation. Returns false if the platform could not be brought up. */
     PLATFORM_API bool platform_init(void);
     PLATFORM_API void platform_shutdown(void);
+
+    PLATFORM_API const char *platform_get_error(void);
+    PLATFORM_API void platform_clear_error(void);
 
     PLATFORM_API PlatformWindow *window_create(const WindowConfig *cfg);
     PLATFORM_API void window_destroy(PlatformWindow *w);
@@ -333,6 +356,8 @@ extern "C"
 
     /* Next key from this frame's press queue, in order. 0 when empty. */
     PLATFORM_API int key_get_pressed(PlatformWindow *w);
+    /* KEYMOD_* mask of the modifier keys held now. */
+    PLATFORM_API int key_mods(PlatformWindow *w);
     /* Next codepoint from the text-input queue. 0 when empty. Independent of the
        key queue, so it carries layout and composed input correctly. */
     PLATFORM_API uint32_t char_get_pressed(PlatformWindow *w);
@@ -370,11 +395,63 @@ extern "C"
     PLATFORM_API int touch_id(PlatformWindow *w, int index); /* stable across down..up */
 
     /* ========================================================================== */
+    /*  Gamepads                                                                  */
+    /* ========================================================================== */
+
+    /* Polled like the keyboard. Devices are detected by platform_init and while
+       the application runs; window_begin_frame refreshes the state. The layout is
+       SDL_GameController's: a pad that does not follow the standard layout is not
+       listed. Index 0..GAMEPAD_MAX-1 is a slot that stays taken while the device
+       is connected. */
+    enum
+    {
+        GAMEPAD_MAX = 4
+    };
+
+    typedef enum
+    {
+        GAMEPAD_BUTTON_A,
+        GAMEPAD_BUTTON_B,
+        GAMEPAD_BUTTON_X,
+        GAMEPAD_BUTTON_Y,
+        GAMEPAD_BUTTON_BACK,
+        GAMEPAD_BUTTON_GUIDE,
+        GAMEPAD_BUTTON_START,
+        GAMEPAD_BUTTON_LEFT_STICK,
+        GAMEPAD_BUTTON_RIGHT_STICK,
+        GAMEPAD_BUTTON_LEFT_SHOULDER,
+        GAMEPAD_BUTTON_RIGHT_SHOULDER,
+        GAMEPAD_BUTTON_DPAD_UP,
+        GAMEPAD_BUTTON_DPAD_DOWN,
+        GAMEPAD_BUTTON_DPAD_LEFT,
+        GAMEPAD_BUTTON_DPAD_RIGHT,
+        GAMEPAD_BUTTON_COUNT
+    } GamepadButton;
+
+    /* Sticks are -1..1 with Y growing downwards; triggers are 0..1. No deadzone. */
+    typedef enum
+    {
+        GAMEPAD_AXIS_LEFT_X,
+        GAMEPAD_AXIS_LEFT_Y,
+        GAMEPAD_AXIS_RIGHT_X,
+        GAMEPAD_AXIS_RIGHT_Y,
+        GAMEPAD_AXIS_TRIGGER_LEFT,
+        GAMEPAD_AXIS_TRIGGER_RIGHT,
+        GAMEPAD_AXIS_COUNT
+    } GamepadAxis;
+
+    PLATFORM_API bool gamepad_connected(int index);
+    PLATFORM_API const char *gamepad_name(int index); /* NULL when not connected */
+    PLATFORM_API bool gamepad_button_down(int index, int button);
+    PLATFORM_API float gamepad_axis(int index, int axis);
+
+    /* ========================================================================== */
     /*  Time                                                                      */
     /* ========================================================================== */
 
     PLATFORM_API double time_seconds(void); /* since platform_init */
     PLATFORM_API uint64_t time_nanos(void);
+    PLATFORM_API void time_sleep(uint32_t milliseconds);
 
     /* ========================================================================== */
     /*  Clipboard                                                                 */
@@ -392,6 +469,33 @@ extern "C"
        shipped resources are not real files (Android = AAssetManager); file_ and
        dir_ work on real, writable paths. asset and file read results are
        heap-allocated; release them with fs_free. */
+
+    typedef struct IoStream IoStream;
+
+    typedef enum
+    {
+        IO_SEEK_SET,
+        IO_SEEK_CUR,
+        IO_SEEK_END
+    } IoWhence;
+
+    /* mode as fopen: "r" "w" "a", optional '+', 'b' ignored. On Android a relative
+       path is tried under the internal data dir, then (read-only) in the APK assets. */
+    PLATFORM_API IoStream *io_open_file(const char *path, const char *mode);
+    PLATFORM_API IoStream *io_open_asset(const char *path);
+    PLATFORM_API IoStream *io_open_memory(const void *mem, size_t size);
+    PLATFORM_API size_t io_read(IoStream *s, void *dst, size_t n);
+    PLATFORM_API size_t io_write(IoStream *s, const void *src, size_t n);
+    PLATFORM_API int64_t io_seek(IoStream *s, int64_t offset, IoWhence whence);
+    PLATFORM_API int64_t io_tell(IoStream *s);
+    PLATFORM_API int64_t io_size(IoStream *s);
+    PLATFORM_API bool io_eof(IoStream *s);
+    PLATFORM_API bool io_flush(IoStream *s);
+    PLATFORM_API bool io_close(IoStream *s);
+    /* Whole-stream loads are NUL-terminated (size excludes it); free with fs_free. */
+    PLATFORM_API void *io_load(IoStream *s, size_t *out_size, bool close);
+    PLATFORM_API void *io_load_file(const char *path, size_t *out_size);
+    PLATFORM_API bool io_save_file(const char *path, const void *data, size_t size);
 
     PLATFORM_API uint8_t *asset_read(const char *path, size_t *out_size);
     PLATFORM_API char *asset_read_text(const char *path); /* NUL-terminated */
@@ -417,6 +521,45 @@ extern "C"
     PLATFORM_API const char *path_extension(const char *path);                 /* -> ".txt", "" if none */
     PLATFORM_API void path_directory(const char *path, char *out, size_t cap); /* -> "a/b" */
     PLATFORM_API bool path_has_extension(const char *path, const char *ext);   /* case-insensitive */
+
+    PLATFORM_API bool path_is_absolute(const char *path);
+    PLATFORM_API bool path_join(char *out, size_t cap, const char *a, const char *b);
+    PLATFORM_API bool path_normalize(char *out, size_t cap, const char *path);
+    PLATFORM_API bool path_absolute(char *out, size_t cap, const char *path);
+    PLATFORM_API bool path_relative(char *out, size_t cap, const char *path, const char *base);
+
+    typedef enum
+    {
+        PATH_TYPE_NONE,
+        PATH_TYPE_FILE,
+        PATH_TYPE_DIRECTORY,
+        PATH_TYPE_OTHER
+    } PathType;
+
+    typedef struct
+    {
+        PathType type;
+        int64_t size;
+        int64_t modify_time_ns; /* unix epoch */
+    } PathInfo;
+
+    /* Return false and set platform_get_error() on failure. Symlinks are followed
+       by fs_get_path_info and not by fs_remove_path. */
+    PLATFORM_API bool fs_get_path_info(const char *path, PathInfo *out); /* out may be NULL */
+    PLATFORM_API bool fs_create_directory(const char *path);             /* recursive, idempotent */
+    PLATFORM_API bool fs_remove_path(const char *path);                  /* a file or an empty directory */
+    PLATFORM_API bool fs_rename_path(const char *from, const char *to);  /* replaces an existing file */
+
+    /* Calls cb with the full path of every entry; returning false from cb stops
+       early and is not an error. Recursion does not follow symlinks. */
+    typedef bool (*FsEnumCallback)(const char *path, PathType type, void *user);
+    PLATFORM_API bool fs_enumerate_directory(const char *path, bool recursive, FsEnumCallback cb, void *user);
+
+    /* Executable directory and per-user writable directory (created), both ending
+       in '/'. The temp directory has no trailing '/'. */
+    PLATFORM_API bool fs_get_base_path(char *out, size_t cap);
+    PLATFORM_API bool fs_get_pref_path(char *out, size_t cap, const char *org, const char *app);
+    PLATFORM_API bool fs_get_temp_path(char *out, size_t cap);
 
     /* Directories, raylib-style cursor over the process cwd. The dir_* string
        getters return a pointer to internal storage, valid until the next call. */
@@ -521,6 +664,23 @@ extern "C"
         KEY_F10,
         KEY_F11,
         KEY_F12,
+        KEY_KP_0 = 320,
+        KEY_KP_1,
+        KEY_KP_2,
+        KEY_KP_3,
+        KEY_KP_4,
+        KEY_KP_5,
+        KEY_KP_6,
+        KEY_KP_7,
+        KEY_KP_8,
+        KEY_KP_9,
+        KEY_KP_DECIMAL,
+        KEY_KP_DIVIDE,
+        KEY_KP_MULTIPLY,
+        KEY_KP_SUBTRACT,
+        KEY_KP_ADD,
+        KEY_KP_ENTER,
+        KEY_KP_EQUAL,
         KEY_LEFT_SHIFT = 340,
         KEY_LEFT_CONTROL,
         KEY_LEFT_ALT,
@@ -529,15 +689,17 @@ extern "C"
         KEY_RIGHT_CONTROL,
         KEY_RIGHT_ALT,
         KEY_RIGHT_SUPER,
+        KEY_MENU,
+        KEY_SCROLL_LOCK,
         KEY_MAX
     };
 
     enum
     {
-        MOD_SHIFT = 1,
-        MOD_CTRL = 2,
-        MOD_ALT = 4,
-        MOD_SUPER = 8
+        KEYMOD_SHIFT = 1,
+        KEYMOD_CTRL = 2,
+        KEYMOD_ALT = 4,
+        KEYMOD_SUPER = 8
     };
 
     enum
@@ -559,7 +721,11 @@ extern "C"
         CURSOR_HAND,
         CURSOR_RESIZE_EW,
         CURSOR_RESIZE_NS,
-        CURSOR_NOT_ALLOWED
+        CURSOR_NOT_ALLOWED,
+        CURSOR_RESIZE_NWSE,
+        CURSOR_RESIZE_NESW,
+        CURSOR_RESIZE_ALL,
+        CURSOR_COUNT
     };
 
     enum

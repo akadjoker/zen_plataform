@@ -9,9 +9,11 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "os_backend.h"
+#include "error_internal.h"
 
 #include <android_native_app_glue.h>
 #include <android/keycodes.h>
+#include <android/asset_manager.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <EGL/egl.h>
@@ -52,9 +54,43 @@ static int translate_key(int32_t code)
         return KEY_ZERO + (code - AKEYCODE_0);
     if (code >= AKEYCODE_F1 && code <= AKEYCODE_F12)
         return KEY_F1 + (code - AKEYCODE_F1);
+    if (code >= AKEYCODE_NUMPAD_0 && code <= AKEYCODE_NUMPAD_9)
+        return KEY_KP_0 + (code - AKEYCODE_NUMPAD_0);
 
     switch (code)
     {
+    case AKEYCODE_NUMPAD_DOT:
+        return KEY_KP_DECIMAL;
+    case AKEYCODE_NUMPAD_DIVIDE:
+        return KEY_KP_DIVIDE;
+    case AKEYCODE_NUMPAD_MULTIPLY:
+        return KEY_KP_MULTIPLY;
+    case AKEYCODE_NUMPAD_SUBTRACT:
+        return KEY_KP_SUBTRACT;
+    case AKEYCODE_NUMPAD_ADD:
+        return KEY_KP_ADD;
+    case AKEYCODE_NUMPAD_ENTER:
+        return KEY_KP_ENTER;
+    case AKEYCODE_NUMPAD_EQUALS:
+        return KEY_KP_EQUAL;
+    case AKEYCODE_MENU:
+        return KEY_MENU;
+    case AKEYCODE_SCROLL_LOCK:
+        return KEY_SCROLL_LOCK;
+    case AKEYCODE_INSERT:
+        return KEY_INSERT;
+    case AKEYCODE_CAPS_LOCK:
+        return KEY_CAPS_LOCK;
+    case AKEYCODE_NUM_LOCK:
+        return KEY_NUM_LOCK;
+    case AKEYCODE_SYSRQ:
+        return KEY_PRINT_SCREEN;
+    case AKEYCODE_BREAK:
+        return KEY_PAUSE;
+    case AKEYCODE_META_LEFT:
+        return KEY_LEFT_SUPER;
+    case AKEYCODE_META_RIGHT:
+        return KEY_RIGHT_SUPER;
     case AKEYCODE_SPACE:
         return KEY_SPACE;
     case AKEYCODE_ENTER:
@@ -128,25 +164,62 @@ static int translate_key(int32_t code)
 /*  EGL                                                                       */
 /* ========================================================================== */
 
-static bool egl_init_context(BackendWindow *b)
+#ifndef EGL_CONTEXT_MINOR_VERSION_KHR
+#define EGL_CONTEXT_MINOR_VERSION_KHR 0x30FB
+#endif
+#ifndef EGL_CONTEXT_FLAGS_KHR
+#define EGL_CONTEXT_FLAGS_KHR 0x30FC
+#endif
+#ifndef EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR
+#define EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR 0x00000001
+#endif
+
+static bool egl_init_context(BackendWindow *b, const GLConfig *gl)
 {
+    if (gl->profile != GL_PROFILE_DEFAULT && gl->profile != GL_PROFILE_ES)
+        return error_set("only OpenGL ES contexts are available on Android");
+    int major = gl->major ? gl->major : 3;
+    int minor = gl->major ? gl->minor : 0;
+    if (major < 2 || major > 3)
+        return error_set("OpenGL ES %d.%d is not available on Android", major, minor);
+
     b->dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (b->dpy == EGL_NO_DISPLAY || !eglInitialize(b->dpy, NULL, NULL))
-        return false;
+        return error_set("cannot initialize EGL");
 
     const EGLint attribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RENDERABLE_TYPE, major >= 3 ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT,
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
         EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8,
+        EGL_SAMPLE_BUFFERS, gl->msaa > 0 ? 1 : 0,
+        EGL_SAMPLES, gl->msaa,
         EGL_NONE};
     EGLint count = 0;
     if (!eglChooseConfig(b->dpy, attribs, &b->config, 1, &count) || count == 0)
-        return false;
+        return error_set("no EGL configuration with RGBA8, depth 24, stencil 8 and %d samples", gl->msaa);
 
-    const EGLint ctx_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLint ctx_attribs[9];
+    int n = 0;
+    ctx_attribs[n++] = EGL_CONTEXT_CLIENT_VERSION;
+    ctx_attribs[n++] = major;
+    if (minor > 0)
+    {
+        ctx_attribs[n++] = EGL_CONTEXT_MINOR_VERSION_KHR;
+        ctx_attribs[n++] = minor;
+    }
+    if (gl->debug)
+    {
+        ctx_attribs[n++] = EGL_CONTEXT_FLAGS_KHR;
+        ctx_attribs[n++] = EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR;
+    }
+    ctx_attribs[n] = EGL_NONE;
+
     b->ctx = eglCreateContext(b->dpy, b->config, EGL_NO_CONTEXT, ctx_attribs);
-    return b->ctx != EGL_NO_CONTEXT;
+    if (b->ctx == EGL_NO_CONTEXT)
+        return error_set("cannot create an OpenGL ES %d.%d context%s (EGL error 0x%x)", major, minor,
+                         gl->debug ? " with debug" : "", (unsigned)eglGetError());
+    return true;
 }
 
 static bool egl_init_surface(BackendWindow *b)
@@ -349,7 +422,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->render = cfg->render;
     g_app->userData = b;
 
-    if (cfg->render == RENDER_GL && !egl_init_context(b))
+    if (cfg->render == RENDER_GL && !egl_init_context(b, &cfg->gl))
     {
         free(b);
         g_app->userData = NULL;
@@ -670,35 +743,9 @@ bool backend_monitor_info(int index, MonitorInfo *out)
 /*  os_backend hooks - assets come from the APK, data from internal storage   */
 /* ========================================================================== */
 
-uint8_t *os_backend_asset_read(const char *path, size_t *out_size)
+AAssetManager *android_asset_manager(void)
 {
-    if (!g_app)
-        return NULL;
-    AAsset *a = AAssetManager_open(g_app->activity->assetManager, path, AASSET_MODE_BUFFER);
-    if (!a)
-        return NULL;
-    off_t len = AAsset_getLength(a);
-    uint8_t *buf = malloc((size_t)len + 1);
-    if (buf)
-    {
-        AAsset_read(a, buf, (size_t)len);
-        buf[len] = '\0';
-        if (out_size)
-            *out_size = (size_t)len;
-    }
-    AAsset_close(a);
-    return buf;
-}
-
-int os_backend_asset_exists(const char *path)
-{
-    if (!g_app)
-        return -1;
-    AAsset *a = AAssetManager_open(g_app->activity->assetManager, path, AASSET_MODE_UNKNOWN);
-    if (!a)
-        return 0;
-    AAsset_close(a);
-    return 1;
+    return (g_app && g_app->activity) ? g_app->activity->assetManager : NULL;
 }
 
 const char *os_backend_data_dir(void)

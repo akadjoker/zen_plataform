@@ -154,6 +154,93 @@ static void test_mouse_delta(PlatformWindow *w)
     CHECK(dx == 20 && dy == 15);
 }
 
+static void test_key_mods(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    CHECK(key_mods(w) == 0);
+
+    fake_key(w, KEY_LEFT_SHIFT, true, false);
+    window_begin_frame(w);
+    CHECK(key_mods(w) == KEYMOD_SHIFT);
+
+    fake_key(w, KEY_RIGHT_CONTROL, true, false);
+    fake_key(w, KEY_LEFT_ALT, true, false);
+    fake_key(w, KEY_RIGHT_SUPER, true, false);
+    window_begin_frame(w);
+    CHECK(key_mods(w) == (KEYMOD_SHIFT | KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER));
+
+    fake_key(w, KEY_LEFT_SHIFT, false, false);
+    window_begin_frame(w);
+    CHECK(key_mods(w) == (KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER));
+
+    fake_key(w, KEY_A, true, false);
+    window_begin_frame(w);
+    CHECK(key_mods(w) == (KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_SUPER));
+}
+
+static void test_focus_loss_releases(PlatformWindow *w)
+{
+    fake_key(w, KEY_LEFT_CONTROL, true, false);
+    fake_key(w, KEY_W, true, false);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    window_begin_frame(w);
+    CHECK(key_down(w, KEY_W) && key_mods(w) == KEYMOD_CTRL && mouse_button_down(w, MOUSE_LEFT));
+
+    Event gained = {.type = EVENT_WINDOW_FOCUS};
+    gained.data.focus.gained = true;
+    fake_inject_event(w, &gained);
+    window_begin_frame(w);
+    CHECK(key_down(w, KEY_W) && mouse_button_down(w, MOUSE_LEFT));
+
+    Event lost = {.type = EVENT_WINDOW_FOCUS};
+    lost.data.focus.gained = false;
+    fake_inject_event(w, &lost);
+    window_begin_frame(w);
+    CHECK(!key_down(w, KEY_W) && key_released(w, KEY_W));
+    CHECK(!key_down(w, KEY_LEFT_CONTROL) && key_released(w, KEY_LEFT_CONTROL));
+    CHECK(key_mods(w) == 0);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && mouse_button_released(w, MOUSE_LEFT));
+
+    window_begin_frame(w);
+    CHECK(!key_released(w, KEY_W) && !mouse_button_released(w, MOUSE_LEFT));
+}
+
+static void test_keypad_keys(PlatformWindow *w)
+{
+    static const int keys[] = {KEY_KP_0, KEY_KP_1, KEY_KP_2, KEY_KP_3, KEY_KP_4, KEY_KP_5, KEY_KP_6, KEY_KP_7,
+                               KEY_KP_8, KEY_KP_9, KEY_KP_DECIMAL, KEY_KP_DIVIDE, KEY_KP_MULTIPLY,
+                               KEY_KP_SUBTRACT, KEY_KP_ADD, KEY_KP_ENTER, KEY_KP_EQUAL, KEY_MENU, KEY_SCROLL_LOCK};
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+    {
+        CHECK(keys[i] > 0 && keys[i] < KEY_MAX);
+        for (size_t j = i + 1; j < sizeof keys / sizeof keys[0]; j++)
+            CHECK(keys[i] != keys[j]);
+        fake_key(w, keys[i], true, false);
+        window_begin_frame(w);
+        CHECK(key_pressed(w, keys[i]) && key_down(w, keys[i]));
+        fake_key(w, keys[i], false, false);
+        window_begin_frame(w);
+        CHECK(key_released(w, keys[i]) && !key_down(w, keys[i]));
+    }
+}
+
+static void test_sleep(void)
+{
+    uint64_t t0 = time_nanos();
+    time_sleep(25);
+    uint64_t dt = time_nanos() - t0;
+    CHECK(dt >= 25ull * 1000000ull);
+    CHECK(dt < 2000ull * 1000000ull);
+
+    t0 = time_nanos();
+    time_sleep(0);
+    CHECK(time_nanos() - t0 < 500ull * 1000000ull);
+
+    t0 = time_nanos();
+    time_sleep(1100);
+    CHECK(time_nanos() - t0 >= 1100ull * 1000000ull);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -185,6 +272,16 @@ int main(void)
     w = make_window();
     test_mouse_delta(w);
     window_destroy(w);
+    w = make_window();
+    test_key_mods(w);
+    window_destroy(w);
+    w = make_window();
+    test_focus_loss_releases(w);
+    window_destroy(w);
+    w = make_window();
+    test_keypad_keys(w);
+    window_destroy(w);
+    test_sleep();
 
     platform_shutdown();
 

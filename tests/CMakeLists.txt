@@ -3,6 +3,9 @@
 function(add_fake_test name)
     add_executable(${name} ${name}.c
         ${CMAKE_SOURCE_DIR}/src/core.c
+        ${CMAKE_SOURCE_DIR}/src/error.c
+        ${CMAKE_SOURCE_DIR}/src/gamepad.c
+        ${CMAKE_SOURCE_DIR}/src/gamepad_stub.c
         ${CMAKE_SOURCE_DIR}/src/backend_fake.c)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
@@ -29,6 +32,37 @@ function(add_unit_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-add_unit_test(test_fs src/os.c)
+if(WIN32)
+    set(FS_SRC src/os.c src/error.c src/io.c src/io_win32.c src/fs_win32.c src/win32_util.c)
+else()
+    set(FS_SRC src/os.c src/error.c src/io.c src/io_posix.c src/fs_posix.c)
+endif()
+add_unit_test(test_fs ${FS_SRC})
+add_unit_test(test_path ${FS_SRC})
+add_unit_test(test_io ${FS_SRC})
+add_unit_test(test_fsys ${FS_SRC})
+add_unit_test(test_xinput_map src/gamepad.c src/gamepad_stub.c)
 add_unit_test(test_draw2d src/draw2d.c)
-add_unit_test(test_image src/draw2d.c src/os.c src/image.c)
+add_unit_test(test_image src/draw2d.c src/image.c ${FS_SRC})
+
+if(UNIX AND NOT APPLE)
+    add_unit_test(test_gamepad src/gamepad.c ${FS_SRC})
+endif()
+
+if(WIN32 AND NOT PLATFORM_USE_FAKE)
+    add_executable(test_win32 test_win32.c)
+    target_link_libraries(test_win32 PRIVATE platform)
+    add_test(NAME test_win32 COMMAND test_win32)
+endif()
+
+if(PLATFORM_BACKEND_X11)
+    add_executable(test_gl_x11 test_gl_x11.c)
+    target_link_libraries(test_gl_x11 PRIVATE platform)
+    add_test(NAME test_gl_x11 COMMAND test_gl_x11)
+    set_tests_properties(test_gl_x11 PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(test_input_x11 test_input_x11.c)
+    target_link_libraries(test_input_x11 PRIVATE platform)
+    add_test(NAME test_input_x11 COMMAND test_input_x11)
+    set_tests_properties(test_input_x11 PROPERTIES SKIP_RETURN_CODE 77)
+endif()

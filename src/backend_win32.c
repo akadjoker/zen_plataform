@@ -1,0 +1,1600 @@
+/*
+ * backend_win32.c - Win32 + WGL backend. Creates the window and GL context, pumps
+ * the message queue and normalizes everything into core_push_event / core_push_char.
+ * Keys are translated from the hardware scancode, so a physical key keeps its
+ * meaning on any keyboard layout. All sizes are pixels: the process is DPI aware
+ * and content_scale is always 1.
+ */
+#include "core_internal.h"
+#include "backend.h"
+#include "win32_util.h"
+#include "error_internal.h"
+
+#include <windowsx.h>
+#include <shellapi.h>
+#include <GL/gl.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define WGL_DRAW_TO_WINDOW_ARB 0x2001
+#define WGL_ACCELERATION_ARB 0x2003
+#define WGL_SUPPORT_OPENGL_ARB 0x2010
+#define WGL_DOUBLE_BUFFER_ARB 0x2011
+#define WGL_PIXEL_TYPE_ARB 0x2013
+#define WGL_RED_BITS_ARB 0x2015
+#define WGL_GREEN_BITS_ARB 0x2017
+#define WGL_BLUE_BITS_ARB 0x2019
+#define WGL_ALPHA_BITS_ARB 0x201B
+#define WGL_DEPTH_BITS_ARB 0x2022
+#define WGL_STENCIL_BITS_ARB 0x2023
+#define WGL_FULL_ACCELERATION_ARB 0x2027
+#define WGL_TYPE_RGBA_ARB 0x202B
+#define WGL_SAMPLE_BUFFERS_ARB 0x2041
+#define WGL_SAMPLES_ARB 0x2042
+#define WGL_CONTEXT_MAJOR_VERSION_ARB 0x2091
+#define WGL_CONTEXT_MINOR_VERSION_ARB 0x2092
+#define WGL_CONTEXT_FLAGS_ARB 0x2094
+#define WGL_CONTEXT_PROFILE_MASK_ARB 0x9126
+#define WGL_CONTEXT_DEBUG_BIT_ARB 0x00000001
+#define WGL_CONTEXT_CORE_PROFILE_BIT_ARB 0x00000001
+#define WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB 0x00000002
+#define WGL_CONTEXT_ES2_PROFILE_BIT_EXT 0x00000004
+
+#define WINDOW_CLASS L"zen_platform_window"
+#define CURSOR_ID(n) MAKEINTRESOURCEW(n)
+#define ZEN_IDC_ARROW CURSOR_ID(32512)
+#define ZEN_IDC_IBEAM CURSOR_ID(32513)
+#define ZEN_IDC_CROSS CURSOR_ID(32515)
+#define ZEN_IDC_SIZENWSE CURSOR_ID(32642)
+#define ZEN_IDC_SIZENESW CURSOR_ID(32643)
+#define ZEN_IDC_SIZEWE CURSOR_ID(32644)
+#define ZEN_IDC_SIZENS CURSOR_ID(32645)
+#define ZEN_IDC_SIZEALL CURSOR_ID(32646)
+#define ZEN_IDC_NO CURSOR_ID(32648)
+#define ZEN_IDC_HAND CURSOR_ID(32649)
+#define MAX_MONITORS 16
+#define MONITOR_NAME_CAP 64
+#define PENDING_MAX 256
+
+typedef BOOL(WINAPI *PFN_wglChoosePixelFormatARB)(HDC, const int *, const FLOAT *, UINT, int *, UINT *);
+typedef HGLRC(WINAPI *PFN_wglCreateContextAttribsARB)(HDC, HGLRC, const int *);
+typedef BOOL(WINAPI *PFN_wglSwapIntervalEXT)(int);
+typedef const char *(WINAPI *PFN_wglGetExtensionsStringARB)(HDC);
+typedef BOOL(WINAPI *PFN_SetProcessDpiAwarenessContext)(HANDLE);
+typedef UINT(WINAPI *PFN_GetDpiForWindow)(HWND);
+typedef UINT(WINAPI *PFN_GetDpiForSystem)(void);
+typedef BOOL(WINAPI *PFN_AdjustWindowRectExForDpi)(LPRECT, DWORD, BOOL, DWORD, UINT);
+
+static struct
+{
+    HINSTANCE instance;
+    bool class_registered;
+    bool wgl_loaded;
+    PFN_wglChoosePixelFormatARB choose_pixel_format;
+    PFN_wglCreateContextAttribsARB create_context;
+    PFN_wglSwapIntervalEXT swap_interval;
+    bool has_es_profile;
+    PFN_GetDpiForWindow get_dpi_for_window;
+    PFN_GetDpiForSystem get_dpi_for_system;
+    PFN_AdjustWindowRectExForDpi adjust_for_dpi;
+    HMODULE opengl32;
+    char *clipboard_text;
+    char monitor_names[MAX_MONITORS][MONITOR_NAME_CAP];
+} g;
+
+typedef struct
+{
+    bool is_char;
+    Event ev;
+    uint32_t cp;
+} PendingItem;
+
+struct BackendWindow
+{
+    PendingItem pending[PENDING_MAX];
+    int pending_count;
+    bool pumping;
+
+    HWND hwnd;
+    HDC hdc;
+    HGLRC glrc;
+    Core *core;
+    RenderMode render;
+    WindowMode mode;
+
+    bool focused, hovered, tracking_leave, minimized, maximized;
+    int buttons_down;
+    int cursor_mode;
+    int cursor_shape;
+    HCURSOR cursor;
+    int last_x, last_y;
+    int virtual_x, virtual_y;
+
+    int min_w, min_h, max_w, max_h;
+    bool resizable;
+    DWORD saved_style;
+    RECT saved_rect;
+    bool saved_maximized;
+    HICON icon_big, icon_small;
+    wchar_t high_surrogate;
+
+    uint32_t *pixels;
+    int px_w, px_h;
+};
+
+/* ========================================================================== */
+/*  helpers                                                                   */
+/* ========================================================================== */
+
+/* Events raised while the window is being driven by an API call (ShowWindow,
+   SetWindowPos) arrive outside the pump; they wait here and are delivered at the
+   start of the next pump, so begin_frame never discards them. */
+static void push(BackendWindow *b, Event *e)
+{
+    if (b->pumping && b->core)
+        core_push_event(b->core, e);
+    else if (b->pending_count < PENDING_MAX)
+        b->pending[b->pending_count++] = (PendingItem){false, *e, 0};
+}
+
+static void push_char(BackendWindow *b, uint32_t cp)
+{
+    if (b->pumping && b->core)
+        core_push_char(b->core, cp);
+    else if (b->pending_count < PENDING_MAX)
+        b->pending[b->pending_count++] = (PendingItem){true, {0}, cp};
+}
+
+static UINT window_dpi(HWND hwnd)
+{
+    if (hwnd && g.get_dpi_for_window)
+        return g.get_dpi_for_window(hwnd);
+    return g.get_dpi_for_system ? g.get_dpi_for_system() : 96;
+}
+
+static void adjust_rect(RECT *rc, DWORD style, DWORD exstyle, HWND hwnd)
+{
+    if (g.adjust_for_dpi)
+        g.adjust_for_dpi(rc, style, FALSE, exstyle, window_dpi(hwnd));
+    else
+        AdjustWindowRectEx(rc, style, FALSE, exstyle);
+}
+
+static DWORD window_style(bool resizable, WindowMode mode)
+{
+    if (mode != WINDOW_WINDOWED)
+        return WS_POPUP;
+    DWORD style = WS_OVERLAPPEDWINDOW;
+    if (!resizable)
+        style &= ~(DWORD)(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    return style;
+}
+
+static void client_size(BackendWindow *b, int *w, int *h)
+{
+    RECT rc;
+    GetClientRect(b->hwnd, &rc);
+    if (w)
+        *w = rc.right - rc.left;
+    if (h)
+        *h = rc.bottom - rc.top;
+}
+
+static void client_origin(BackendWindow *b, int *x, int *y)
+{
+    POINT p = {0, 0};
+    ClientToScreen(b->hwnd, &p);
+    if (x)
+        *x = p.x;
+    if (y)
+        *y = p.y;
+}
+
+static void to_wide_title(const char *title, wchar_t *out, size_t cap)
+{
+    if (!title || !win32_widen(title, out, cap))
+        out[0] = L'\0';
+}
+
+/* ========================================================================== */
+/*  monitors                                                                  */
+/* ========================================================================== */
+
+typedef struct
+{
+    HMONITOR list[MAX_MONITORS];
+    int count;
+} MonitorList;
+
+static BOOL CALLBACK collect_monitor(HMONITOR m, HDC dc, LPRECT rc, LPARAM data)
+{
+    (void)dc;
+    (void)rc;
+    MonitorList *ml = (MonitorList *)data;
+    if (ml->count < MAX_MONITORS)
+        ml->list[ml->count++] = m;
+    return TRUE;
+}
+
+static void list_monitors(MonitorList *ml)
+{
+    ml->count = 0;
+    EnumDisplayMonitors(NULL, NULL, collect_monitor, (LPARAM)ml);
+}
+
+int backend_monitor_count(void)
+{
+    MonitorList ml;
+    list_monitors(&ml);
+    return ml.count;
+}
+
+bool backend_monitor_info(int index, MonitorInfo *out)
+{
+    MonitorList ml;
+    MONITORINFOEXW mi;
+    if (!out)
+        return false;
+    list_monitors(&ml);
+    if (index < 0 || index >= ml.count)
+        return false;
+    memset(&mi, 0, sizeof mi);
+    mi.cbSize = sizeof mi;
+    if (!GetMonitorInfoW(ml.list[index], (MONITORINFO *)&mi))
+        return false;
+
+    memset(out, 0, sizeof *out);
+    out->index = index;
+    out->x = mi.rcMonitor.left;
+    out->y = mi.rcMonitor.top;
+    out->width = mi.rcMonitor.right - mi.rcMonitor.left;
+    out->height = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    out->work_x = mi.rcWork.left;
+    out->work_y = mi.rcWork.top;
+    out->work_w = mi.rcWork.right - mi.rcWork.left;
+    out->work_h = mi.rcWork.bottom - mi.rcWork.top;
+    out->refresh_hz = 60;
+    out->content_scale = 1.0f;
+    out->primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+    DEVMODEW dm;
+    memset(&dm, 0, sizeof dm);
+    dm.dmSize = sizeof dm;
+    if (EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
+        out->refresh_hz = (int)dm.dmDisplayFrequency;
+
+    HDC dc = CreateDCW(L"DISPLAY", mi.szDevice, NULL, NULL);
+    if (dc)
+    {
+        out->phys_width_mm = GetDeviceCaps(dc, HORZSIZE);
+        out->phys_height_mm = GetDeviceCaps(dc, VERTSIZE);
+        DeleteDC(dc);
+    }
+
+    if (!win32_narrow(mi.szDevice, g.monitor_names[index], MONITOR_NAME_CAP))
+        snprintf(g.monitor_names[index], MONITOR_NAME_CAP, "monitor %d", index);
+    out->name = g.monitor_names[index];
+    return true;
+}
+
+static int primary_monitor(void)
+{
+    int n = backend_monitor_count();
+    for (int i = 0; i < n; i++)
+    {
+        MonitorInfo mi;
+        if (backend_monitor_info(i, &mi) && mi.primary)
+            return i;
+    }
+    return 0;
+}
+
+/* ========================================================================== */
+/*  key translation                                                           */
+/* ========================================================================== */
+
+static const unsigned short k_scan[0x5A] = {
+    [0x01] = KEY_ESCAPE,
+    [0x02] = KEY_ONE,
+    [0x03] = KEY_TWO,
+    [0x04] = KEY_THREE,
+    [0x05] = KEY_FOUR,
+    [0x06] = KEY_FIVE,
+    [0x07] = KEY_SIX,
+    [0x08] = KEY_SEVEN,
+    [0x09] = KEY_EIGHT,
+    [0x0A] = KEY_NINE,
+    [0x0B] = KEY_ZERO,
+    [0x0C] = KEY_MINUS,
+    [0x0D] = KEY_EQUAL,
+    [0x0E] = KEY_BACKSPACE,
+    [0x0F] = KEY_TAB,
+    [0x10] = KEY_Q,
+    [0x11] = KEY_W,
+    [0x12] = KEY_E,
+    [0x13] = KEY_R,
+    [0x14] = KEY_T,
+    [0x15] = KEY_Y,
+    [0x16] = KEY_U,
+    [0x17] = KEY_I,
+    [0x18] = KEY_O,
+    [0x19] = KEY_P,
+    [0x1A] = KEY_LEFT_BRACKET,
+    [0x1B] = KEY_RIGHT_BRACKET,
+    [0x1C] = KEY_ENTER,
+    [0x1D] = KEY_LEFT_CONTROL,
+    [0x1E] = KEY_A,
+    [0x1F] = KEY_S,
+    [0x20] = KEY_D,
+    [0x21] = KEY_F,
+    [0x22] = KEY_G,
+    [0x23] = KEY_H,
+    [0x24] = KEY_J,
+    [0x25] = KEY_K,
+    [0x26] = KEY_L,
+    [0x27] = KEY_SEMICOLON,
+    [0x28] = KEY_APOSTROPHE,
+    [0x29] = KEY_GRAVE,
+    [0x2A] = KEY_LEFT_SHIFT,
+    [0x2B] = KEY_BACKSLASH,
+    [0x2C] = KEY_Z,
+    [0x2D] = KEY_X,
+    [0x2E] = KEY_C,
+    [0x2F] = KEY_V,
+    [0x30] = KEY_B,
+    [0x31] = KEY_N,
+    [0x32] = KEY_M,
+    [0x33] = KEY_COMMA,
+    [0x34] = KEY_PERIOD,
+    [0x35] = KEY_SLASH,
+    [0x36] = KEY_RIGHT_SHIFT,
+    [0x37] = KEY_KP_MULTIPLY,
+    [0x38] = KEY_LEFT_ALT,
+    [0x39] = KEY_SPACE,
+    [0x3A] = KEY_CAPS_LOCK,
+    [0x3B] = KEY_F1,
+    [0x3C] = KEY_F2,
+    [0x3D] = KEY_F3,
+    [0x3E] = KEY_F4,
+    [0x3F] = KEY_F5,
+    [0x40] = KEY_F6,
+    [0x41] = KEY_F7,
+    [0x42] = KEY_F8,
+    [0x43] = KEY_F9,
+    [0x44] = KEY_F10,
+    [0x45] = KEY_NUM_LOCK,
+    [0x46] = KEY_SCROLL_LOCK,
+    [0x47] = KEY_KP_7,
+    [0x48] = KEY_KP_8,
+    [0x49] = KEY_KP_9,
+    [0x4A] = KEY_KP_SUBTRACT,
+    [0x4B] = KEY_KP_4,
+    [0x4C] = KEY_KP_5,
+    [0x4D] = KEY_KP_6,
+    [0x4E] = KEY_KP_ADD,
+    [0x4F] = KEY_KP_1,
+    [0x50] = KEY_KP_2,
+    [0x51] = KEY_KP_3,
+    [0x52] = KEY_KP_0,
+    [0x53] = KEY_KP_DECIMAL,
+    [0x57] = KEY_F11,
+    [0x58] = KEY_F12,
+    [0x59] = KEY_KP_EQUAL,
+};
+
+static const unsigned short k_scan_ext[0x5E] = {
+    [0x1C] = KEY_KP_ENTER,
+    [0x1D] = KEY_RIGHT_CONTROL,
+    [0x35] = KEY_KP_DIVIDE,
+    [0x37] = KEY_PRINT_SCREEN,
+    [0x38] = KEY_RIGHT_ALT,
+    [0x45] = KEY_NUM_LOCK,
+    [0x47] = KEY_HOME,
+    [0x48] = KEY_UP,
+    [0x49] = KEY_PAGE_UP,
+    [0x4B] = KEY_LEFT,
+    [0x4D] = KEY_RIGHT,
+    [0x4F] = KEY_END,
+    [0x50] = KEY_DOWN,
+    [0x51] = KEY_PAGE_DOWN,
+    [0x52] = KEY_INSERT,
+    [0x53] = KEY_DELETE,
+    [0x5B] = KEY_LEFT_SUPER,
+    [0x5C] = KEY_RIGHT_SUPER,
+    [0x5D] = KEY_MENU,
+};
+
+static int translate_key(WPARAM vk, LPARAM lparam)
+{
+    int scancode = (int)((lparam >> 16) & 0xFF);
+    bool extended = ((lparam >> 24) & 1) != 0;
+
+    if (vk == VK_PAUSE)
+        return KEY_PAUSE;
+    if (vk == VK_NUMLOCK)
+        return KEY_NUM_LOCK;
+    if (vk == VK_SNAPSHOT)
+        return KEY_PRINT_SCREEN;
+    if (extended)
+        return scancode < (int)(sizeof k_scan_ext / sizeof k_scan_ext[0]) ? k_scan_ext[scancode] : KEY_NULL;
+    return scancode < (int)(sizeof k_scan / sizeof k_scan[0]) ? k_scan[scancode] : KEY_NULL;
+}
+
+static int current_mods(void)
+{
+    int mods = 0;
+    if (GetKeyState(VK_SHIFT) & 0x8000)
+        mods |= KEYMOD_SHIFT;
+    if (GetKeyState(VK_CONTROL) & 0x8000)
+        mods |= KEYMOD_CTRL;
+    if (GetKeyState(VK_MENU) & 0x8000)
+        mods |= KEYMOD_ALT;
+    if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000)
+        mods |= KEYMOD_SUPER;
+    return mods;
+}
+
+static void handle_key(BackendWindow *b, WPARAM wparam, LPARAM lparam, bool down)
+{
+    int scancode = (int)((lparam >> 16) & 0xFF);
+    bool extended = ((lparam >> 24) & 1) != 0;
+    if (scancode == 0x2A && extended)
+        return;
+
+    Event e = {.type = EVENT_KEY};
+    e.data.key.key = translate_key(wparam, lparam);
+    e.data.key.scancode = scancode | (extended ? 0xE000 : 0);
+    e.data.key.down = down;
+    e.data.key.repeat = down && ((lparam >> 30) & 1);
+    e.data.key.mods = current_mods();
+    push(b, &e);
+}
+
+/* ========================================================================== */
+/*  cursor and mouse mode                                                     */
+/* ========================================================================== */
+
+static LPCWSTR cursor_resource(int cursor)
+{
+    switch (cursor)
+    {
+    case CURSOR_IBEAM:
+        return ZEN_IDC_IBEAM;
+    case CURSOR_CROSSHAIR:
+        return ZEN_IDC_CROSS;
+    case CURSOR_HAND:
+        return ZEN_IDC_HAND;
+    case CURSOR_RESIZE_EW:
+        return ZEN_IDC_SIZEWE;
+    case CURSOR_RESIZE_NS:
+        return ZEN_IDC_SIZENS;
+    case CURSOR_RESIZE_NWSE:
+        return ZEN_IDC_SIZENWSE;
+    case CURSOR_RESIZE_NESW:
+        return ZEN_IDC_SIZENESW;
+    case CURSOR_RESIZE_ALL:
+        return ZEN_IDC_SIZEALL;
+    case CURSOR_NOT_ALLOWED:
+        return ZEN_IDC_NO;
+    default:
+        return ZEN_IDC_ARROW;
+    }
+}
+
+static void apply_clip(BackendWindow *b)
+{
+    if (b->cursor_mode == MOUSE_MODE_CAPTURED && b->focused)
+    {
+        RECT rc;
+        POINT tl, br;
+        GetClientRect(b->hwnd, &rc);
+        tl.x = rc.left;
+        tl.y = rc.top;
+        br.x = rc.right;
+        br.y = rc.bottom;
+        ClientToScreen(b->hwnd, &tl);
+        ClientToScreen(b->hwnd, &br);
+        RECT clip = {tl.x, tl.y, br.x, br.y};
+        ClipCursor(&clip);
+    }
+    else
+    {
+        ClipCursor(NULL);
+    }
+}
+
+static void warp_to_center(BackendWindow *b)
+{
+    int w, h;
+    client_size(b, &w, &h);
+    POINT p = {w / 2, h / 2};
+    ClientToScreen(b->hwnd, &p);
+    SetCursorPos(p.x, p.y);
+}
+
+void backend_set_cursor(BackendWindow *b, int cursor)
+{
+    if (cursor < 0 || cursor >= CURSOR_COUNT)
+        cursor = CURSOR_DEFAULT;
+    b->cursor_shape = cursor;
+    b->cursor = LoadCursorW(NULL, cursor_resource(cursor));
+    if (b->cursor_mode == MOUSE_MODE_NORMAL && b->hovered)
+        SetCursor(b->cursor);
+}
+
+void backend_set_mouse_mode(BackendWindow *b, int mode)
+{
+    bool was_captured = b->cursor_mode == MOUSE_MODE_CAPTURED;
+    b->cursor_mode = mode;
+    if (mode == MOUSE_MODE_CAPTURED && !was_captured)
+    {
+        b->virtual_x = b->last_x;
+        b->virtual_y = b->last_y;
+        apply_clip(b);
+        warp_to_center(b);
+    }
+    else if (mode != MOUSE_MODE_CAPTURED)
+    {
+        ClipCursor(NULL);
+    }
+    SetCursor(mode == MOUSE_MODE_NORMAL ? b->cursor : NULL);
+}
+
+void backend_set_mouse_pos(BackendWindow *b, int x, int y)
+{
+    POINT p = {x, y};
+    ClientToScreen(b->hwnd, &p);
+    SetCursorPos(p.x, p.y);
+    b->last_x = b->virtual_x = x;
+    b->last_y = b->virtual_y = y;
+}
+
+/* ========================================================================== */
+/*  window procedure                                                          */
+/* ========================================================================== */
+
+static void handle_button(BackendWindow *b, int button, bool down, LPARAM lparam)
+{
+    if (down)
+    {
+        if (b->buttons_down++ == 0)
+            SetCapture(b->hwnd);
+    }
+    else if (b->buttons_down > 0 && --b->buttons_down == 0)
+    {
+        ReleaseCapture();
+    }
+    Event e = {.type = EVENT_MOUSE_BUTTON};
+    e.data.mouse.button = button;
+    e.data.mouse.down = down;
+    e.data.mouse.x = GET_X_LPARAM(lparam);
+    e.data.mouse.y = GET_Y_LPARAM(lparam);
+    push(b, &e);
+}
+
+static void handle_mouse_move(BackendWindow *b, LPARAM lparam)
+{
+    int x = GET_X_LPARAM(lparam);
+    int y = GET_Y_LPARAM(lparam);
+
+    if (!b->tracking_leave)
+    {
+        TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, b->hwnd, 0};
+        TrackMouseEvent(&tme);
+        b->tracking_leave = true;
+    }
+    if (!b->hovered)
+    {
+        b->hovered = true;
+        Event enter = {.type = EVENT_WINDOW_ENTER};
+        enter.data.enter.entered = true;
+        push(b, &enter);
+    }
+
+    if (b->cursor_mode == MOUSE_MODE_CAPTURED && b->focused)
+    {
+        int w, h;
+        client_size(b, &w, &h);
+        int cx = w / 2;
+        int cy = h / 2;
+        if (x == cx && y == cy)
+            return;
+        b->virtual_x += x - cx;
+        b->virtual_y += y - cy;
+        x = b->virtual_x;
+        y = b->virtual_y;
+        warp_to_center(b);
+    }
+    else
+    {
+        b->virtual_x = x;
+        b->virtual_y = y;
+    }
+    b->last_x = x;
+    b->last_y = y;
+
+    Event e = {.type = EVENT_MOUSE_MOVE};
+    e.data.mouse.x = x;
+    e.data.mouse.y = y;
+    push(b, &e);
+}
+
+static void handle_size(BackendWindow *b, WPARAM wparam, LPARAM lparam)
+{
+    int w = LOWORD(lparam);
+    int h = HIWORD(lparam);
+
+    if (wparam == SIZE_MINIMIZED)
+    {
+        if (!b->minimized)
+        {
+            b->minimized = true;
+            Event e = {.type = EVENT_WINDOW_MINIMIZE};
+            push(b, &e);
+        }
+        return;
+    }
+
+    bool was_minimized = b->minimized;
+    bool was_maximized = b->maximized;
+    b->minimized = false;
+    b->maximized = wparam == SIZE_MAXIMIZED;
+
+    Event r = {.type = EVENT_WINDOW_RESIZE};
+    r.data.resize.w = w;
+    r.data.resize.h = h;
+    push(b, &r);
+    Event fb = {.type = EVENT_WINDOW_FB_RESIZE};
+    fb.data.resize.w = w;
+    fb.data.resize.h = h;
+    push(b, &fb);
+
+    if (b->maximized && !was_maximized)
+    {
+        Event e = {.type = EVENT_WINDOW_MAXIMIZE};
+        push(b, &e);
+    }
+    else if (!b->maximized && (was_minimized || was_maximized))
+    {
+        Event e = {.type = EVENT_WINDOW_RESTORE};
+        push(b, &e);
+    }
+    apply_clip(b);
+}
+
+static void handle_drop(BackendWindow *b, HDROP drop)
+{
+    UINT count = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
+    char **paths = count ? calloc(count, sizeof *paths) : NULL;
+    UINT stored = 0;
+    for (UINT i = 0; paths && i < count; i++)
+    {
+        wchar_t wide[MAX_PATH * 4];
+        char utf8[MAX_PATH * 4 * 3];
+        if (DragQueryFileW(drop, i, wide, (UINT)(sizeof wide / sizeof wide[0])) == 0)
+            continue;
+        if (!win32_narrow(wide, utf8, sizeof utf8))
+            continue;
+        win32_slashes(utf8);
+        paths[stored] = _strdup(utf8);
+        if (paths[stored])
+            stored++;
+    }
+    if (stored && b->pumping && b->core)
+    {
+        Event e = {.type = EVENT_WINDOW_DROP};
+        e.data.drop.count = (int)stored;
+        e.data.drop.paths = (const char **)paths;
+        push(b, &e);
+    }
+    for (UINT i = 0; i < stored; i++)
+        free(paths[i]);
+    free(paths);
+    DragFinish(drop);
+}
+
+static void handle_char(BackendWindow *b, WPARAM wparam)
+{
+    uint32_t cp = (uint32_t)wparam;
+    if (cp >= 0xD800 && cp <= 0xDBFF)
+    {
+        b->high_surrogate = (wchar_t)cp;
+        return;
+    }
+    if (cp >= 0xDC00 && cp <= 0xDFFF)
+    {
+        if (!b->high_surrogate)
+            return;
+        cp = 0x10000 + (((uint32_t)b->high_surrogate - 0xD800) << 10) + (cp - 0xDC00);
+    }
+    b->high_surrogate = 0;
+    if (cp >= 0x20 && cp != 0x7F)
+        push_char(b, cp);
+}
+
+static void paint_pixels(BackendWindow *b);
+
+static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    BackendWindow *b = (BackendWindow *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_NCCREATE)
+    {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lparam;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if (!b)
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+
+    switch (msg)
+    {
+    case WM_CLOSE:
+    {
+        Event e = {.type = EVENT_WINDOW_CLOSE};
+        push(b, &e);
+        return 0;
+    }
+    case WM_SIZE:
+        handle_size(b, wparam, lparam);
+        return 0;
+    case WM_MOVE:
+    {
+        Event e = {.type = EVENT_WINDOW_MOVE};
+        e.data.move.x = (int)(short)LOWORD(lparam);
+        e.data.move.y = (int)(short)HIWORD(lparam);
+        push(b, &e);
+        apply_clip(b);
+        return 0;
+    }
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    {
+        b->focused = msg == WM_SETFOCUS;
+        Event e = {.type = EVENT_WINDOW_FOCUS};
+        e.data.focus.gained = b->focused;
+        push(b, &e);
+        apply_clip(b);
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        handle_mouse_move(b, lparam);
+        return 0;
+    case WM_MOUSELEAVE:
+    {
+        b->tracking_leave = false;
+        b->hovered = false;
+        Event e = {.type = EVENT_WINDOW_ENTER};
+        e.data.enter.entered = false;
+        push(b, &e);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+        handle_button(b, MOUSE_LEFT, msg == WM_LBUTTONDOWN, lparam);
+        return 0;
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+        handle_button(b, MOUSE_RIGHT, msg == WM_RBUTTONDOWN, lparam);
+        return 0;
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+        handle_button(b, MOUSE_MIDDLE, msg == WM_MBUTTONDOWN, lparam);
+        return 0;
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP:
+        handle_button(b, GET_XBUTTON_WPARAM(wparam) == XBUTTON1 ? MOUSE_X1 : MOUSE_X2, msg == WM_XBUTTONDOWN, lparam);
+        return TRUE;
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+    {
+        float notches = (float)GET_WHEEL_DELTA_WPARAM(wparam) / (float)WHEEL_DELTA;
+        Event e = {.type = EVENT_MOUSE_WHEEL};
+        if (msg == WM_MOUSEWHEEL)
+            e.data.wheel.y = notches;
+        else
+            e.data.wheel.x = notches;
+        push(b, &e);
+        return 0;
+    }
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+        handle_key(b, wparam, lparam, msg == WM_KEYDOWN);
+        return 0;
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+        handle_key(b, wparam, lparam, msg == WM_SYSKEYDOWN);
+        if (wparam == VK_F4)
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        return 0;
+    case WM_CHAR:
+        handle_char(b, wparam);
+        return 0;
+    case WM_SYSCOMMAND:
+        if ((wparam & 0xFFF0) == SC_KEYMENU)
+            return 0;
+        break;
+    case WM_SETCURSOR:
+        if (LOWORD(lparam) == HTCLIENT)
+        {
+            SetCursor(b->cursor_mode == MOUSE_MODE_NORMAL ? b->cursor : NULL);
+            return TRUE;
+        }
+        break;
+    case WM_GETMINMAXINFO:
+    {
+        MINMAXINFO *mmi = (MINMAXINFO *)lparam;
+        DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
+        DWORD exstyle = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (b->min_w > 0 || b->min_h > 0)
+        {
+            RECT rc = {0, 0, b->min_w > 0 ? b->min_w : 1, b->min_h > 0 ? b->min_h : 1};
+            adjust_rect(&rc, style, exstyle, hwnd);
+            mmi->ptMinTrackSize.x = rc.right - rc.left;
+            mmi->ptMinTrackSize.y = rc.bottom - rc.top;
+        }
+        if (b->max_w > 0 || b->max_h > 0)
+        {
+            RECT rc = {0, 0, b->max_w > 0 ? b->max_w : 32767, b->max_h > 0 ? b->max_h : 32767};
+            adjust_rect(&rc, style, exstyle, hwnd);
+            mmi->ptMaxTrackSize.x = rc.right - rc.left;
+            mmi->ptMaxTrackSize.y = rc.bottom - rc.top;
+        }
+        return 0;
+    }
+    case WM_DPICHANGED:
+    {
+        const RECT *rc = (const RECT *)lparam;
+        SetWindowPos(hwnd, NULL, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_DROPFILES:
+        handle_drop(b, (HDROP)wparam);
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        if (b->render == RENDER_PIXELS && b->pixels)
+        {
+            paint_pixels(b);
+            return 0;
+        }
+        break;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/* ========================================================================== */
+/*  init / shutdown                                                           */
+/* ========================================================================== */
+
+static void load_dpi_functions(void)
+{
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32)
+        return;
+    PFN_SetProcessDpiAwarenessContext set_awareness = (PFN_SetProcessDpiAwarenessContext)(void *)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+    if (!set_awareness || !set_awareness((HANDLE)-4))
+        SetProcessDPIAware();
+    g.get_dpi_for_window = (PFN_GetDpiForWindow)(void *)GetProcAddress(user32, "GetDpiForWindow");
+    g.get_dpi_for_system = (PFN_GetDpiForSystem)(void *)GetProcAddress(user32, "GetDpiForSystem");
+    g.adjust_for_dpi = (PFN_AdjustWindowRectExForDpi)(void *)GetProcAddress(user32, "AdjustWindowRectExForDpi");
+}
+
+bool backend_init(void)
+{
+    g.instance = GetModuleHandleW(NULL);
+    load_dpi_functions();
+
+    WNDCLASSEXW wc;
+    memset(&wc, 0, sizeof wc);
+    wc.cbSize = sizeof wc;
+    wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = window_proc;
+    wc.hInstance = g.instance;
+    wc.hCursor = LoadCursorW(NULL, ZEN_IDC_ARROW);
+    wc.lpszClassName = WINDOW_CLASS;
+    wc.hIcon = LoadIconW(NULL, CURSOR_ID(32512));
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        return win32_error("cannot register the window class", NULL);
+    g.class_registered = true;
+    return true;
+}
+
+void backend_shutdown(void)
+{
+    free(g.clipboard_text);
+    if (g.class_registered)
+        UnregisterClassW(WINDOW_CLASS, g.instance);
+    memset(&g, 0, sizeof g);
+}
+
+/* ========================================================================== */
+/*  OpenGL                                                                    */
+/* ========================================================================== */
+
+static bool has_extension(const char *list, const char *name)
+{
+    size_t n = strlen(name);
+    for (const char *p = list; p && *p;)
+    {
+        const char *end = strchr(p, ' ');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == n && strncmp(p, name, n) == 0)
+            return true;
+        p = end ? end + 1 : p + len;
+    }
+    return false;
+}
+
+static void set_legacy_pixel_format(HDC dc)
+{
+    PIXELFORMATDESCRIPTOR pfd;
+    memset(&pfd, 0, sizeof pfd);
+    pfd.nSize = sizeof pfd;
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cDepthBits = 24;
+    pfd.cStencilBits = 8;
+    int format = ChoosePixelFormat(dc, &pfd);
+    if (format)
+        SetPixelFormat(dc, format, &pfd);
+}
+
+static void load_wgl(void)
+{
+    if (g.wgl_loaded)
+        return;
+    g.wgl_loaded = true;
+    g.opengl32 = GetModuleHandleW(L"opengl32.dll");
+
+    HWND dummy = CreateWindowExW(0, WINDOW_CLASS, L"", WS_OVERLAPPED, 0, 0, 1, 1, NULL, NULL, g.instance, NULL);
+    if (!dummy)
+        return;
+    HDC dc = GetDC(dummy);
+    set_legacy_pixel_format(dc);
+    HGLRC rc = wglCreateContext(dc);
+    if (rc && wglMakeCurrent(dc, rc))
+    {
+        g.choose_pixel_format = (PFN_wglChoosePixelFormatARB)(void *)wglGetProcAddress("wglChoosePixelFormatARB");
+        g.create_context = (PFN_wglCreateContextAttribsARB)(void *)wglGetProcAddress("wglCreateContextAttribsARB");
+        g.swap_interval = (PFN_wglSwapIntervalEXT)(void *)wglGetProcAddress("wglSwapIntervalEXT");
+        PFN_wglGetExtensionsStringARB get_ext = (PFN_wglGetExtensionsStringARB)(void *)wglGetProcAddress("wglGetExtensionsStringARB");
+        if (get_ext)
+            g.has_es_profile = has_extension(get_ext(dc), "WGL_EXT_create_context_es2_profile");
+        wglMakeCurrent(NULL, NULL);
+    }
+    if (rc)
+        wglDeleteContext(rc);
+    ReleaseDC(dummy, dc);
+    DestroyWindow(dummy);
+}
+
+static bool choose_pixel_format(HDC dc, const GLConfig *gl)
+{
+    if (!g.choose_pixel_format)
+    {
+        if (gl->msaa > 0)
+            return error_set("WGL_ARB_pixel_format is not supported, cannot request %d samples", gl->msaa);
+        set_legacy_pixel_format(dc);
+        return true;
+    }
+    int attribs[] = {
+        WGL_DRAW_TO_WINDOW_ARB, GL_TRUE,
+        WGL_SUPPORT_OPENGL_ARB, GL_TRUE,
+        WGL_DOUBLE_BUFFER_ARB, GL_TRUE,
+        WGL_ACCELERATION_ARB, WGL_FULL_ACCELERATION_ARB,
+        WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
+        WGL_RED_BITS_ARB, 8, WGL_GREEN_BITS_ARB, 8, WGL_BLUE_BITS_ARB, 8, WGL_ALPHA_BITS_ARB, 8,
+        WGL_DEPTH_BITS_ARB, 24, WGL_STENCIL_BITS_ARB, 8,
+        WGL_SAMPLE_BUFFERS_ARB, gl->msaa > 0 ? 1 : 0,
+        WGL_SAMPLES_ARB, gl->msaa > 0 ? gl->msaa : 0,
+        0};
+    int format = 0;
+    UINT count = 0;
+    if (!g.choose_pixel_format(dc, attribs, NULL, 1, &format, &count) || count == 0)
+        return error_set("no pixel format with RGBA8, depth 24, stencil 8 and %d samples", gl->msaa);
+    PIXELFORMATDESCRIPTOR pfd;
+    DescribePixelFormat(dc, format, sizeof pfd, &pfd);
+    if (!SetPixelFormat(dc, format, &pfd))
+        return win32_error("cannot set the pixel format", NULL);
+    return true;
+}
+
+static HGLRC create_gl_context(HDC dc, const GLConfig *gl)
+{
+    GLProfile profile = gl->profile == GL_PROFILE_DEFAULT ? GL_PROFILE_CORE : gl->profile;
+    int major = gl->major;
+    int minor = gl->minor;
+    if (major == 0)
+    {
+        major = 3;
+        minor = profile == GL_PROFILE_ES ? 0 : 3;
+    }
+
+    const char *name = "core";
+    int mask = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
+    if (profile == GL_PROFILE_COMPAT)
+    {
+        name = "compatibility";
+        mask = WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
+    }
+    else if (profile == GL_PROFILE_ES)
+    {
+        name = "ES";
+        mask = WGL_CONTEXT_ES2_PROFILE_BIT_EXT;
+        if (!g.has_es_profile)
+        {
+            error_set("WGL_EXT_create_context_es2_profile is not supported");
+            return NULL;
+        }
+    }
+    if (!g.create_context)
+    {
+        error_set("WGL_ARB_create_context is not supported");
+        return NULL;
+    }
+
+    int attribs[9];
+    int n = 0;
+    attribs[n++] = WGL_CONTEXT_MAJOR_VERSION_ARB;
+    attribs[n++] = major;
+    attribs[n++] = WGL_CONTEXT_MINOR_VERSION_ARB;
+    attribs[n++] = minor;
+    attribs[n++] = WGL_CONTEXT_PROFILE_MASK_ARB;
+    attribs[n++] = mask;
+    if (gl->debug)
+    {
+        attribs[n++] = WGL_CONTEXT_FLAGS_ARB;
+        attribs[n++] = WGL_CONTEXT_DEBUG_BIT_ARB;
+    }
+    attribs[n] = 0;
+
+    HGLRC rc = g.create_context(dc, NULL, attribs);
+    if (!rc)
+        error_set("cannot create an OpenGL %s %d.%d context%s", name, major, minor, gl->debug ? " with debug" : "");
+    return rc;
+}
+
+void backend_make_current(BackendWindow *b)
+{
+    if (b->render == RENDER_GL)
+        wglMakeCurrent(b->hdc, b->glrc);
+}
+
+void backend_set_vsync(BackendWindow *b, bool on)
+{
+    (void)b;
+    if (g.swap_interval)
+        g.swap_interval(on ? 1 : 0);
+}
+
+void *backend_gl_proc_address(const char *name)
+{
+    void *p = (void *)wglGetProcAddress(name);
+    if (p == NULL || p == (void *)0x1 || p == (void *)0x2 || p == (void *)0x3 || p == (void *)-1)
+    {
+        if (!g.opengl32)
+            g.opengl32 = GetModuleHandleW(L"opengl32.dll");
+        p = g.opengl32 ? (void *)GetProcAddress(g.opengl32, name) : NULL;
+    }
+    return p;
+}
+
+void backend_swap(BackendWindow *b)
+{
+    if (b->render == RENDER_GL)
+        SwapBuffers(b->hdc);
+}
+
+/* ========================================================================== */
+/*  create / destroy                                                          */
+/* ========================================================================== */
+
+BackendWindow *backend_create(const WindowConfig *cfg)
+{
+    int w = cfg->width > 0 ? cfg->width : 640;
+    int h = cfg->height > 0 ? cfg->height : 480;
+    wchar_t title[512];
+    to_wide_title(cfg->title, title, 512);
+
+    BackendWindow *b = calloc(1, sizeof *b);
+    if (!b)
+    {
+        error_set("out of memory");
+        return NULL;
+    }
+    b->render = cfg->render;
+    b->mode = WINDOW_WINDOWED;
+    b->resizable = cfg->resizable;
+    b->cursor_mode = MOUSE_MODE_NORMAL;
+    b->cursor = LoadCursorW(NULL, ZEN_IDC_ARROW);
+
+    if (cfg->render == RENDER_GL)
+        load_wgl();
+
+    DWORD style = window_style(cfg->resizable, WINDOW_WINDOWED);
+    RECT rc = {0, 0, w, h};
+    adjust_rect(&rc, style, 0, NULL);
+    int outer_w = rc.right - rc.left;
+    int outer_h = rc.bottom - rc.top;
+
+    int x = CW_USEDEFAULT;
+    int y = CW_USEDEFAULT;
+    if (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED)
+    {
+        MonitorInfo mi;
+        int index = cfg->monitor >= 0 ? cfg->monitor : primary_monitor();
+        if (backend_monitor_info(index, &mi))
+        {
+            x = cfg->x == WINDOW_POS_CENTERED ? mi.work_x + (mi.work_w - outer_w) / 2 : cfg->x + rc.left;
+            y = cfg->y == WINDOW_POS_CENTERED ? mi.work_y + (mi.work_h - outer_h) / 2 : cfg->y + rc.top;
+        }
+    }
+    else if (cfg->x != WINDOW_POS_UNDEFINED && cfg->y != WINDOW_POS_UNDEFINED)
+    {
+        x = cfg->x + rc.left;
+        y = cfg->y + rc.top;
+    }
+
+    b->hwnd = CreateWindowExW(0, WINDOW_CLASS, title, style, x, y, outer_w, outer_h, NULL, NULL, g.instance, b);
+    if (!b->hwnd)
+    {
+        win32_error("cannot create the window", NULL);
+        free(b);
+        return NULL;
+    }
+    b->hdc = GetDC(b->hwnd);
+
+    if (cfg->render == RENDER_GL)
+    {
+        if (!choose_pixel_format(b->hdc, &cfg->gl))
+        {
+            backend_destroy(b);
+            return NULL;
+        }
+        b->glrc = create_gl_context(b->hdc, &cfg->gl);
+        if (!b->glrc)
+        {
+            backend_destroy(b);
+            return NULL;
+        }
+        wglMakeCurrent(b->hdc, b->glrc);
+        if (cfg->vsync)
+            backend_set_vsync(b, true);
+    }
+
+    DragAcceptFiles(b->hwnd, TRUE);
+    ShowWindow(b->hwnd, SW_SHOW);
+    UpdateWindow(b->hwnd);
+    b->focused = GetFocus() == b->hwnd;
+
+    if (cfg->mode != WINDOW_WINDOWED)
+        backend_set_mode(b, cfg->mode, cfg->monitor);
+    return b;
+}
+
+void backend_destroy(BackendWindow *b)
+{
+    if (!b)
+        return;
+    if (b->cursor_mode == MOUSE_MODE_CAPTURED)
+        ClipCursor(NULL);
+    if (b->glrc)
+    {
+        wglMakeCurrent(NULL, NULL);
+        wglDeleteContext(b->glrc);
+    }
+    if (b->hwnd)
+    {
+        SetWindowLongPtrW(b->hwnd, GWLP_USERDATA, 0);
+        if (b->hdc)
+            ReleaseDC(b->hwnd, b->hdc);
+        DestroyWindow(b->hwnd);
+    }
+    if (b->icon_big)
+        DestroyIcon(b->icon_big);
+    if (b->icon_small)
+        DestroyIcon(b->icon_small);
+    free(b->pixels);
+    free(b);
+}
+
+/* ========================================================================== */
+/*  events                                                                    */
+/* ========================================================================== */
+
+void backend_pump_events(BackendWindow *b, Core *core)
+{
+    MSG msg;
+    b->core = core;
+    for (int i = 0; i < b->pending_count; i++)
+    {
+        if (b->pending[i].is_char)
+            core_push_char(core, b->pending[i].cp);
+        else
+            core_push_event(core, &b->pending[i].ev);
+    }
+    b->pending_count = 0;
+
+    b->pumping = true;
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+    {
+        if (msg.message == WM_QUIT)
+            continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    b->pumping = false;
+}
+
+void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void *user)
+{
+    (void)b;
+    while (!window_should_close(w))
+    {
+        window_begin_frame(w);
+        frame(w, user);
+        window_swap(w);
+    }
+}
+
+/* ========================================================================== */
+/*  geometry and state                                                        */
+/* ========================================================================== */
+
+void backend_get_size(BackendWindow *b, int *w, int *h)
+{
+    client_size(b, w, h);
+}
+
+void backend_get_fb_size(BackendWindow *b, int *w, int *h)
+{
+    client_size(b, w, h);
+}
+
+void backend_get_pos(BackendWindow *b, int *x, int *y)
+{
+    client_origin(b, x, y);
+}
+
+void backend_set_size(BackendWindow *b, int w, int h)
+{
+    DWORD style = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_STYLE);
+    DWORD exstyle = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_EXSTYLE);
+    RECT rc = {0, 0, w, h};
+    adjust_rect(&rc, style, exstyle, b->hwnd);
+    SetWindowPos(b->hwnd, NULL, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void backend_set_pos(BackendWindow *b, int x, int y)
+{
+    DWORD style = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_STYLE);
+    DWORD exstyle = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_EXSTYLE);
+    RECT rc = {0, 0, 0, 0};
+    adjust_rect(&rc, style, exstyle, b->hwnd);
+    SetWindowPos(b->hwnd, NULL, x + rc.left, y + rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+float backend_content_scale(BackendWindow *b)
+{
+    (void)b;
+    return 1.0f;
+}
+
+void backend_set_title(BackendWindow *b, const char *title)
+{
+    wchar_t wide[512];
+    to_wide_title(title, wide, 512);
+    SetWindowTextW(b->hwnd, wide);
+}
+
+void backend_set_size_limits(BackendWindow *b, int minw, int minh, int maxw, int maxh)
+{
+    b->min_w = minw;
+    b->min_h = minh;
+    b->max_w = maxw;
+    b->max_h = maxh;
+}
+
+void backend_minimize(BackendWindow *b)
+{
+    ShowWindow(b->hwnd, SW_MINIMIZE);
+}
+
+void backend_maximize(BackendWindow *b)
+{
+    ShowWindow(b->hwnd, SW_MAXIMIZE);
+}
+
+void backend_restore(BackendWindow *b)
+{
+    ShowWindow(b->hwnd, SW_RESTORE);
+}
+
+void backend_show(BackendWindow *b)
+{
+    ShowWindow(b->hwnd, SW_SHOW);
+}
+
+void backend_hide(BackendWindow *b)
+{
+    ShowWindow(b->hwnd, SW_HIDE);
+}
+
+void backend_focus(BackendWindow *b)
+{
+    SetForegroundWindow(b->hwnd);
+    SetFocus(b->hwnd);
+}
+
+void backend_request_attention(BackendWindow *b)
+{
+    FLASHWINFO fi = {sizeof fi, b->hwnd, FLASHW_ALL | FLASHW_TIMERNOFG, 0, 0};
+    FlashWindowEx(&fi);
+}
+
+bool backend_get_flag(BackendWindow *b, int flag)
+{
+    switch (flag)
+    {
+    case WIN_FLAG_FOCUSED:
+        return GetFocus() == b->hwnd;
+    case WIN_FLAG_MINIMIZED:
+        return IsIconic(b->hwnd) != 0;
+    case WIN_FLAG_MAXIMIZED:
+        return IsZoomed(b->hwnd) != 0;
+    case WIN_FLAG_VISIBLE:
+        return IsWindowVisible(b->hwnd) != 0;
+    case WIN_FLAG_HOVERED:
+        return b->hovered;
+    default:
+        return false;
+    }
+}
+
+void backend_set_mode(BackendWindow *b, WindowMode mode, int monitor)
+{
+    if (mode == b->mode)
+        return;
+
+    if (mode == WINDOW_WINDOWED)
+    {
+        SetWindowLongPtrW(b->hwnd, GWL_STYLE, (LONG_PTR)(b->saved_style | WS_VISIBLE));
+        SetWindowPos(b->hwnd, HWND_NOTOPMOST, b->saved_rect.left, b->saved_rect.top, b->saved_rect.right - b->saved_rect.left,
+                     b->saved_rect.bottom - b->saved_rect.top, SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        if (b->saved_maximized)
+            ShowWindow(b->hwnd, SW_MAXIMIZE);
+        b->mode = WINDOW_WINDOWED;
+        return;
+    }
+
+    MonitorInfo mi;
+    HMONITOR hm = MonitorFromWindow(b->hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info;
+    memset(&info, 0, sizeof info);
+    info.cbSize = sizeof info;
+    RECT target;
+    if (monitor >= 0 && backend_monitor_info(monitor, &mi))
+    {
+        target.left = mi.x;
+        target.top = mi.y;
+        target.right = mi.x + mi.width;
+        target.bottom = mi.y + mi.height;
+    }
+    else if (GetMonitorInfoW(hm, &info))
+    {
+        target = info.rcMonitor;
+    }
+    else
+    {
+        return;
+    }
+
+    if (b->mode == WINDOW_WINDOWED)
+    {
+        b->saved_style = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_STYLE);
+        b->saved_maximized = IsZoomed(b->hwnd) != 0;
+        if (b->saved_maximized)
+            ShowWindow(b->hwnd, SW_RESTORE);
+        GetWindowRect(b->hwnd, &b->saved_rect);
+    }
+    SetWindowLongPtrW(b->hwnd, GWL_STYLE, (LONG_PTR)(WS_POPUP | WS_VISIBLE));
+    SetWindowPos(b->hwnd, HWND_TOP, target.left, target.top, target.right - target.left, target.bottom - target.top,
+                 SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    b->mode = mode;
+}
+
+WindowMode backend_get_mode(BackendWindow *b)
+{
+    return b->mode;
+}
+
+void backend_set_icon(BackendWindow *b, int w, int h, const uint8_t *rgba)
+{
+    if (w <= 0 || h <= 0 || !rgba)
+        return;
+    BITMAPV5HEADER bi;
+    memset(&bi, 0, sizeof bi);
+    bi.bV5Size = sizeof bi;
+    bi.bV5Width = w;
+    bi.bV5Height = -h;
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00FF0000;
+    bi.bV5GreenMask = 0x0000FF00;
+    bi.bV5BlueMask = 0x000000FF;
+    bi.bV5AlphaMask = 0xFF000000;
+
+    uint8_t *dst = NULL;
+    HDC dc = GetDC(NULL);
+    HBITMAP color = CreateDIBSection(dc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, (void **)&dst, NULL, 0);
+    ReleaseDC(NULL, dc);
+    HBITMAP mask = CreateBitmap(w, h, 1, 1, NULL);
+    if (!color || !mask || !dst)
+    {
+        if (color)
+            DeleteObject(color);
+        if (mask)
+            DeleteObject(mask);
+        return;
+    }
+    for (int i = 0; i < w * h; i++)
+    {
+        dst[i * 4 + 0] = rgba[i * 4 + 2];
+        dst[i * 4 + 1] = rgba[i * 4 + 1];
+        dst[i * 4 + 2] = rgba[i * 4 + 0];
+        dst[i * 4 + 3] = rgba[i * 4 + 3];
+    }
+    ICONINFO ii = {TRUE, 0, 0, mask, color};
+    HICON icon = CreateIconIndirect(&ii);
+    DeleteObject(color);
+    DeleteObject(mask);
+    if (!icon)
+        return;
+
+    SendMessageW(b->hwnd, WM_SETICON, ICON_BIG, (LPARAM)icon);
+    SendMessageW(b->hwnd, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+    if (b->icon_big)
+        DestroyIcon(b->icon_big);
+    b->icon_big = icon;
+}
+
+void backend_set_opacity(BackendWindow *b, float a)
+{
+    LONG_PTR ex = GetWindowLongPtrW(b->hwnd, GWL_EXSTYLE);
+    if (a >= 1.0f)
+    {
+        SetWindowLongPtrW(b->hwnd, GWL_EXSTYLE, ex & ~(LONG_PTR)WS_EX_LAYERED);
+        return;
+    }
+    if (a < 0.0f)
+        a = 0.0f;
+    SetWindowLongPtrW(b->hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(b->hwnd, 0, (BYTE)(a * 255.0f + 0.5f), LWA_ALPHA);
+}
+
+void backend_set_always_on_top(BackendWindow *b, bool on)
+{
+    SetWindowPos(b->hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+/* ========================================================================== */
+/*  pixel surface                                                             */
+/* ========================================================================== */
+
+static void blit_pixels(BackendWindow *b, HDC dc)
+{
+    BITMAPINFO bmi;
+    memset(&bmi, 0, sizeof bmi);
+    bmi.bmiHeader.biSize = sizeof bmi.bmiHeader;
+    bmi.bmiHeader.biWidth = b->px_w;
+    bmi.bmiHeader.biHeight = -b->px_h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    SetDIBitsToDevice(dc, 0, 0, (DWORD)b->px_w, (DWORD)b->px_h, 0, 0, 0, (UINT)b->px_h, b->pixels, &bmi, DIB_RGB_COLORS);
+}
+
+static void paint_pixels(BackendWindow *b)
+{
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(b->hwnd, &ps);
+    blit_pixels(b, dc);
+    EndPaint(b->hwnd, &ps);
+}
+
+bool backend_lock_pixels(BackendWindow *b, Framebuffer *out)
+{
+    if (b->render != RENDER_PIXELS || !out)
+        return false;
+    int w, h;
+    client_size(b, &w, &h);
+    if (w <= 0 || h <= 0)
+        return false;
+    if (!b->pixels || b->px_w != w || b->px_h != h)
+    {
+        uint32_t *grown = calloc((size_t)w * (size_t)h, 4);
+        if (!grown)
+            return false;
+        free(b->pixels);
+        b->pixels = grown;
+        b->px_w = w;
+        b->px_h = h;
+    }
+    out->pixels = b->pixels;
+    out->width = b->px_w;
+    out->height = b->px_h;
+    out->stride = b->px_w;
+    return true;
+}
+
+void backend_present_pixels(BackendWindow *b)
+{
+    if (b->render != RENDER_PIXELS || !b->pixels)
+        return;
+    blit_pixels(b, b->hdc);
+}
+
+/* ========================================================================== */
+/*  clipboard                                                                 */
+/* ========================================================================== */
+
+void backend_clipboard_set(const char *text)
+{
+    free(g.clipboard_text);
+    g.clipboard_text = text ? _strdup(text) : NULL;
+    if (!text || !OpenClipboard(NULL))
+        return;
+    int n = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    HGLOBAL mem = n > 0 ? GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)n * sizeof(wchar_t)) : NULL;
+    if (mem)
+    {
+        wchar_t *dst = GlobalLock(mem);
+        if (dst)
+        {
+            MultiByteToWideChar(CP_UTF8, 0, text, -1, dst, n);
+            GlobalUnlock(mem);
+            EmptyClipboard();
+            if (!SetClipboardData(CF_UNICODETEXT, mem))
+                GlobalFree(mem);
+        }
+        else
+        {
+            GlobalFree(mem);
+        }
+    }
+    CloseClipboard();
+}
+
+const char *backend_clipboard_get(void)
+{
+    free(g.clipboard_text);
+    g.clipboard_text = NULL;
+    if (OpenClipboard(NULL))
+    {
+        HANDLE data = GetClipboardData(CF_UNICODETEXT);
+        const wchar_t *wide = data ? GlobalLock(data) : NULL;
+        if (wide)
+        {
+            int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+            if (n > 0)
+            {
+                g.clipboard_text = malloc((size_t)n);
+                if (g.clipboard_text)
+                    WideCharToMultiByte(CP_UTF8, 0, wide, -1, g.clipboard_text, n, NULL, NULL);
+            }
+            GlobalUnlock(data);
+        }
+        CloseClipboard();
+    }
+    if (!g.clipboard_text)
+        g.clipboard_text = _strdup("");
+    return g.clipboard_text ? g.clipboard_text : "";
+}

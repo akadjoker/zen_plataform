@@ -4,11 +4,21 @@
  * platform detail goes through backend.h.
  */
 #include "core_internal.h"
+#include "error_internal.h"
+#include "gamepad_internal.h"
 #include "backend.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 /* ---- ring buffers ---- */
 
@@ -142,6 +152,13 @@ void core_push_event(Core *core, const Event *ev)
         touch_apply(s, ev->data.touch.id, ev->data.touch.x, ev->data.touch.y,
                     ev->data.touch.pressure, ev->data.touch.phase);
         break;
+    case EVENT_WINDOW_FOCUS:
+        if (!ev->data.focus.gained)
+        {
+            memset(s->key_down, 0, sizeof s->key_down);
+            memset(s->mouse_down, 0, sizeof s->mouse_down);
+        }
+        break;
     case EVENT_WINDOW_CLOSE:
         s->close_request = true;
         break;
@@ -158,19 +175,34 @@ static uint64_t g_time_base; /* nanoseconds at platform_init */
 
 static uint64_t now_nanos(void)
 {
+#if defined(_WIN32)
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    if (freq.QuadPart == 0)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    uint64_t whole = (uint64_t)counter.QuadPart / (uint64_t)freq.QuadPart;
+    uint64_t rest = (uint64_t)counter.QuadPart % (uint64_t)freq.QuadPart;
+    return whole * 1000000000ull + rest * 1000000000ull / (uint64_t)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
 }
 
 bool platform_init(void)
 {
     g_time_base = now_nanos();
-    return backend_init();
+    if (!backend_init())
+        return false;
+    gamepad_init();
+    return true;
 }
 
 void platform_shutdown(void)
 {
+    gamepad_shutdown();
     backend_shutdown();
 }
 
@@ -178,6 +210,13 @@ PlatformWindow *window_create(const WindowConfig *cfg)
 {
     if (!cfg)
         return NULL;
+    const GLConfig *gl = &cfg->gl;
+    if (gl->profile < GL_PROFILE_DEFAULT || gl->profile > GL_PROFILE_ES || gl->major < 0 ||
+        gl->minor < 0 || gl->msaa < 0)
+    {
+        error_set("invalid OpenGL configuration");
+        return NULL;
+    }
     PlatformWindow *w = calloc(1, sizeof *w);
     if (!w)
         return NULL;
@@ -229,6 +268,7 @@ void window_begin_frame(PlatformWindow *w)
     s->fe_cursor = 0;
     /* keycode_q and char_q are not cleared here: the consumer drains them */
 
+    gamepad_poll();
     backend_pump_events(w->b, &w->core);
 
     if (s->close_request)
@@ -453,6 +493,21 @@ int monitor_from_window(PlatformWindow *w)
 /*  Keyboard                                                                  */
 /* ========================================================================== */
 
+int key_mods(PlatformWindow *w)
+{
+    const bool *k = w->core.in.key_down;
+    int mods = 0;
+    if (k[KEY_LEFT_SHIFT] || k[KEY_RIGHT_SHIFT])
+        mods |= KEYMOD_SHIFT;
+    if (k[KEY_LEFT_CONTROL] || k[KEY_RIGHT_CONTROL])
+        mods |= KEYMOD_CTRL;
+    if (k[KEY_LEFT_ALT] || k[KEY_RIGHT_ALT])
+        mods |= KEYMOD_ALT;
+    if (k[KEY_LEFT_SUPER] || k[KEY_RIGHT_SUPER])
+        mods |= KEYMOD_SUPER;
+    return mods;
+}
+
 bool key_down(PlatformWindow *w, int key)
 {
     return key > 0 && key < KEY_MAX && w->core.in.key_down[key];
@@ -603,6 +658,31 @@ uint64_t time_nanos(void)
 double time_seconds(void)
 {
     return (double)time_nanos() / 1e9;
+}
+
+void time_sleep(uint32_t milliseconds)
+{
+#if defined(_WIN32)
+    static HANDLE timer;
+    if (!timer)
+        timer = CreateWaitableTimerExW(NULL, NULL, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    if (timer)
+    {
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)milliseconds * 10000;
+        if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+        {
+            WaitForSingleObject(timer, INFINITE);
+            return;
+        }
+    }
+    Sleep(milliseconds);
+#else
+    struct timespec ts = {(time_t)(milliseconds / 1000), (long)(milliseconds % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
+    {
+    }
+#endif
 }
 
 /* ========================================================================== */
