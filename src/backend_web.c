@@ -9,6 +9,7 @@
  */
 #include "core_internal.h"
 #include "backend.h"
+#include "error_internal.h"
 
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
@@ -317,6 +318,19 @@ void backend_shutdown(void)
 {
 }
 
+/* WebGL2 is GLES 3.0 and WebGL1 is GLES 2.0; nothing else exists in a browser. */
+static bool web_gl_version(const GLConfig *gl, int *webgl_major)
+{
+    int major = gl->major ? gl->major : 3;
+    int minor = gl->major ? gl->minor : 0;
+    if (gl->profile != GL_PROFILE_DEFAULT && gl->profile != GL_PROFILE_ES)
+        return error_set("only OpenGL ES contexts are available on the web");
+    if ((major != 2 && major != 3) || minor > 0)
+        return error_set("OpenGL ES %d.%d is not available on the web", major, minor);
+    *webgl_major = major == 3 ? 2 : 1;
+    return true;
+}
+
 BackendWindow *backend_create(const WindowConfig *cfg)
 {
     BackendWindow *b = calloc(1, sizeof *b);
@@ -335,11 +349,18 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
     else
     {
+        int webgl_major;
+        if (!web_gl_version(&cfg->gl, &webgl_major))
+        {
+            free(b);
+            return NULL;
+        }
+
         EmscriptenWebGLContextAttributes attrs;
         emscripten_webgl_init_context_attributes(&attrs);
-        attrs.majorVersion = 2; /* WebGL2 == GLES 3.0 */
+        attrs.majorVersion = webgl_major;
         attrs.minorVersion = 0;
-        attrs.antialias = cfg->msaa > 0;
+        attrs.antialias = cfg->gl.msaa > 0;
         attrs.alpha = false;
         attrs.depth = true;
         attrs.stencil = true;
@@ -347,6 +368,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         b->gl = emscripten_webgl_create_context(CANVAS_TARGET, &attrs);
         if (b->gl <= 0)
         {
+            error_set("cannot create a WebGL %d context", attrs.majorVersion);
             free(b);
             return NULL;
         }

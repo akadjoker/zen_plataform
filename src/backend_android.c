@@ -9,6 +9,7 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "os_backend.h"
+#include "error_internal.h"
 
 #include <android_native_app_glue.h>
 #include <android/keycodes.h>
@@ -129,25 +130,62 @@ static int translate_key(int32_t code)
 /*  EGL                                                                       */
 /* ========================================================================== */
 
-static bool egl_init_context(BackendWindow *b)
+#ifndef EGL_CONTEXT_MINOR_VERSION_KHR
+#define EGL_CONTEXT_MINOR_VERSION_KHR 0x30FB
+#endif
+#ifndef EGL_CONTEXT_FLAGS_KHR
+#define EGL_CONTEXT_FLAGS_KHR 0x30FC
+#endif
+#ifndef EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR
+#define EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR 0x00000001
+#endif
+
+static bool egl_init_context(BackendWindow *b, const GLConfig *gl)
 {
+    if (gl->profile != GL_PROFILE_DEFAULT && gl->profile != GL_PROFILE_ES)
+        return error_set("only OpenGL ES contexts are available on Android");
+    int major = gl->major ? gl->major : 3;
+    int minor = gl->major ? gl->minor : 0;
+    if (major < 2 || major > 3)
+        return error_set("OpenGL ES %d.%d is not available on Android", major, minor);
+
     b->dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (b->dpy == EGL_NO_DISPLAY || !eglInitialize(b->dpy, NULL, NULL))
-        return false;
+        return error_set("cannot initialize EGL");
 
     const EGLint attribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RENDERABLE_TYPE, major >= 3 ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT,
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
         EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8,
+        EGL_SAMPLE_BUFFERS, gl->msaa > 0 ? 1 : 0,
+        EGL_SAMPLES, gl->msaa,
         EGL_NONE};
     EGLint count = 0;
     if (!eglChooseConfig(b->dpy, attribs, &b->config, 1, &count) || count == 0)
-        return false;
+        return error_set("no EGL configuration with RGBA8, depth 24, stencil 8 and %d samples", gl->msaa);
 
-    const EGLint ctx_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLint ctx_attribs[9];
+    int n = 0;
+    ctx_attribs[n++] = EGL_CONTEXT_CLIENT_VERSION;
+    ctx_attribs[n++] = major;
+    if (minor > 0)
+    {
+        ctx_attribs[n++] = EGL_CONTEXT_MINOR_VERSION_KHR;
+        ctx_attribs[n++] = minor;
+    }
+    if (gl->debug)
+    {
+        ctx_attribs[n++] = EGL_CONTEXT_FLAGS_KHR;
+        ctx_attribs[n++] = EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR;
+    }
+    ctx_attribs[n] = EGL_NONE;
+
     b->ctx = eglCreateContext(b->dpy, b->config, EGL_NO_CONTEXT, ctx_attribs);
-    return b->ctx != EGL_NO_CONTEXT;
+    if (b->ctx == EGL_NO_CONTEXT)
+        return error_set("cannot create an OpenGL ES %d.%d context%s (EGL error 0x%x)", major, minor,
+                         gl->debug ? " with debug" : "", (unsigned)eglGetError());
+    return true;
 }
 
 static bool egl_init_surface(BackendWindow *b)
@@ -350,7 +388,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->render = cfg->render;
     g_app->userData = b;
 
-    if (cfg->render == RENDER_GL && !egl_init_context(b))
+    if (cfg->render == RENDER_GL && !egl_init_context(b, &cfg->gl))
     {
         free(b);
         g_app->userData = NULL;

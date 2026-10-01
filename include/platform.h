@@ -45,6 +45,27 @@ extern "C"
 #define WINDOW_POS_UNDEFINED (-2) /* let the system choose the position   */
 #define MONITOR_CURRENT (-1)      /* the monitor the window is mostly on  */
 
+    typedef enum
+    {
+        GL_PROFILE_DEFAULT, /* core on desktop, ES on web and android */
+        GL_PROFILE_CORE,
+        GL_PROFILE_COMPAT,
+        GL_PROFILE_ES
+    } GLProfile;
+
+    /* Zero means default: 3.3 core on desktop, ES 3.0 on web and android, no MSAA,
+       no debug. The framebuffer is always RGBA8 with 24-bit depth, 8-bit stencil
+       and double buffering. A request the platform cannot satisfy makes
+       window_create fail (see platform_get_error); it is never downgraded.
+       debug is ignored on the web. */
+    typedef struct
+    {
+        GLProfile profile;
+        int major, minor;
+        int msaa; /* sample count, 0 to disable */
+        bool debug;
+    } GLConfig;
+
     typedef struct
     {
         const char *title;
@@ -53,10 +74,9 @@ extern "C"
         int monitor;       /* index, or MONITOR_CURRENT */
         WindowMode mode;
         RenderMode render; /* RENDER_GL (default) or RENDER_PIXELS */
-        int gl_major, gl_minor;
+        GLConfig gl;
         bool resizable;
         bool vsync;
-        int msaa; /* sample count, 0 to disable */
     } WindowConfig;
 
     typedef struct

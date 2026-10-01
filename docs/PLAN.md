@@ -5,7 +5,7 @@ de depender do SDL2, passando a usar o `zen_platform`. Sem DLLs, build rápido e
 binários pequenos. **Regra: só entra o que os engines usam.** Fora do plano:
 threads, mutex, áudio, SDL_Renderer, logging, storage SDL3 completo.
 
-Estado: Fases 1, 2 e 3 concluidas. Proxima: Fase 4.
+Estado: Fases 1 a 4 concluidas. Proxima: Fase 5.
 
 ## 1. Levantamento: o que os engines usam do SDL2
 
@@ -56,10 +56,13 @@ Não entra no zen (fica nos engines):
 - `fs_enumerate_directory(path, recursive, cb, ud)`.
 - Web: o `pref_path` usa `$HOME/.local/share`; a persistência (IDBFS e `fs_sync`) fica na Fase 8.
 
-### Fase 4 - OpenGL config
-- `GLConfig` dentro de `WindowConfig`: profile (CORE/COMPAT/ES), versão, depth, stencil, msaa, debug, `share_with`.
-- `gl_swap_interval` (incluindo -1 adaptive onde exista) e `gl_make_current(NULL)`.
-- X11 (GLX_ARB_create_context, ES via GLX_EXT_create_context_es2_profile), Android (EGL), Web (WebGL), fake.
+### Fase 4 - OpenGL config (concluida em X11; Android e Web escritos mas nao compilados; WGL na Fase 7)
+- `GLConfig` dentro de `WindowConfig`: profile (CORE/COMPAT/ES), versao, msaa e debug. Zero e o valor por omissao.
+- Depth 24, stencil 8 e double buffer ficam fixos: os engines pedem sempre estes valores.
+- Um pedido que a plataforma nao satisfaz faz o `window_create` falhar com mensagem em `platform_get_error()`, sem recuar de versao em silencio.
+- `share_with` e `gl_make_current(NULL)` ficam de fora: nenhum engine os usa (o `share` so aparece no multi-viewport do `imgui_impl_sdl2`).
+- O swap interval continua em `window_set_vsync`.
+- X11: `GLX_ARB_create_context`, `GLX_EXT_create_context_es2_profile` e handler de erros do X, para uma versao impossivel devolver NULL em vez de terminar o processo.
 
 ### Fase 5 - Input em falta
 - Modificadores: `key_mods(w)` e `mods` no `EVENT_KEY`.

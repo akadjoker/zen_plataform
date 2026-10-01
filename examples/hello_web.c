@@ -41,8 +41,7 @@ int main(void)
         .title = "hello_web",
         .width = 640,
         .height = 480,
-        .gl_major = 3,
-        .gl_minor = 0,
+        .gl = {.major = 3, .minor = 0},
         .resizable = true,
         .vsync = true,
     };

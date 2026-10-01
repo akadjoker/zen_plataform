@@ -4,6 +4,7 @@
  * platform detail goes through backend.h.
  */
 #include "core_internal.h"
+#include "error_internal.h"
 #include "backend.h"
 
 #include <stdlib.h>
@@ -178,6 +179,13 @@ PlatformWindow *window_create(const WindowConfig *cfg)
 {
     if (!cfg)
         return NULL;
+    const GLConfig *gl = &cfg->gl;
+    if (gl->profile < GL_PROFILE_DEFAULT || gl->profile > GL_PROFILE_ES || gl->major < 0 ||
+        gl->minor < 0 || gl->msaa < 0)
+    {
+        error_set("invalid OpenGL configuration");
+        return NULL;
+    }
     PlatformWindow *w = calloc(1, sizeof *w);
     if (!w)
         return NULL;

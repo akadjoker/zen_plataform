@@ -1,6 +1,8 @@
 #ifndef ERROR_INTERNAL_H
 #define ERROR_INTERNAL_H
 
+#include <stdbool.h>
+
 #if defined(__GNUC__) || defined(__clang__)
 #define ERROR_PRINTF(f, a) __attribute__((format(printf, f, a)))
 #else

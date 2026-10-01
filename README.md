@@ -57,9 +57,11 @@ if (!platform_init()) return 1;
 
 WindowConfig cfg = {
     .title = "Hello", .width = 640, .height = 480,
-    .render = RENDER_GL
+    .render = RENDER_GL,
+    .gl = { .profile = GL_PROFILE_CORE, .major = 4, .minor = 5, .msaa = 4, .debug = true }
 };
 PlatformWindow *w = window_create(&cfg);
+if (!w) fprintf(stderr, "%s\n", platform_get_error());
 
 app_run(w, frame_callback, user_data);
 
