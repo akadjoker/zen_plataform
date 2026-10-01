@@ -28,6 +28,24 @@ cmake ..
 make
 ```
 
+On Windows, from a Visual Studio developer prompt:
+
+```sh
+cmake -S . -B build -A x64
+cmake --build build --config Release
+ctest --test-dir build -C Release
+```
+
+The CRT is linked statically (`/MT`; `-static` with MinGW), so the executables
+import only DLLs that ship with Windows: no vcruntime, no SDL, no GLFW.
+
+### Releases
+
+CI builds Linux, Windows (MSVC and MinGW), Web and Android on every push. Pushing a
+tag that starts with `v` (for example `v0.1.0`) publishes a GitHub release with one
+zip per platform: the static library, `platform.h`, and the examples.
+A tag with a hyphen (`v0.1.0-rc1`) is marked as a pre-release.
+
 ### Options
 
 | Flag | Default | Description |
@@ -43,7 +61,7 @@ make
 | Platform | Backend | Notes |
 |---|---|---|
 | Linux / X11 | `backend_x11.c` | requires X11 + Xrandr + GL/GLX dev packages |
-| Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32 |
+| Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |
 | macOS/iOS | `backend_cocoa.mm` | Obj-C++, in progress |

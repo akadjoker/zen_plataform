@@ -1,6 +1,7 @@
 #include "win32_util.h"
 #include "error_internal.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
