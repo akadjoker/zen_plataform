@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 
+project(platform LANGUAGES C)
+
 # Static CRT: executables and the library depend on no runtime DLL (vcruntime, ...).
+# MSVC is only defined once the compiler is known, so this goes after project().
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
-
-project(platform LANGUAGES C)
 
 option(PLATFORM_BUILD_TESTS "Build unit tests" ON)
 option(PLATFORM_USE_FAKE    "Force the fake backend" OFF)
