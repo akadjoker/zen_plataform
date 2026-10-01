@@ -176,7 +176,11 @@ static void test_mouse(PlatformWindow *w)
     SendMessageW(g_hwnd, WM_MOUSEMOVE, 0, mouse_lparam(40, 30));
     frame(w);
     CHECK(mouse_x(w) == 40 && mouse_y(w) == 30);
-    CHECK(window_is_hovered(w));
+    Event ev;
+    bool entered = false;
+    while (poll_event(w, &ev))
+        entered |= ev.type == EVENT_WINDOW_ENTER && ev.data.enter.entered;
+    CHECK(entered);
 
     SendMessageW(g_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, mouse_lparam(40, 30));
     SendMessageW(g_hwnd, WM_RBUTTONDOWN, MK_LBUTTON | MK_RBUTTON, mouse_lparam(40, 30));
@@ -370,14 +374,14 @@ static void test_clipboard(void)
 
 static void test_pixels(void)
 {
-    WindowConfig cfg = {.title = SECOND_TITLE, .width = 64, .height = 48, .render = RENDER_PIXELS};
+    WindowConfig cfg = {.title = SECOND_TITLE, .width = 320, .height = 240, .render = RENDER_PIXELS};
     PlatformWindow *w = window_create(&cfg);
     CHECK(w != NULL);
     if (!w)
         return;
     Framebuffer fb;
     CHECK(window_lock_pixels(w, &fb));
-    CHECK(fb.width == 64 && fb.height == 48 && fb.stride >= fb.width && fb.pixels != NULL);
+    CHECK(fb.width == 320 && fb.height == 240 && fb.stride >= fb.width && fb.pixels != NULL);
     draw_clear(&fb, 0xFF336699);
     draw_fill_rect(&fb, 4, 4, 10, 10, 0xFFFF0000, BLEND_NONE);
     window_present_pixels(w);
@@ -392,9 +396,9 @@ static void test_pixels(void)
             CHECK(GetRValue(c) == 0xFF && GetGValue(c) == 0x00 && GetBValue(c) == 0x00);
         ReleaseDC(NULL, dc);
     }
-    window_set_size(w, 80, 60);
+    window_set_size(w, 400, 300);
     CHECK(window_lock_pixels(w, &fb));
-    CHECK(fb.width == 80 && fb.height == 60);
+    CHECK(fb.width == 400 && fb.height == 300);
     window_destroy(w);
 }
 

@@ -56,7 +56,7 @@
 #define ZEN_IDC_HAND CURSOR_ID(32649)
 #define MAX_MONITORS 16
 #define MONITOR_NAME_CAP 64
-#define BUTTON_COUNT 5
+#define PENDING_MAX 256
 
 typedef BOOL(WINAPI *PFN_wglChoosePixelFormatARB)(HDC, const int *, const FLOAT *, UINT, int *, UINT *);
 typedef HGLRC(WINAPI *PFN_wglCreateContextAttribsARB)(HDC, HGLRC, const int *);
@@ -84,8 +84,19 @@ static struct
     char monitor_names[MAX_MONITORS][MONITOR_NAME_CAP];
 } g;
 
+typedef struct
+{
+    bool is_char;
+    Event ev;
+    uint32_t cp;
+} PendingItem;
+
 struct BackendWindow
 {
+    PendingItem pending[PENDING_MAX];
+    int pending_count;
+    bool pumping;
+
     HWND hwnd;
     HDC hdc;
     HGLRC glrc;
@@ -117,10 +128,23 @@ struct BackendWindow
 /*  helpers                                                                   */
 /* ========================================================================== */
 
+/* Events raised while the window is being driven by an API call (ShowWindow,
+   SetWindowPos) arrive outside the pump; they wait here and are delivered at the
+   start of the next pump, so begin_frame never discards them. */
 static void push(BackendWindow *b, Event *e)
 {
-    if (b->core)
+    if (b->pumping && b->core)
         core_push_event(b->core, e);
+    else if (b->pending_count < PENDING_MAX)
+        b->pending[b->pending_count++] = (PendingItem){false, *e, 0};
+}
+
+static void push_char(BackendWindow *b, uint32_t cp)
+{
+    if (b->pumping && b->core)
+        core_push_char(b->core, cp);
+    else if (b->pending_count < PENDING_MAX)
+        b->pending[b->pending_count++] = (PendingItem){true, {0}, cp};
 }
 
 static UINT window_dpi(HWND hwnd)
@@ -658,7 +682,7 @@ static void handle_drop(BackendWindow *b, HDROP drop)
         if (paths[stored])
             stored++;
     }
-    if (stored)
+    if (stored && b->pumping && b->core)
     {
         Event e = {.type = EVENT_WINDOW_DROP};
         e.data.drop.count = (int)stored;
@@ -686,8 +710,8 @@ static void handle_char(BackendWindow *b, WPARAM wparam)
         cp = 0x10000 + (((uint32_t)b->high_surrogate - 0xD800) << 10) + (cp - 0xDC00);
     }
     b->high_surrogate = 0;
-    if (cp >= 0x20 && cp != 0x7F && b->core)
-        core_push_char(b->core, cp);
+    if (cp >= 0x20 && cp != 0x7F)
+        push_char(b, cp);
 }
 
 static void paint_pixels(BackendWindow *b);
@@ -1189,6 +1213,16 @@ void backend_pump_events(BackendWindow *b, Core *core)
 {
     MSG msg;
     b->core = core;
+    for (int i = 0; i < b->pending_count; i++)
+    {
+        if (b->pending[i].is_char)
+            core_push_char(core, b->pending[i].cp);
+        else
+            core_push_event(core, &b->pending[i].ev);
+    }
+    b->pending_count = 0;
+
+    b->pumping = true;
     while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
     {
         if (msg.message == WM_QUIT)
@@ -1196,6 +1230,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    b->pumping = false;
 }
 
 void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void *user)
