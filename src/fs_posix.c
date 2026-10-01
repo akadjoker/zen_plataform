@@ -169,7 +169,7 @@ static int enum_dir(EnumState *es)
         }
         memcpy(es->path + base, e->d_name, n + 1);
 
-        PathType type;
+        PathType type = PATH_TYPE_OTHER;
         bool descend;
         if (!classify(es->path, e->d_type, &type, &descend))
             result = -1;

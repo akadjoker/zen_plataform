@@ -1,0 +1,6 @@
+# Axis-aligned rectangle with fractional edges.
+size 48 32
+fillStyle #ffffff
+fillRect 0 0 48 32
+fillStyle #208040
+fillRect 8.25 8.5 20.5 10.75

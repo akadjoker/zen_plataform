@@ -60,6 +60,20 @@ jobs:
           name: zen_platform-linux-x64
           path: stage
 
+  vector:
+    name: zen_vector (harness, sanitizers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build with sanitizers
+        run: |
+          cmake -S zen_vector -B build-vector -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_SANITIZE=ON -DCMAKE_C_FLAGS="-Wall -Wextra"
+          cmake --build build-vector -j
+
+      - name: Test
+        run: ctest --test-dir build-vector --output-on-failure
+
   windows-msvc:
     name: Windows (MSVC, static runtime)
     runs-on: windows-latest
@@ -191,7 +205,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v') || inputs.release_version != ''
-    needs: [linux, windows-msvc, windows-mingw, web, android]
+    needs: [linux, vector, windows-msvc, windows-mingw, web, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

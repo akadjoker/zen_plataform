@@ -1,0 +1,18 @@
+# Two overlapping opaque polygons: the edge pixels of the second blend over the first.
+size 48 48
+fillStyle #ffffff
+fillRect 0 0 48 48
+fillStyle #ff0000
+beginPath
+moveTo 4.000 4.000
+lineTo 34.000 8.000
+lineTo 14.000 36.000
+closePath
+fill
+fillStyle #0000ff
+beginPath
+moveTo 14.500 10.500
+lineTo 44.000 16.000
+lineTo 24.000 44.000
+closePath
+fill

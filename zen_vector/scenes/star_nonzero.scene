@@ -1,0 +1,13 @@
+# Self-intersecting pentagram, nonzero rule: the centre is filled.
+size 64 64
+fillStyle #ffffff
+fillRect 0 0 64 64
+fillStyle #a02020
+beginPath
+moveTo 32.000 4.000
+lineTo 48.458 54.652
+lineTo 5.370 23.348
+lineTo 58.630 23.348
+lineTo 15.542 54.652
+closePath
+fill nonzero

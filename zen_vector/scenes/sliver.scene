@@ -1,0 +1,11 @@
+# Triangle thinner than one pixel: coverage never reaches 100%.
+size 64 32
+fillStyle #ffffff
+fillRect 0 0 64 32
+fillStyle #000000
+beginPath
+moveTo 2.000 2.000
+lineTo 60.000 28.000
+lineTo 60.000 28.600
+closePath
+fill
