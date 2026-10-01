@@ -1,7 +1,3 @@
-/*
- * test_path.c - path builders (join, normalize, absolute, relative) and the
- * per-thread error message. Pure string logic except path_absolute (cwd).
- */
 #include "platform.h"
 
 #include <stdio.h>

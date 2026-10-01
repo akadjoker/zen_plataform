@@ -253,7 +253,6 @@ static bool is_sep(char c)
 #endif
 }
 
-/* "/" (posix), "C:/" "C:" "//" (win32); 0 for a relative path */
 static size_t root_len(const char *p)
 {
 #if defined(_WIN32)

@@ -1,7 +1,3 @@
-/*
- * error.c - last error message, one per thread, as SDL_GetError. error_set
- * returns false so a failing call can end with `return error_set(...)`.
- */
 #include "platform.h"
 #include "error_internal.h"
 

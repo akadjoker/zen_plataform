@@ -176,7 +176,6 @@ extern "C"
     PLATFORM_API bool platform_init(void);
     PLATFORM_API void platform_shutdown(void);
 
-    /* Last error of the calling thread, "" when none. */
     PLATFORM_API const char *platform_get_error(void);
     PLATFORM_API void platform_clear_error(void);
 
@@ -422,12 +421,10 @@ extern "C"
     PLATFORM_API void path_directory(const char *path, char *out, size_t cap); /* -> "a/b" */
     PLATFORM_API bool path_has_extension(const char *path, const char *ext);   /* case-insensitive */
 
-    /* Path builders write into out and return false (out = "") when the result
-       does not fit in cap. out may alias an input. */
     PLATFORM_API bool path_is_absolute(const char *path);
-    PLATFORM_API bool path_join(char *out, size_t cap, const char *a, const char *b); /* b absolute -> b */
-    PLATFORM_API bool path_normalize(char *out, size_t cap, const char *path);         /* "a/./b/../c/" -> "a/c" */
-    PLATFORM_API bool path_absolute(char *out, size_t cap, const char *path);          /* cwd-based, normalized */
+    PLATFORM_API bool path_join(char *out, size_t cap, const char *a, const char *b);
+    PLATFORM_API bool path_normalize(char *out, size_t cap, const char *path);
+    PLATFORM_API bool path_absolute(char *out, size_t cap, const char *path);
     PLATFORM_API bool path_relative(char *out, size_t cap, const char *path, const char *base);
 
     /* Directories, raylib-style cursor over the process cwd. The dir_* string
