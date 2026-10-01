@@ -46,6 +46,9 @@ tag that starts with `v` (for example `v0.1.0`) publishes a GitHub release with 
 zip per platform: the static library, `platform.h`, and the examples.
 A tag with a hyphen (`v0.1.0-rc1`) is marked as a pre-release.
 
+Without a local tag, run the workflow by hand (Actions, CI, Run workflow) and type the
+version in `release_version`; the release is created on the chosen commit.
+
 ### Options
 
 | Flag | Default | Description |
