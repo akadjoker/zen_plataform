@@ -79,9 +79,11 @@ static void test_scene_errors(void)
         {"size 4 4\nfillStyle #12345\n", "#rrggbb"},
         {"size 4 4\nfillStyle #12345g\n", "#rrggbb"},
         {"size 4 4\nfillRect 1 2 3\n", "needs x y w h"},
-        {"size 4 4\nfillRect 1 2 3.5 1\n", "not an integer"},
-        {"size 4 4\nfillRect 1 2 3 x\n", "not an integer"},
-        {"size 4 4\n\nbeginPath\n", "line 3: unknown command 'beginPath'"},
+        {"size 4 4\nfillRect 1 2 3 x\n", "not a number"},
+        {"size 4 4\n\nstrokeText\n", "line 3: unknown command 'strokeText'"},
+        {"size 4 4\nfill both\n", "nonzero or evenodd"},
+        {"size 4 4\nmoveTo 1\n", "moveTo needs x y"},
+        {"size 4 4\nbeginPath 1\n", "no arguments"},
         {"size 4 4\nfillRect 1 1 1 1 1 1 1 1 1\n", "too many"},
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)

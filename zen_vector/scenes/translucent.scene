@@ -1,0 +1,13 @@
+# Translucent fills over each other and over a transparent background.
+size 48 48
+fillStyle #ff000080
+fillRect 4.5 4.5 30 30
+fillStyle #0000ff80
+beginPath
+moveTo 14.25 14.25
+lineTo 44.5 20.75
+lineTo 24.5 44.25
+closePath
+fill
+fillStyle #00ff0040
+fillRect 0 0 48 10.5

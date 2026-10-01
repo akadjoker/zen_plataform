@@ -1,0 +1,13 @@
+# A blob of quadratic curves with a sharp corner.
+size 64 48
+fillStyle #ffffff
+fillRect 0 0 64 48
+fillStyle #803020
+beginPath
+moveTo 6.5 24.25
+quadraticCurveTo 10 2 32 6.5
+quadraticCurveTo 70 10 50.5 30
+quadraticCurveTo 40 46 20.75 42.5
+lineTo 14.25 30.75
+closePath
+fill

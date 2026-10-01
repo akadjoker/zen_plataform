@@ -9,10 +9,17 @@
    comment. The same text is rendered by the reference (a browser canvas, through
    tools/ref_render.js) and by zen_vector, so the two can be compared.
 
-   Supported now:
-     size W H              canvas size in pixels; must come first
-     fillStyle #rrggbb     opaque colour, default #000000
-     fillRect X Y W H      integers, W and H may be negative (normalized)
+   Supported now (numbers are floats):
+     size W H                   canvas size in pixels; must come first
+     fillStyle #rrggbb[aa]      colour, default #000000
+     fillRect X Y W H
+     beginPath
+     moveTo X Y
+     lineTo X Y
+     quadraticCurveTo CX CY X Y
+     bezierCurveTo C1X C1Y C2X C2Y X Y
+     closePath
+     fill [nonzero|evenodd]     default nonzero
 
    Any other command is an error: a scene never renders partially. */
 

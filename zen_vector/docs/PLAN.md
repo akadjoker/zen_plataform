@@ -1,6 +1,6 @@
 # Plano: zen_vector (rasterizador vetorial com APIs Canvas 2D e Flash)
 
-Estado: Fases 0 e 1 concluídas (ver `FASE0.md` e `FASE1.md`). Próxima: Fase 2.
+Estado: Fases 0 a 3 concluídas (ver `FASE0.md`, `FASE1.md`, `FASE3.md`). Próxima: Fase 4.
 
 Objetivo: biblioteca que desenha gráficos vetoriais com qualidade ao nível do Canvas do browser sobre um `Framebuffer` do zen_platform, sem dependências de terceiros. Serve de base à ferramenta de animação estilo Flash.
 
@@ -29,7 +29,7 @@ Objetivo: biblioteca que desenha gráficos vetoriais com qualidade ao nível do 
 ### Fase 2: Geometria
 - Matriz afim 2x3 (multiplicar, inverter, aplicar).
 - Path: `move_to`, `line_to`, `quad_to`, `cubic_to`, `close`, com vários subpaths.
-- Achatamento adaptativo de béziers depois da transformação, com tolerância em pixels (ponto de partida 0,25 px, a validar na Fase 3).
+- Achatamento adaptativo de béziers depois da transformação, com tolerância em pixels (ponto de partida 0,25 px, a validar na Fase 3). Validado: 0,25 rejeitado, 0,05 adotado com dados em `FASE3.md`.
 - Bounds e transformação de paths.
 - Fecho: testes de tabela para matrizes e para o erro máximo do achatamento.
 

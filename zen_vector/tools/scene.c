@@ -1,4 +1,5 @@
 #include "scene.h"
+#include "zv_raster.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -9,9 +10,12 @@
 
 typedef struct
 {
-    Framebuffer fb;
+    ZvSurface surface;
     bool have_size;
-    uint32_t fill;
+    ZvPixel fill;
+    ZvPath path;
+    ZvPolyline poly;
+    ZvRasterizer raster;
 } Scene;
 
 static bool fail(char *err, size_t errcap, int line, const char *fmt, const char *arg)
@@ -36,12 +40,24 @@ static bool parse_int(const char *s, int *out)
     return true;
 }
 
+static bool parse_float(const char *s, float *out)
+{
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (end == s || *end != '\0' || errno != 0 || v < -1e7 || v > 1e7)
+        return false;
+    *out = (float)v;
+    return true;
+}
+
 static bool parse_color(const char *s, uint32_t *out)
 {
-    if (s[0] != '#' || strlen(s) != 7)
+    size_t len = strlen(s);
+    if (s[0] != '#' || (len != 7 && len != 9))
         return false;
     uint32_t v = 0;
-    for (int i = 1; i < 7; i++)
+    for (size_t i = 1; i < len; i++)
     {
         char c = s[i];
         int d;
@@ -55,7 +71,10 @@ static bool parse_color(const char *s, uint32_t *out)
             return false;
         v = v << 4 | (uint32_t)d;
     }
-    *out = 0xFF000000u | v;
+    if (len == 7)
+        *out = 0xFF000000u | v;
+    else
+        *out = (v & 0xFFu) << 24 | v >> 8;
     return true;
 }
 
@@ -77,9 +96,30 @@ static int tokenize(char *line, char *tokens[], int max)
     return n;
 }
 
+static bool parse_floats(char *tokens[], int count, int needed, float *v, int line, char *err, size_t errcap, const char *usage)
+{
+    if (count != needed + 1)
+        return fail(err, errcap, line, "%s", usage);
+    for (int i = 0; i < needed; i++)
+    {
+        if (!parse_float(tokens[i + 1], &v[i]))
+            return fail(err, errcap, line, "'%s' is not a number", tokens[i + 1]);
+    }
+    return true;
+}
+
+static bool fill_path(Scene *sc, const ZvPath *path, ZvFillRule rule)
+{
+    zv_polyline_clear(&sc->poly);
+    if (!zv_path_flatten(path, NULL, ZV_FLATTEN_TOLERANCE, &sc->poly))
+        return false;
+    return zv_fill_polyline_solid(&sc->surface, &sc->poly, rule, sc->fill, NULL, &sc->raster);
+}
+
 static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, size_t errcap)
 {
     const char *cmd = tokens[0];
+    float v[6];
 
     if (strcmp(cmd, "size") == 0)
     {
@@ -88,7 +128,7 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
             return fail(err, errcap, line, "size needs two positive integers up to 16384", NULL);
         if (sc->have_size)
             return fail(err, errcap, line, "size may appear only once", NULL);
-        if (!framebuffer_alloc(&sc->fb, w, h))
+        if (!zv_surface_init(&sc->surface, NULL, w, h))
             return fail(err, errcap, line, "out of memory", NULL);
         sc->have_size = true;
         return true;
@@ -98,33 +138,71 @@ static bool run_line(Scene *sc, char *tokens[], int count, int line, char *err, 
 
     if (strcmp(cmd, "fillStyle") == 0)
     {
-        if (count != 2 || !parse_color(tokens[1], &sc->fill))
-            return fail(err, errcap, line, "fillStyle needs #rrggbb", NULL);
+        uint32_t straight;
+        if (count != 2 || !parse_color(tokens[1], &straight))
+            return fail(err, errcap, line, "fillStyle needs #rrggbb or #rrggbbaa", NULL);
+        sc->fill = zv_premultiply(straight);
         return true;
     }
     if (strcmp(cmd, "fillRect") == 0)
     {
-        int v[4];
-        if (count != 5)
-            return fail(err, errcap, line, "fillRect needs x y w h", NULL);
-        for (int i = 0; i < 4; i++)
-        {
-            if (!parse_int(tokens[i + 1], &v[i]))
-                return fail(err, errcap, line, "'%s' is not an integer", tokens[i + 1]);
-        }
-        if (v[2] < 0)
-        {
-            v[0] += v[2];
-            v[2] = -v[2];
-        }
-        if (v[3] < 0)
-        {
-            v[1] += v[3];
-            v[3] = -v[3];
-        }
-        if (v[2] > 0 && v[3] > 0)
-            draw_fill_rect(&sc->fb, v[0], v[1], v[2], v[3], sc->fill, BLEND_NONE);
+        if (!parse_floats(tokens, count, 4, v, line, err, errcap, "fillRect needs x y w h"))
+            return false;
+        ZvPath rect;
+        zv_path_init(&rect, NULL);
+        bool ok = zv_path_move_to(&rect, v[0], v[1]) && zv_path_line_to(&rect, v[0] + v[2], v[1]) &&
+                  zv_path_line_to(&rect, v[0] + v[2], v[1] + v[3]) && zv_path_line_to(&rect, v[0], v[1] + v[3]) && zv_path_close(&rect) &&
+                  fill_path(sc, &rect, ZV_FILL_NONZERO);
+        zv_path_release(&rect);
+        return ok || fail(err, errcap, line, "out of memory", NULL);
+    }
+    if (strcmp(cmd, "beginPath") == 0)
+    {
+        if (count != 1)
+            return fail(err, errcap, line, "beginPath takes no arguments", NULL);
+        zv_path_clear(&sc->path);
         return true;
+    }
+    if (strcmp(cmd, "moveTo") == 0)
+    {
+        if (!parse_floats(tokens, count, 2, v, line, err, errcap, "moveTo needs x y"))
+            return false;
+        return zv_path_move_to(&sc->path, v[0], v[1]) || fail(err, errcap, line, "out of memory", NULL);
+    }
+    if (strcmp(cmd, "lineTo") == 0)
+    {
+        if (!parse_floats(tokens, count, 2, v, line, err, errcap, "lineTo needs x y"))
+            return false;
+        return zv_path_line_to(&sc->path, v[0], v[1]) || fail(err, errcap, line, "out of memory", NULL);
+    }
+    if (strcmp(cmd, "quadraticCurveTo") == 0)
+    {
+        if (!parse_floats(tokens, count, 4, v, line, err, errcap, "quadraticCurveTo needs cx cy x y"))
+            return false;
+        return zv_path_quad_to(&sc->path, v[0], v[1], v[2], v[3]) || fail(err, errcap, line, "out of memory", NULL);
+    }
+    if (strcmp(cmd, "bezierCurveTo") == 0)
+    {
+        if (!parse_floats(tokens, count, 6, v, line, err, errcap, "bezierCurveTo needs c1x c1y c2x c2y x y"))
+            return false;
+        return zv_path_cubic_to(&sc->path, v[0], v[1], v[2], v[3], v[4], v[5]) || fail(err, errcap, line, "out of memory", NULL);
+    }
+    if (strcmp(cmd, "closePath") == 0)
+    {
+        if (count != 1)
+            return fail(err, errcap, line, "closePath takes no arguments", NULL);
+        return zv_path_close(&sc->path) || fail(err, errcap, line, "out of memory", NULL);
+    }
+    if (strcmp(cmd, "fill") == 0)
+    {
+        ZvFillRule rule = ZV_FILL_NONZERO;
+        if (count == 2 && strcmp(tokens[1], "evenodd") == 0)
+            rule = ZV_FILL_EVENODD;
+        else if (count == 2 && strcmp(tokens[1], "nonzero") == 0)
+            rule = ZV_FILL_NONZERO;
+        else if (count != 1)
+            return fail(err, errcap, line, "fill takes nonzero or evenodd", NULL);
+        return fill_path(sc, &sc->path, rule) || fail(err, errcap, line, "out of memory", NULL);
     }
     return fail(err, errcap, line, "unknown command '%s'", cmd);
 }
@@ -139,6 +217,9 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
     Scene sc;
     memset(&sc, 0, sizeof sc);
     sc.fill = 0xFF000000u;
+    zv_path_init(&sc.path, NULL);
+    zv_polyline_init(&sc.poly, NULL);
+    zv_rasterizer_init(&sc.raster, NULL);
 
     size_t len = strlen(text);
     char *copy = malloc(len + 1);
@@ -173,12 +254,16 @@ bool zv_scene_run(const char *text, Framebuffer *out, char *err, size_t errcap)
 
     if (ok && !sc.have_size)
         ok = fail(err, errcap, line_no, "the scene has no size", NULL);
-    if (!ok)
+    if (ok)
     {
-        if (sc.have_size)
-            framebuffer_free(&sc.fb);
-        return false;
+        if (!framebuffer_alloc(out, sc.surface.width, sc.surface.height))
+            ok = fail(err, errcap, line_no, "out of memory", NULL);
+        else
+            zv_surface_store(&sc.surface, out);
     }
-    *out = sc.fb;
-    return true;
+    zv_rasterizer_release(&sc.raster);
+    zv_polyline_release(&sc.poly);
+    zv_path_release(&sc.path);
+    zv_surface_release(&sc.surface);
+    return ok;
 }
