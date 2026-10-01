@@ -1,6 +1,6 @@
 # Plano: zen_vector (rasterizador vetorial com APIs Canvas 2D e Flash)
 
-Estado: Fase 0 concluída (ver `FASE0.md`). Próxima: Fase 1, depois de decidir a linguagem (secção 3).
+Estado: Fases 0 e 1 concluídas (ver `FASE0.md` e `FASE1.md`). Próxima: Fase 2.
 
 Objetivo: biblioteca que desenha gráficos vetoriais com qualidade ao nível do Canvas do browser sobre um `Framebuffer` do zen_platform, sem dependências de terceiros. Serve de base à ferramenta de animação estilo Flash.
 
@@ -92,7 +92,7 @@ Fora deste plano (pertencem à ferramenta de animação): timeline, MCP, export 
 
 ## 3. Precisa de mais investigação
 
-- **Linguagem:** C99 para manter coerência com o zen_platform, ou C++ para as camadas de API. Decisão a tomar antes da Fase 1.
+- **Linguagem:** decidido na Fase 1: C, como o zen_platform. Razões em `FASE1.md`. Uma camada C++ fina por cima fica em aberto para as fases 7 e 8, se for útil.
 - **Referência para as imagens:** Chrome headless (o Canvas real), Skia ou Cairo. A especificação do Canvas não define o anti-aliasing ao pixel, por isso nunca haverá igualdade exata com o Chrome; a tolerância tem de ser definida com dados na Fase 0, não à partida.
 - **Testes públicos do Canvas:** os web-platform-tests têm testes de canvas 2D; precisamos de verificar quais se podem usar fora do browser e em que licença.
 - **Threads:** o zen_platform deixou threads de fora. Na Fase 9 é preciso decidir se o zen_vector tem uma camada de threads própria. Na Web, pthreads exigem SharedArrayBuffer e cabeçalhos COOP/COEP.

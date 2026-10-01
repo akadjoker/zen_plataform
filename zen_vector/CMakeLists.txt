@@ -15,6 +15,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+add_library(zen_vector STATIC src/pixel.c)
+target_include_directories(zen_vector PUBLIC include)
+target_compile_features(zen_vector PUBLIC c_std_11)
+target_link_libraries(zen_vector PUBLIC platform)
+
 add_library(zv_harness STATIC tools/bmpcmp.c tools/scene.c)
 target_include_directories(zv_harness PUBLIC tools)
 target_link_libraries(zv_harness PUBLIC platform)
@@ -46,3 +51,10 @@ add_executable(test_harness tests/test_harness.c)
 target_link_libraries(test_harness PRIVATE zv_harness)
 target_compile_definitions(test_harness PRIVATE ZV_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME test_harness COMMAND test_harness)
+
+add_executable(test_pixel tests/test_pixel.c)
+target_link_libraries(test_pixel PRIVATE zen_vector)
+add_test(NAME test_pixel COMMAND test_pixel)
+
+add_executable(bench_pixel tools/bench_pixel.c)
+target_link_libraries(bench_pixel PRIVATE zen_vector)
