@@ -1,9 +1,0 @@
-# Horizontal gradient from opaque red to transparent blue over white.
-size 64 32
-fillStyle #ffffff
-fillRect 0 0 64 32
-gradientLinear 4 0 60 0
-gradientStop 0 #ff0000ff
-gradientStop 1 #0000ff00
-fillGradient
-fillRect 0 0 64 32

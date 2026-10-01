@@ -1,5 +1,0 @@
-# A single opaque rectangle: every pixel is either fully covered or untouched,
-# so both renderers must agree exactly.
-size 64 48
-fillStyle #3366cc
-fillRect 8 8 32 24

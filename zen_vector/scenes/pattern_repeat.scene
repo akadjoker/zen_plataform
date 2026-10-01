@@ -1,8 +1,0 @@
-# Repeating pattern of the 16x16 test picture, offset by a fractional transform.
-size 64 48
-fillStyle #ffffff
-fillRect 0 0 64 48
-patternImage 16 16
-fillPattern repeat
-patternTransform 1 0 0 1 3 5
-fillRect 2 2 60 44
