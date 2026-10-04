@@ -247,8 +247,18 @@ static void test_one_context_two_windows(void)
 
         window_swap(second);
         window_swap(first);
+
+        /* Destroying the other window leaves the first context current. */
+        window_destroy(second);
+        second = NULL;
+        pixel[0] = 0;
+        clear_color(0.0f, 1.0f, 0.0f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        read_pixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        CHECK(pixel[1] == 255 && pixel[0] == 0);
     }
-    window_destroy(second);
+    if (second)
+        window_destroy(second);
     window_destroy(first);
 }
 

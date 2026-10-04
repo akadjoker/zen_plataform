@@ -1705,7 +1705,9 @@ void backend_destroy(BackendWindow *b)
         ClipCursor(NULL);
     if (b->glrc)
     {
-        wglMakeCurrent(NULL, NULL);
+        /* Leave another window's context current, unless it draws to this window. */
+        if (wglGetCurrentContext() == b->glrc || wglGetCurrentDC() == b->hdc)
+            wglMakeCurrent(NULL, NULL);
         wglDeleteContext(b->glrc);
     }
     if (b->hwnd)

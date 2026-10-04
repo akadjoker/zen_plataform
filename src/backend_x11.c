@@ -977,7 +977,9 @@ void backend_destroy(BackendWindow *b)
         XFreeGC(g.dpy, b->gc);
     if (b->render == RENDER_GL)
     {
-        glXMakeCurrent(g.dpy, None, NULL);
+        /* Leave another window's context current, unless it draws to this window. */
+        if (glXGetCurrentContext() == b->glc || glXGetCurrentDrawable() == b->win)
+            glXMakeCurrent(g.dpy, None, NULL);
         if (b->glc)
             glXDestroyContext(g.dpy, b->glc);
     }
