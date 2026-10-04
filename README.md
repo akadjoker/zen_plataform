@@ -168,6 +168,31 @@ or in the fake backend. `NATIVE_DISPLAY`, `NATIVE_WINDOW` and `NATIVE_GL_CONTEXT
 return the X11 `Display*`/`Window`/`GLXContext`, the Win32
 `HINSTANCE`/`HWND`/`HGLRC`, and the Android `EGLDisplay`/`ANativeWindow*`/`EGLContext`.
 
+### Clipboard
+
+```c
+clipboard_set("text");                          // text, as before
+const char *t = clipboard_get();                // never NULL, "" when there is no text
+
+clipboard_set_image(&fb);                       // a Framebuffer, as PNG
+Framebuffer img;
+if (clipboard_get_image(&img)) { /* ... */ framebuffer_free(&img); }
+
+ClipboardItem items[] = {{CLIPBOARD_TEXT, "hi", 2}, {"text/html", html, html_len}};
+clipboard_set_items(items, 2);                  // one content, several representations
+if (clipboard_has_data(CLIPBOARD_URIS))         // copied files, as file:// lines
+{
+    size_t n;  char *uris = clipboard_get_data(CLIPBOARD_URIS, &n);  /* ... */  fs_free(uris);
+}
+```
+
+Types are MIME strings. `CLIPBOARD_TEXT`, `CLIPBOARD_PNG` and `CLIPBOARD_URIS` map to
+the native formats (`CF_UNICODETEXT`, `PNG` plus `CF_DIBV5`, `CF_HDROP` on Windows;
+selection targets on X11); any other string is a custom type. On X11 large data goes
+by INCR in both directions, and the application that copied must keep running its
+event loop for others to paste. Android and the web keep the data inside the app,
+and only text reaches the system clipboard on the web.
+
 ### Gamepads
 
 ```c
@@ -285,6 +310,9 @@ src/
   gesture.c               touch gesture recognizer (after raylib's rgestures)
   log.c                   leveled logging with a replaceable sink
   library.c               shared library loading (dlopen / LoadLibrary)
+  clipboard.c             clipboard API (text, MIME data, PNG images)
+  png.c                   minimal PNG encoder and decoder for the clipboard
+  clipboard_mem.h         in-process clipboard store for fake, Android and web
   vulkan.c                Vulkan loader and surface creation (no Vulkan SDK needed)
   vulkan_internal.h       the few Vulkan declarations the backends use
   draw2d.c                software rasterizer over Framebuffer
@@ -297,6 +325,8 @@ tests/
   test_gestures.c         gesture recognizer and touch through the core
   test_log.c              log levels, sink, truncation
   test_library.c          shared library loading
+  test_clipboard.c        clipboard API and PNG round trip (fake backend)
+  test_clipboard_x11.c    real X11 selections against forked clients, INCR included
   test_vulkan.c           RENDER_VULKAN window, handles, a real VkSurfaceKHR (skips without a driver)
   test_draw2d.c           rasterizer tests (nearest + bilinear blit)
   test_fs.c               filesystem round-trip tests

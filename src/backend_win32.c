@@ -10,6 +10,8 @@
 #include "win32_util.h"
 #include "error_internal.h"
 #include "vulkan_internal.h"
+#include "png_internal.h"
+#include "mime_util.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
@@ -81,7 +83,7 @@ static struct
     PFN_GetDpiForSystem get_dpi_for_system;
     PFN_AdjustWindowRectExForDpi adjust_for_dpi;
     HMODULE opengl32;
-    char *clipboard_text;
+    HWND clip_owner; /* hidden window that owns what we put on the clipboard */
     char monitor_names[MAX_MONITORS][MONITOR_NAME_CAP];
 } g;
 
@@ -907,7 +909,6 @@ bool backend_init(void)
 
 void backend_shutdown(void)
 {
-    free(g.clipboard_text);
     if (g.class_registered)
         UnregisterClassW(WINDOW_CLASS, g.instance);
     memset(&g, 0, sizeof g);
@@ -1591,55 +1592,420 @@ void backend_present_pixels(BackendWindow *b)
 /*  clipboard                                                                 */
 /* ========================================================================== */
 
-void backend_clipboard_set(const char *text)
+/* Formats: text/plain is CF_UNICODETEXT, image/png is the registered "PNG" format
+   plus CF_DIBV5 (so Paint and older programs can paste it), text/uri-list is
+   CF_HDROP, anything else a registered format named after the MIME type. */
+
+static HWND clip_owner(void)
 {
-    free(g.clipboard_text);
-    g.clipboard_text = text ? _strdup(text) : NULL;
-    if (!text || !OpenClipboard(NULL))
-        return;
-    int n = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
-    HGLOBAL mem = n > 0 ? GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)n * sizeof(wchar_t)) : NULL;
-    if (mem)
+    if (!g.clip_owner)
+        g.clip_owner = CreateWindowExW(0, WINDOW_CLASS, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, g.instance, NULL);
+    return g.clip_owner;
+}
+
+static bool clip_open(void)
+{
+    for (int i = 0; i < 10; i++) /* another program may hold it for a moment */
     {
-        wchar_t *dst = GlobalLock(mem);
-        if (dst)
+        if (OpenClipboard(clip_owner()))
+            return true;
+        Sleep(10);
+    }
+    return false;
+}
+
+static HGLOBAL clip_global(const void *data, size_t size)
+{
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, size ? size : 1);
+    if (!h)
+        return NULL;
+    void *p = GlobalLock(h);
+    if (!p)
+    {
+        GlobalFree(h);
+        return NULL;
+    }
+    if (size)
+        memcpy(p, data, size);
+    GlobalUnlock(h);
+    return h;
+}
+
+static bool clip_put(UINT format, const void *data, size_t size)
+{
+    HGLOBAL h = clip_global(data, size);
+    if (!h)
+        return false;
+    if (!SetClipboardData(format, h))
+    {
+        GlobalFree(h);
+        return false;
+    }
+    return true;
+}
+
+static UINT clip_png_format(void)
+{
+    static UINT f;
+    if (!f)
+        f = RegisterClipboardFormatA("PNG");
+    return f;
+}
+
+static bool clip_put_text(const char *utf8, size_t size)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)size, NULL, 0);
+    wchar_t *wide = malloc(((size_t)n + 1) * sizeof(wchar_t));
+    if (!wide)
+        return false;
+    if (n)
+        MultiByteToWideChar(CP_UTF8, 0, utf8, (int)size, wide, n);
+    wide[n] = L'\0';
+    bool ok = clip_put(CF_UNICODETEXT, wide, ((size_t)n + 1) * sizeof(wchar_t));
+    free(wide);
+    return ok;
+}
+
+/* A 32-bit BGRA bottom-up DIBV5, which keeps the alpha channel. */
+static bool clip_put_dib(const Framebuffer *fb)
+{
+    size_t row = (size_t)fb->width * 4;
+    size_t total = sizeof(BITMAPV5HEADER) + row * (size_t)fb->height;
+    uint8_t *buf = calloc(1, total);
+    if (!buf)
+        return false;
+    BITMAPV5HEADER *h = (BITMAPV5HEADER *)buf;
+    h->bV5Size = sizeof *h;
+    h->bV5Width = fb->width;
+    h->bV5Height = fb->height; /* positive: bottom-up */
+    h->bV5Planes = 1;
+    h->bV5BitCount = 32;
+    h->bV5Compression = BI_BITFIELDS;
+    h->bV5SizeImage = (DWORD)(row * (size_t)fb->height);
+    h->bV5RedMask = 0x00FF0000;
+    h->bV5GreenMask = 0x0000FF00;
+    h->bV5BlueMask = 0x000000FF;
+    h->bV5AlphaMask = 0xFF000000;
+    h->bV5CSType = 0x73524742; /* LCS_sRGB */
+    h->bV5Intent = LCS_GM_IMAGES;
+    uint8_t *dst = buf + sizeof *h;
+    for (int y = 0; y < fb->height; y++)
+        memcpy(dst + row * (size_t)(fb->height - 1 - y), fb->pixels + (size_t)y * fb->stride, row);
+    bool ok = clip_put(CF_DIBV5, buf, total);
+    free(buf);
+    return ok;
+}
+
+static int hexval(int c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* "file:///C:/dir/a%20b" -> wide path "C:\dir\a b". Returns the length, 0 on a line
+   that is not a file URI. */
+static size_t uri_to_path(const char *line, size_t len, wchar_t *out, size_t cap)
+{
+    if (len < 8 || _strnicmp(line, "file://", 7) != 0)
+        return 0;
+    const char *p = line + 7;
+    len -= 7;
+    if (len && *p != '/') /* file://host/path: skip the host */
+    {
+        while (len && *p != '/')
         {
-            MultiByteToWideChar(CP_UTF8, 0, text, -1, dst, n);
-            GlobalUnlock(mem);
-            EmptyClipboard();
-            if (!SetClipboardData(CF_UNICODETEXT, mem))
-                GlobalFree(mem);
+            p++;
+            len--;
+        }
+    }
+    if (len >= 3 && p[0] == '/' && p[2] == ':') /* /C:/... */
+    {
+        p++;
+        len--;
+    }
+    char tmp[MAX_PATH * 3];
+    size_t n = 0;
+    for (size_t i = 0; i < len && n + 1 < sizeof tmp; i++)
+    {
+        if (p[i] == '%' && i + 2 < len + 0 && hexval(p[i + 1]) >= 0 && hexval(p[i + 2]) >= 0)
+        {
+            tmp[n++] = (char)(hexval(p[i + 1]) * 16 + hexval(p[i + 2]));
+            i += 2;
         }
         else
+            tmp[n++] = p[i] == '/' ? '\\' : p[i];
+    }
+    int w = MultiByteToWideChar(CP_UTF8, 0, tmp, (int)n, out, (int)cap - 1);
+    if (w <= 0)
+        return 0;
+    out[w] = L'\0';
+    return (size_t)w;
+}
+
+/* DROPFILES lives in shlobj.h, which is far bigger than this needs. */
+typedef struct
+{
+    DWORD pFiles;
+    POINT pt;
+    BOOL fNC;
+    BOOL fWide;
+} ZenDropFiles;
+
+static bool clip_put_uris(const char *text, size_t size)
+{
+    size_t cap = size + 2, used = 0; /* wide chars never outnumber the UTF-8 bytes */
+    wchar_t *list = malloc((cap + 1) * sizeof(wchar_t));
+    if (!list)
+        return false;
+    size_t pos = 0;
+    while (pos < size)
+    {
+        size_t end = pos;
+        while (end < size && text[end] != '\r' && text[end] != '\n')
+            end++;
+        wchar_t path[MAX_PATH * 2];
+        size_t n = end > pos ? uri_to_path(text + pos, end - pos, path, sizeof path / sizeof path[0]) : 0;
+        if (n && used + n + 1 < cap)
         {
-            GlobalFree(mem);
+            memcpy(list + used, path, (n + 1) * sizeof(wchar_t));
+            used += n + 1;
+        }
+        pos = end + 1;
+    }
+    bool ok = false;
+    if (used)
+    {
+        list[used++] = L'\0'; /* double NUL ends the list */
+        size_t bytes = sizeof(ZenDropFiles) + used * sizeof(wchar_t);
+        uint8_t *buf = calloc(1, bytes);
+        if (buf)
+        {
+            ZenDropFiles *d = (ZenDropFiles *)buf;
+            d->pFiles = sizeof *d;
+            d->fWide = TRUE;
+            memcpy(buf + sizeof *d, list, used * sizeof(wchar_t));
+            ok = clip_put(CF_HDROP, buf, bytes);
+            free(buf);
+        }
+    }
+    free(list);
+    return ok;
+}
+
+bool backend_clipboard_set(const ClipboardItem *items, int count)
+{
+    if (!clip_open())
+        return error_set("cannot open the clipboard (another program is using it)");
+    EmptyClipboard();
+    bool ok = true;
+    for (int i = 0; i < count && ok; i++)
+    {
+        const ClipboardItem *it = &items[i];
+        if (clip_mime_equal(it->mime, CLIPBOARD_TEXT))
+            ok = clip_put_text((const char *)it->data, it->size);
+        else if (clip_mime_equal(it->mime, CLIPBOARD_PNG))
+        {
+            ok = clip_put(clip_png_format(), it->data, it->size);
+            Framebuffer fb;
+            if (ok && png_decode(it->data, it->size, &fb))
+            {
+                clip_put_dib(&fb); /* the DIB is a courtesy for older programs; PNG is what counts */
+                framebuffer_free(&fb);
+            }
+        }
+        else if (clip_mime_equal(it->mime, CLIPBOARD_URIS))
+            ok = clip_put_uris((const char *)it->data, it->size);
+        else
+        {
+            UINT f = RegisterClipboardFormatA(it->mime);
+            ok = f && clip_put(f, it->data, it->size);
         }
     }
     CloseClipboard();
+    return ok || error_set("cannot put the data on the clipboard");
 }
 
-const char *backend_clipboard_get(void)
+bool backend_clipboard_has(const char *mime)
 {
-    free(g.clipboard_text);
-    g.clipboard_text = NULL;
-    if (OpenClipboard(NULL))
+    if (clip_mime_equal(mime, CLIPBOARD_TEXT))
+        return IsClipboardFormatAvailable(CF_UNICODETEXT) != 0;
+    if (clip_mime_equal(mime, CLIPBOARD_PNG))
+        return IsClipboardFormatAvailable(clip_png_format()) || IsClipboardFormatAvailable(CF_DIBV5) ||
+               IsClipboardFormatAvailable(CF_DIB);
+    if (clip_mime_equal(mime, CLIPBOARD_URIS))
+        return IsClipboardFormatAvailable(CF_HDROP) != 0;
+    UINT f = RegisterClipboardFormatA(mime);
+    return f && IsClipboardFormatAvailable(f);
+}
+
+static void *clip_copy_out(HANDLE h, size_t *size)
+{
+    SIZE_T n = GlobalSize(h);
+    const void *p = GlobalLock(h);
+    if (!p)
+        return NULL;
+    uint8_t *copy = malloc(n + 1);
+    if (copy)
     {
-        HANDLE data = GetClipboardData(CF_UNICODETEXT);
-        const wchar_t *wide = data ? GlobalLock(data) : NULL;
+        memcpy(copy, p, n);
+        copy[n] = 0;
+        *size = n;
+    }
+    GlobalUnlock(h);
+    return copy;
+}
+
+/* A DIB from another program (Paint, a screenshot tool) as a PNG. */
+static void *clip_dib_as_png(size_t *size)
+{
+    HANDLE h = GetClipboardData(CF_DIBV5);
+    if (!h)
+        h = GetClipboardData(CF_DIB);
+    const BITMAPINFOHEADER *bi = h ? GlobalLock(h) : NULL;
+    if (!bi)
+        return NULL;
+    void *png = NULL;
+    int w = bi->biWidth, hgt = bi->biHeight < 0 ? -bi->biHeight : bi->biHeight;
+    bool top_down = bi->biHeight < 0;
+    bool ok = bi->biPlanes == 1 && w > 0 && hgt > 0 &&
+              (bi->biBitCount == 32 || bi->biBitCount == 24) &&
+              (bi->biCompression == BI_RGB || bi->biCompression == BI_BITFIELDS);
+    if (ok)
+    {
+        size_t header = bi->biSize;
+        if (bi->biCompression == BI_BITFIELDS && bi->biSize == sizeof(BITMAPINFOHEADER))
+            header += 12; /* the three masks follow a plain header */
+        const uint8_t *bits = (const uint8_t *)bi + header + (size_t)bi->biClrUsed * 4;
+        size_t bpp = bi->biBitCount / 8;
+        size_t stride = (((size_t)w * bi->biBitCount + 31) / 32) * 4;
+        Framebuffer fb;
+        if (framebuffer_alloc(&fb, w, hgt))
+        {
+            bool any_alpha = false;
+            for (int y = 0; y < hgt; y++)
+            {
+                const uint8_t *src = bits + stride * (size_t)(top_down ? y : hgt - 1 - y);
+                for (int x = 0; x < w; x++)
+                {
+                    const uint8_t *px = src + (size_t)x * bpp;
+                    uint32_t a = bpp == 4 ? px[3] : 255;
+                    any_alpha |= a != 0;
+                    fb.pixels[(size_t)y * w + x] = (a << 24) | ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | px[0];
+                }
+            }
+            if (!any_alpha) /* a 32-bit BI_RGB DIB usually leaves alpha at zero: it means opaque */
+                for (size_t i = 0; i < (size_t)w * hgt; i++)
+                    fb.pixels[i] |= 0xFF000000u;
+            png = png_encode(&fb, size);
+            framebuffer_free(&fb);
+        }
+    }
+    GlobalUnlock(h);
+    return png;
+}
+
+static void *clip_hdrop_as_uris(size_t *size)
+{
+    HDROP drop = (HDROP)GetClipboardData(CF_HDROP);
+    if (!drop)
+        return NULL;
+    UINT n = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
+    size_t cap = 1, used = 0;
+    char *out = malloc(cap);
+    if (!out)
+        return NULL;
+    for (UINT i = 0; i < n; i++)
+    {
+        wchar_t wide[MAX_PATH * 2];
+        if (!DragQueryFileW(drop, i, wide, sizeof wide / sizeof wide[0]))
+            continue;
+        char utf8[MAX_PATH * 4];
+        int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof utf8, NULL, NULL);
+        if (len <= 1)
+            continue;
+        size_t need = used + 8 + (size_t)(len - 1) * 3 + 3;
+        char *grown = realloc(out, need);
+        if (!grown)
+        {
+            free(out);
+            return NULL;
+        }
+        out = grown;
+        memcpy(out + used, "file:///", 8);
+        used += 8;
+        for (int k = 0; k < len - 1; k++)
+        {
+            unsigned char c = (unsigned char)utf8[k];
+            if (c == '\\')
+                out[used++] = '/';
+            else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                     c == '-' || c == '_' || c == '.' || c == '~' || c == '/' || c == ':')
+                out[used++] = (char)c;
+            else
+                used += (size_t)snprintf(out + used, 4, "%%%02X", c);
+        }
+        out[used++] = '\r';
+        out[used++] = '\n';
+    }
+    out[used] = '\0';
+    *size = used;
+    return out;
+}
+
+void *backend_clipboard_get(const char *mime, size_t *size)
+{
+    if (!clip_open())
+        return NULL;
+    void *result = NULL;
+    if (clip_mime_equal(mime, CLIPBOARD_TEXT))
+    {
+        HANDLE h = GetClipboardData(CF_UNICODETEXT);
+        const wchar_t *wide = h ? GlobalLock(h) : NULL;
         if (wide)
         {
             int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
             if (n > 0)
             {
-                g.clipboard_text = malloc((size_t)n);
-                if (g.clipboard_text)
-                    WideCharToMultiByte(CP_UTF8, 0, wide, -1, g.clipboard_text, n, NULL, NULL);
+                char *utf8 = malloc((size_t)n);
+                if (utf8)
+                {
+                    WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, n, NULL, NULL);
+                    *size = (size_t)n - 1; /* the conversion included the terminator */
+                    result = utf8;
+                }
             }
-            GlobalUnlock(data);
+            GlobalUnlock(h);
         }
-        CloseClipboard();
     }
-    if (!g.clipboard_text)
-        g.clipboard_text = _strdup("");
-    return g.clipboard_text ? g.clipboard_text : "";
+    else if (clip_mime_equal(mime, CLIPBOARD_PNG))
+    {
+        HANDLE h = GetClipboardData(clip_png_format());
+        if (h)
+        {
+            result = clip_copy_out(h, size);
+            if (result) /* the block may be rounded up: end the data at the IEND chunk */
+            {
+                const uint8_t *b = result;
+                for (size_t i = *size; i >= 12; i--)
+                    if (memcmp(b + i - 8, "IEND", 4) == 0)
+                    {
+                        *size = i + 4;
+                        ((uint8_t *)result)[*size] = 0;
+                        break;
+                    }
+            }
+        }
+        else
+            result = clip_dib_as_png(size);
+    }
+    else if (clip_mime_equal(mime, CLIPBOARD_URIS))
+        result = clip_hdrop_as_uris(size);
+    else
+    {
+        UINT f = RegisterClipboardFormatA(mime);
+        HANDLE h = f ? GetClipboardData(f) : NULL;
+        if (h)
+            result = clip_copy_out(h, size);
+    }
+    CloseClipboard();
+    return result;
 }

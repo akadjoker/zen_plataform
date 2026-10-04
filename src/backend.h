@@ -76,10 +76,13 @@ void backend_set_mouse_pos(BackendWindow *b, int x, int y);
 void backend_set_cursor(BackendWindow *b, int cursor);   /* CURSOR_* */
 void backend_set_mouse_mode(BackendWindow *b, int mode); /* MOUSE_MODE_* */
 
-/* clipboard - the returned text is owned by the backend, valid until the next
-   backend_clipboard_set / backend_clipboard_get */
-void backend_clipboard_set(const char *text);
-const char *backend_clipboard_get(void);
+/* clipboard - one content in several representations, by MIME type. set copies
+   what it is given (count 0 clears). get returns a malloc'd copy followed by a NUL
+   byte that *size does not count, or NULL; the caller frees it. Text is exactly
+   CLIPBOARD_TEXT, UTF-8; a backend maps it to the native text format. */
+bool backend_clipboard_set(const ClipboardItem *items, int count);
+bool backend_clipboard_has(const char *mime);
+void *backend_clipboard_get(const char *mime, size_t *size);
 
 /* monitors - one shared virtual coordinate space */
 int backend_monitor_count(void);

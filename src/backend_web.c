@@ -10,6 +10,7 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "clipboard_mem.h"
 
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
@@ -783,21 +784,28 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
 /* ========================================================================== */
 
 /* The async, permission-gated browser clipboard cannot be read synchronously
-   from wasm, so this round-trips within the page. Writes are mirrored out to the
-   system clipboard best-effort. */
-static char *g_clipboard;
-
-void backend_clipboard_set(const char *text)
+   from wasm, so the content round-trips within the page. Text writes are mirrored
+   out to the system clipboard best-effort. */
+bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
-    free(g_clipboard);
-    g_clipboard = text ? strdup(text) : NULL;
-    if (text)
-        EM_ASM({ if (navigator.clipboard) navigator.clipboard.writeText(UTF8ToString($0)); }, text);
+    if (!clipmem_set(items, count))
+        return false;
+    for (int i = 0; i < count; i++)
+        if (clip_mime_equal(items[i].mime, CLIPBOARD_TEXT))
+        {
+            const ClipMemItem *t = clipmem_find(CLIPBOARD_TEXT); /* NUL-terminated copy */
+            if (t)
+                EM_ASM({ if (navigator.clipboard) navigator.clipboard.writeText(UTF8ToString($0)); }, t->data);
+        }
+    return true;
 }
-
-const char *backend_clipboard_get(void)
+bool backend_clipboard_has(const char *mime)
 {
-    return g_clipboard ? g_clipboard : "";
+    return clipmem_has(mime);
+}
+void *backend_clipboard_get(const char *mime, size_t *size)
+{
+    return clipmem_get(mime, size);
 }
 
 /* ========================================================================== */

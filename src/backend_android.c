@@ -10,6 +10,7 @@
 #include "backend.h"
 #include "os_backend.h"
 #include "error_internal.h"
+#include "clipboard_mem.h"
 #include "vulkan_internal.h"
 
 #include <android_native_app_glue.h>
@@ -771,16 +772,18 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     (void)mode;
 }
 
-static char *g_clipboard;
-
-void backend_clipboard_set(const char *text)
+/* No system clipboard yet: the content stays inside the app. */
+bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
-    free(g_clipboard);
-    g_clipboard = text ? strdup(text) : NULL;
+    return clipmem_set(items, count);
 }
-const char *backend_clipboard_get(void)
+bool backend_clipboard_has(const char *mime)
 {
-    return g_clipboard ? g_clipboard : "";
+    return clipmem_has(mime);
+}
+void *backend_clipboard_get(const char *mime, size_t *size)
+{
+    return clipmem_get(mime, size);
 }
 
 int backend_monitor_count(void)

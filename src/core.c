@@ -818,15 +818,3 @@ void time_sleep(uint32_t milliseconds)
 #endif
 }
 
-/* ========================================================================== */
-/*  Clipboard                                                                 */
-/* ========================================================================== */
-
-void clipboard_set(const char *text)
-{
-    backend_clipboard_set(text);
-}
-const char *clipboard_get(void)
-{
-    return backend_clipboard_get();
-}

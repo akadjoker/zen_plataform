@@ -651,8 +651,52 @@ extern "C"
     /*  Clipboard                                                                 */
     /* ========================================================================== */
 
+    /* Text. clipboard_set(NULL) clears. clipboard_get never returns NULL: it gives
+       "" when the clipboard holds no text. The string belongs to the platform and
+       is valid until the next clipboard_get. */
     PLATFORM_API void clipboard_set(const char *text);
-    PLATFORM_API const char *clipboard_get(void); /* owned by the platform */
+    PLATFORM_API const char *clipboard_get(void);
+
+    /* Anything else, by MIME type. A clipboard entry is one content offered in
+       several representations; a paste picks the one it understands. The types
+       every platform maps to its own formats are:
+
+         CLIPBOARD_TEXT  "text/plain"     UTF-8 text
+         CLIPBOARD_PNG   "image/png"      an image
+         CLIPBOARD_URIS  "text/uri-list"  file:// URIs, one per line (copied files)
+
+       Any other string is passed through as a custom type: on X11 it is the
+       selection target, on Windows a registered clipboard format. Types other than
+       text are not supported on Android and the web, where the data stays inside the
+       app. The platform keeps its own copy of what you set. Reading blocks while
+       another application answers (X11 waits up to one second per step); the owner
+       must keep running its event loop for others to be able to paste. */
+#define CLIPBOARD_TEXT "text/plain"
+#define CLIPBOARD_PNG "image/png"
+#define CLIPBOARD_URIS "text/uri-list"
+
+    typedef struct
+    {
+        const char *mime;
+        const void *data;
+        size_t size;
+    } ClipboardItem;
+
+    /* Replace the clipboard with these representations of one content. count 0
+       clears it. Returns false if it could not be set (platform_get_error()). */
+    PLATFORM_API bool clipboard_set_items(const ClipboardItem *items, int count);
+    PLATFORM_API bool clipboard_set_data(const char *mime, const void *data, size_t size);
+    PLATFORM_API bool clipboard_has_data(const char *mime);
+    /* Copy of the data, or NULL if the clipboard has none of that type. Free it
+       with fs_free. It is followed by a NUL byte that size does not count, so text
+       can be used as a C string. */
+    PLATFORM_API void *clipboard_get_data(const char *mime, size_t *out_size);
+
+    /* An image as PNG, from and to a Framebuffer (0xAARRGGBB). clipboard_get_image
+       allocates out; free it with framebuffer_free. Other image formats a paste
+       source offers are not read. */
+    PLATFORM_API bool clipboard_set_image(const Framebuffer *fb);
+    PLATFORM_API bool clipboard_get_image(Framebuffer *out);
 
     /* ========================================================================== */
     /*  OS / filesystem                                                           */

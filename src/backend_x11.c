@@ -11,6 +11,7 @@
 #include "backend.h"
 #include "error_internal.h"
 #include "vulkan_internal.h"
+#include "mime_util.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -21,9 +22,11 @@
 #include <X11/Xresource.h>
 #include <GL/glx.h>
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <time.h>
 
 typedef GLXContext (*glXCreateContextAttribsARBProc)(Display *, GLXFBConfig, GLXContext, Bool, const int *);
@@ -50,6 +53,30 @@ typedef int (*glXSwapIntervalSGIProc)(int);
 
 /* ---- global connection ---- */
 
+/* ---- clipboard state types ---- */
+#define CLIP_MAX 8
+#define CLIP_INCR_MAX 4
+#define CLIP_CHUNK_MAX 262144       /* above this a paste goes by INCR */
+#define CLIP_TIMEOUT_MS 1000        /* wait for another client, per step */
+#define CLIP_READ_LIMIT (512u << 20) /* refuse pastes larger than this */
+
+typedef struct
+{
+    char *mime;
+    Atom atom; /* the selection target for this type */
+    uint8_t *data;
+    size_t size;
+} ClipEntry;
+
+typedef struct
+{
+    bool active;
+    Window requestor;
+    Atom property, target;
+    const uint8_t *data; /* points into a ClipEntry; transfers are aborted when the entries go */
+    size_t size, offset;
+} IncrOut;
+
 static struct
 {
     Display *dpy;
@@ -63,7 +90,7 @@ static struct
         NET_WM_STATE_MAXIMIZED_HORZ, NET_WM_STATE_HIDDEN, NET_WM_STATE_ABOVE,
         NET_WM_STATE_DEMANDS_ATTENTION, NET_ACTIVE_WINDOW, NET_WM_ICON,
         NET_WM_WINDOW_OPACITY, MOTIF_WM_HINTS;
-    Atom CLIPBOARD, TARGETS, XSEL_DATA;
+    Atom CLIPBOARD, TARGETS, XSEL_DATA, INCR, TEXT_PLAIN, TEXT_PLAIN_UTF8, TEXT;
 
     glXCreateContextAttribsARBProc create_context;
     bool has_es_profile;
@@ -73,9 +100,13 @@ static struct
 
     Cursor cursors[CURSOR_COUNT]; /* created on first use, shared by every window */
 
-    Window helper;        /* unmapped window that owns the CLIPBOARD selection */
-    char *clipboard_text; /* what we last set; also the get() return buffer */
+    Window helper; /* unmapped window that owns the CLIPBOARD selection */
+    ClipEntry clip[CLIP_MAX]; /* what we offer while we own the selection */
+    int clip_count;
+    IncrOut incr[CLIP_INCR_MAX]; /* large pastes being sent in chunks */
 } g;
+
+static void clip_free_entries(void);
 
 struct BackendWindow
 {
@@ -454,6 +485,10 @@ bool backend_init(void)
     g.CLIPBOARD = XInternAtom(g.dpy, "CLIPBOARD", False);
     g.TARGETS = XInternAtom(g.dpy, "TARGETS", False);
     g.XSEL_DATA = XInternAtom(g.dpy, "PLATFORM_CLIPBOARD", False);
+    g.INCR = XInternAtom(g.dpy, "INCR", False);
+    g.TEXT_PLAIN = XInternAtom(g.dpy, "text/plain", False);
+    g.TEXT_PLAIN_UTF8 = XInternAtom(g.dpy, "text/plain;charset=utf-8", False);
+    g.TEXT = XInternAtom(g.dpy, "TEXT", False);
 
     /* A 1x1 unmapped window owns the CLIPBOARD selection and answers conversion
        requests, so clipboard ownership outlives any single visible window. */
@@ -472,7 +507,7 @@ bool backend_init(void)
 
 void backend_shutdown(void)
 {
-    free(g.clipboard_text);
+    clip_free_entries();
     for (int i = 0; i < CURSOR_COUNT; i++)
     {
         if (g.cursors[i])
@@ -935,6 +970,87 @@ static void process_event(BackendWindow *b, XEvent *ev)
     }
 }
 
+/* ---- clipboard, serving side: we own the CLIPBOARD selection ---- */
+
+static bool clip_is_text_target(Atom t)
+{
+    return t == g.UTF8_STRING || t == XA_STRING || t == g.TEXT_PLAIN || t == g.TEXT_PLAIN_UTF8 || t == g.TEXT;
+}
+
+static const ClipEntry *clip_find_target(Atom target)
+{
+    for (int i = 0; i < g.clip_count; i++)
+    {
+        const ClipEntry *e = &g.clip[i];
+        if (clip_mime_equal(e->mime, CLIPBOARD_TEXT) ? clip_is_text_target(target) : e->atom == target)
+            return e;
+    }
+    return NULL;
+}
+
+/* X errors from a requestor that died mid-transfer must not kill the process. */
+static int clip_swallow_error(Display *d, XErrorEvent *e)
+{
+    (void)d;
+    (void)e;
+    return 0;
+}
+
+static void clip_incr_abort_all(void)
+{
+    XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
+    for (int i = 0; i < CLIP_INCR_MAX; i++)
+        if (g.incr[i].active)
+        {
+            XSelectInput(g.dpy, g.incr[i].requestor, NoEventMask);
+            g.incr[i].active = false;
+        }
+    XSync(g.dpy, False);
+    XSetErrorHandler(previous);
+}
+
+static void clip_free_entries(void)
+{
+    clip_incr_abort_all();
+    for (int i = 0; i < g.clip_count; i++)
+    {
+        free(g.clip[i].mime);
+        free(g.clip[i].data);
+    }
+    g.clip_count = 0;
+}
+
+/* Send the next chunk of an INCR transfer when the requestor has read the last one
+   (it deletes the property). A zero-length chunk ends the transfer. Returns true
+   if the event belonged to a transfer. */
+static bool clip_incr_property_event(const XPropertyEvent *pe)
+{
+    for (int i = 0; i < CLIP_INCR_MAX; i++)
+    {
+        IncrOut *t = &g.incr[i];
+        if (!t->active || pe->window != t->requestor || pe->atom != t->property)
+            continue;
+        if (pe->state == PropertyDelete)
+        {
+            size_t left = t->size - t->offset;
+            size_t n = left > CLIP_CHUNK_MAX ? CLIP_CHUNK_MAX : left;
+            XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
+            XChangeProperty(g.dpy, t->requestor, t->property, t->target, 8, PropModeReplace,
+                            t->data + t->offset, (int)n);
+            t->offset += n;
+            if (n == 0)
+            {
+                XSelectInput(g.dpy, t->requestor, NoEventMask);
+                t->active = false;
+            }
+            XSync(g.dpy, False);
+            XSetErrorHandler(previous);
+        }
+        return true;
+    }
+    return false;
+}
+
 /* Answer a request for our CLIPBOARD selection (we are the owner). */
 static void answer_selection_request(XSelectionRequestEvent *req)
 {
@@ -947,21 +1063,64 @@ static void answer_selection_request(XSelectionRequestEvent *req)
     resp.time = req->time;
     resp.property = None;
 
-    if (req->target == g.TARGETS)
+    Atom prop = req->property != None ? req->property : req->target; /* old clients */
+    XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
+
+    if (req->selection != g.CLIPBOARD)
     {
-        Atom targets[] = {g.TARGETS, g.UTF8_STRING, XA_STRING};
-        XChangeProperty(g.dpy, req->requestor, req->property, XA_ATOM, 32,
-                        PropModeReplace, (unsigned char *)targets, 3);
-        resp.property = req->property;
+        /* not ours */
     }
-    else if ((req->target == g.UTF8_STRING || req->target == XA_STRING) && g.clipboard_text)
+    else if (req->target == g.TARGETS)
     {
-        XChangeProperty(g.dpy, req->requestor, req->property, req->target, 8,
-                        PropModeReplace, (unsigned char *)g.clipboard_text,
-                        (int)strlen(g.clipboard_text));
-        resp.property = req->property;
+        Atom targets[1 + CLIP_MAX * 4];
+        int n = 0;
+        targets[n++] = g.TARGETS;
+        for (int i = 0; i < g.clip_count; i++)
+        {
+            if (clip_mime_equal(g.clip[i].mime, CLIPBOARD_TEXT))
+            {
+                targets[n++] = g.UTF8_STRING;
+                targets[n++] = g.TEXT_PLAIN_UTF8;
+                targets[n++] = g.TEXT_PLAIN;
+                targets[n++] = XA_STRING;
+            }
+            else
+                targets[n++] = g.clip[i].atom;
+        }
+        XChangeProperty(g.dpy, req->requestor, prop, XA_ATOM, 32, PropModeReplace,
+                        (unsigned char *)targets, n);
+        resp.property = prop;
+    }
+    else
+    {
+        const ClipEntry *e = clip_find_target(req->target);
+        if (e && e->size <= CLIP_CHUNK_MAX)
+        {
+            XChangeProperty(g.dpy, req->requestor, prop, req->target, 8, PropModeReplace,
+                            e->data, (int)e->size);
+            resp.property = prop;
+        }
+        else if (e)
+        {
+            /* Too big for one property: announce INCR and send chunks as the requestor
+               consumes them (clip_incr_property_event). */
+            for (int i = 0; i < CLIP_INCR_MAX; i++)
+            {
+                if (g.incr[i].active)
+                    continue;
+                g.incr[i] = (IncrOut){true, req->requestor, prop, req->target, e->data, e->size, 0};
+                XSelectInput(g.dpy, req->requestor, PropertyChangeMask);
+                long total = (long)e->size;
+                XChangeProperty(g.dpy, req->requestor, prop, g.INCR, 32, PropModeReplace,
+                                (unsigned char *)&total, 1);
+                resp.property = prop;
+                break;
+            }
+        }
     }
     XSendEvent(g.dpy, req->requestor, True, NoEventMask, (XEvent *)&resp);
+    XSync(g.dpy, False);
+    XSetErrorHandler(previous);
 }
 
 void backend_pump_events(BackendWindow *b, Core *core)
@@ -980,10 +1139,12 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
         if (ev.type == SelectionClear)
         {
-            free(g.clipboard_text);
-            g.clipboard_text = NULL;
+            if (ev.xselectionclear.selection == g.CLIPBOARD)
+                clip_free_entries();
             continue;
         }
+        if (ev.type == PropertyNotify && clip_incr_property_event(&ev.xproperty))
+            continue;
         if (ev.xany.window != b->win)
             continue; /* MVP is single-window; other windows are not dispatched here */
         process_event(b, &ev);
@@ -1408,57 +1569,291 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
 /*  clipboard (CLIPBOARD selection)                                           */
 /* ========================================================================== */
 
-void backend_clipboard_set(const char *text)
+bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
-    free(g.clipboard_text);
-    g.clipboard_text = text ? strdup(text) : NULL;
+    clip_free_entries();
+    if (count > CLIP_MAX)
+        count = CLIP_MAX;
+    for (int i = 0; i < count; i++)
+    {
+        ClipEntry *e = &g.clip[g.clip_count];
+        e->mime = strdup(items[i].mime);
+        e->data = malloc(items[i].size + 1);
+        if (!e->mime || !e->data)
+        {
+            free(e->mime);
+            free(e->data);
+            clip_free_entries();
+            return error_set("out of memory");
+        }
+        e->atom = XInternAtom(g.dpy, items[i].mime, False);
+        if (items[i].size)
+            memcpy(e->data, items[i].data, items[i].size);
+        e->data[items[i].size] = 0;
+        e->size = items[i].size;
+        g.clip_count++;
+    }
+
+    if (g.clip_count == 0)
+    {
+        if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == g.helper)
+            XSetSelectionOwner(g.dpy, g.CLIPBOARD, None, CurrentTime);
+        XFlush(g.dpy);
+        return true;
+    }
     XSetSelectionOwner(g.dpy, g.CLIPBOARD, g.helper, CurrentTime);
     XFlush(g.dpy);
+    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) != g.helper)
+    {
+        clip_free_entries();
+        return error_set("cannot take ownership of the clipboard");
+    }
+    return true;
 }
 
-const char *backend_clipboard_get(void)
+static const ClipEntry *clip_find_mime(const char *mime)
 {
-    /* If we own the selection, skip the round trip. */
-    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == g.helper)
-        return g.clipboard_text ? g.clipboard_text : "";
+    for (int i = 0; i < g.clip_count; i++)
+        if (clip_mime_equal(g.clip[i].mime, mime))
+            return &g.clip[i];
+    return NULL;
+}
 
-    XConvertSelection(g.dpy, g.CLIPBOARD, g.UTF8_STRING, g.XSEL_DATA, g.helper, CurrentTime);
-    XFlush(g.dpy);
+static bool clip_owned(void)
+{
+    return XGetSelectionOwner(g.dpy, g.CLIPBOARD) == g.helper;
+}
 
-    /* Wait briefly for the reply without consuming the window's events. */
-    for (int i = 0; i < 100; i++)
+/* Wait for an event of `type` on the helper window, up to the timeout. */
+static bool clip_wait_event(int type, XEvent *ev)
+{
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;)
     {
-        XEvent ev;
-        if (XCheckTypedWindowEvent(g.dpy, g.helper, SelectionNotify, &ev))
-        {
-            free(g.clipboard_text);
-            g.clipboard_text = NULL;
-            if (ev.xselection.property == None)
-                return "";
-
-            Atom type;
-            int fmt;
-            unsigned long n, after;
-            unsigned char *data = NULL;
-            XGetWindowProperty(g.dpy, g.helper, g.XSEL_DATA, 0, ~0L, False,
-                               AnyPropertyType, &type, &fmt, &n, &after, &data);
-            if (data)
-            {
-                g.clipboard_text = malloc(n + 1);
-                if (g.clipboard_text)
-                {
-                    memcpy(g.clipboard_text, data, n);
-                    g.clipboard_text[n] = '\0';
-                }
-                XFree(data);
-            }
-            XDeleteProperty(g.dpy, g.helper, g.XSEL_DATA);
-            return g.clipboard_text ? g.clipboard_text : "";
-        }
-        struct timespec ts = {0, 1000000}; /* 1 ms */
-        nanosleep(&ts, NULL);
+        XFlush(g.dpy);
+        if (XCheckTypedWindowEvent(g.dpy, g.helper, type, ev))
+            return true;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
+        if (ms >= CLIP_TIMEOUT_MS)
+            return false;
+        int fd = ConnectionNumber(g.dpy);
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        struct timeval tv = {0, 5000};
+        select(fd + 1, &fds, NULL, NULL, &tv);
+        XPending(g.dpy); /* moves what arrived into the queue */
     }
-    return "";
+}
+
+/* Read XSEL_DATA off the helper window (deleting it). Bytes come back in a malloc'd
+   buffer with a NUL after them; *type and *format describe the property. Format 32
+   items are Xlib longs in memory, so a list of atoms is size / sizeof(long) items. */
+static bool clip_read_property(Atom *type, int *format, uint8_t **out, size_t *size)
+{
+    unsigned long n, after;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(g.dpy, g.helper, g.XSEL_DATA, 0, (long)(CLIP_READ_LIMIT / 4), True,
+                           AnyPropertyType, type, format, &n, &after, &data) != Success)
+        return false;
+    if (after > 0 || *type == None)
+    {
+        if (data)
+            XFree(data);
+        return false;
+    }
+    size_t unit = *format == 32 ? sizeof(long) : (size_t)*format / 8;
+    size_t bytes = (size_t)n * unit;
+    *out = malloc(bytes + 1);
+    if (*out)
+    {
+        if (bytes)
+            memcpy(*out, data, bytes);
+        (*out)[bytes] = 0;
+        *size = bytes;
+    }
+    if (data)
+        XFree(data);
+    return *out != NULL;
+}
+
+/* Ask the owner for `target` and collect the answer, following INCR. */
+static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
+{
+    XEvent ev;
+    while (XCheckTypedWindowEvent(g.dpy, g.helper, SelectionNotify, &ev))
+    {
+    }
+    while (XCheckTypedWindowEvent(g.dpy, g.helper, PropertyNotify, &ev))
+    {
+    }
+    XDeleteProperty(g.dpy, g.helper, g.XSEL_DATA);
+    XConvertSelection(g.dpy, g.CLIPBOARD, target, g.XSEL_DATA, g.helper, CurrentTime);
+
+    if (!clip_wait_event(SelectionNotify, &ev) || ev.xselection.property == None)
+        return false;
+
+    int format;
+    if (!clip_read_property(type, &format, out, size))
+        return false;
+    if (*type != g.INCR)
+        return true;
+
+    /* INCR: the property we just read (and so deleted) announced the total size. The
+       owner now sends chunks, each signalled by a NewValue on the property; an empty
+       chunk ends it. */
+    free(*out);
+    *out = NULL;
+    *size = 0;
+    uint8_t *all = malloc(1);
+    size_t have = 0;
+    if (!all)
+        return false;
+    for (;;)
+    {
+        do
+        {
+            if (!clip_wait_event(PropertyNotify, &ev))
+            {
+                free(all);
+                return false;
+            }
+        } while (ev.xproperty.atom != g.XSEL_DATA || ev.xproperty.state != PropertyNewValue);
+
+        /* The owner's own announcement of INCR also raised a NewValue that is still in
+           the queue: by now the property is gone, which tells it from a real chunk (a
+           chunk, even the empty last one, has a type). Skip it and keep waiting. */
+        {
+            Atom probe_type;
+            int probe_format;
+            unsigned long probe_n, probe_after;
+            unsigned char *probe = NULL;
+            XGetWindowProperty(g.dpy, g.helper, g.XSEL_DATA, 0, 0, False, AnyPropertyType, &probe_type,
+                               &probe_format, &probe_n, &probe_after, &probe);
+            if (probe)
+                XFree(probe);
+            if (probe_type == None)
+                continue;
+        }
+        Atom chunk_type;
+        uint8_t *chunk = NULL;
+        size_t n = 0;
+        if (!clip_read_property(&chunk_type, &format, &chunk, &n))
+        {
+            free(all);
+            return false;
+        }
+        if (n == 0)
+        {
+            free(chunk);
+            break;
+        }
+        if (have + n > CLIP_READ_LIMIT)
+        {
+            free(chunk);
+            free(all);
+            return false;
+        }
+        uint8_t *grown = realloc(all, have + n + 1);
+        if (!grown)
+        {
+            free(chunk);
+            free(all);
+            return false;
+        }
+        all = grown;
+        memcpy(all + have, chunk, n);
+        have += n;
+        free(chunk);
+    }
+    all[have] = 0;
+    *out = all;
+    *size = have;
+    *type = XA_STRING; /* the real type is the one we asked for; callers know it */
+    return true;
+}
+
+bool backend_clipboard_has(const char *mime)
+{
+    if (clip_owned())
+        return clip_find_mime(mime) != NULL;
+    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == None)
+        return false;
+
+    Atom type;
+    uint8_t *list = NULL;
+    size_t size = 0;
+    if (!clip_fetch(g.TARGETS, &type, &list, &size))
+        return false;
+    bool text = clip_mime_equal(mime, CLIPBOARD_TEXT);
+    Atom want = text ? None : XInternAtom(g.dpy, mime, False);
+    bool found = false;
+    for (size_t i = 0; i + sizeof(Atom) <= size && !found; i += sizeof(Atom))
+    {
+        Atom a;
+        memcpy(&a, list + i, sizeof a);
+        found = text ? clip_is_text_target(a) : a == want;
+    }
+    free(list);
+    return found;
+}
+
+void *backend_clipboard_get(const char *mime, size_t *size)
+{
+    if (clip_owned())
+    {
+        const ClipEntry *e = clip_find_mime(mime);
+        if (!e)
+            return NULL;
+        uint8_t *copy = malloc(e->size + 1);
+        if (!copy)
+            return NULL;
+        memcpy(copy, e->data, e->size + 1);
+        *size = e->size;
+        return copy;
+    }
+    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == None)
+        return NULL;
+
+    Atom type;
+    uint8_t *data = NULL;
+    size_t n = 0;
+    if (clip_mime_equal(mime, CLIPBOARD_TEXT))
+    {
+        if (!clip_fetch(g.UTF8_STRING, &type, &data, &n))
+        {
+            /* Latin-1 only owners: STRING, widened to UTF-8. */
+            uint8_t *latin = NULL;
+            size_t ln = 0;
+            if (!clip_fetch(XA_STRING, &type, &latin, &ln))
+                return NULL;
+            data = malloc(ln * 2 + 1);
+            if (!data)
+            {
+                free(latin);
+                return NULL;
+            }
+            for (size_t i = 0; i < ln; i++)
+            {
+                if (latin[i] < 0x80)
+                    data[n++] = latin[i];
+                else
+                {
+                    data[n++] = (uint8_t)(0xC0 | (latin[i] >> 6));
+                    data[n++] = (uint8_t)(0x80 | (latin[i] & 0x3F));
+                }
+            }
+            data[n] = 0;
+            free(latin);
+        }
+    }
+    else if (!clip_fetch(XInternAtom(g.dpy, mime, False), &type, &data, &n))
+        return NULL;
+    *size = n;
+    return data;
 }
 
 /* ========================================================================== */

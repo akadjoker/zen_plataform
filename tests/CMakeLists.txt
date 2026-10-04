@@ -74,6 +74,11 @@ if(PLATFORM_BACKEND_X11)
     add_test(NAME test_gl_x11 COMMAND test_gl_x11)
     set_tests_properties(test_gl_x11 PROPERTIES SKIP_RETURN_CODE 77)
 
+    add_executable(test_clipboard_x11 test_clipboard_x11.c)
+    target_link_libraries(test_clipboard_x11 PRIVATE platform)
+    add_test(NAME test_clipboard_x11 COMMAND test_clipboard_x11)
+    set_tests_properties(test_clipboard_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     add_executable(test_input_x11 test_input_x11.c)
     target_link_libraries(test_input_x11 PRIVATE platform)
     add_test(NAME test_input_x11 COMMAND test_input_x11)
@@ -116,6 +121,15 @@ add_fake_ext_test(test_widgets
     src/ui/stb_impl.c
     src/ui/ui_utf8.c
     src/ui/ui_dialog.c)
+
+# Clipboard API over the fake backend's in-memory store, PNG encoder and decoder.
+add_fake_ext_test(test_clipboard
+    ${FS_SRC}
+    src/gamepad.c
+    src/gamepad_stub.c
+    src/clipboard.c
+    src/png.c
+    src/draw2d.c)
 
 # The test also needs libm for stb_truetype math functions (sqrt, floor, etc.)
 if(NOT WIN32)
