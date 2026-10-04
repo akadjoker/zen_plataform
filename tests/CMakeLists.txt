@@ -162,3 +162,12 @@ endif()
 if(NOT WIN32)
     target_link_libraries(test_widgets PRIVATE m)
 endif()
+
+# A test that hangs must not hold a runner for the default 25 minutes.
+get_property(ZEN_ALL_TESTS DIRECTORY PROPERTY TESTS)
+foreach(t ${ZEN_ALL_TESTS})
+    get_test_property(${t} TIMEOUT existing)
+    if(NOT existing)
+        set_tests_properties(${t} PROPERTIES TIMEOUT 120)
+    endif()
+endforeach()

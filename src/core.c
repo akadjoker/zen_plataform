@@ -988,18 +988,18 @@ double time_seconds(void)
 void time_sleep(uint32_t milliseconds)
 {
 #if defined(_WIN32)
-    static HANDLE timer;
-    if (!timer)
-        timer = CreateWaitableTimerExW(NULL, NULL, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    /* A high-resolution timer of its own per call: one shared timer would be reset
+       by a second thread sleeping at the same time, and the first would wait for ever. */
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
     if (timer)
     {
         LARGE_INTEGER due;
         due.QuadPart = -(LONGLONG)milliseconds * 10000;
-        if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
-        {
-            WaitForSingleObject(timer, INFINITE);
+        bool waited = SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE) &&
+                      WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0;
+        CloseHandle(timer);
+        if (waited)
             return;
-        }
     }
     Sleep(milliseconds);
 #else
