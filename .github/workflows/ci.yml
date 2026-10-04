@@ -52,7 +52,8 @@ jobs:
           cmake --install build-release --prefix stage
           mkdir -p stage/examples
           cp build-release/examples/hello_x11 build-release/examples/raytrace build-release/examples/uitest \
-             build-release/examples/mwidgets build-release/examples/ddemo build-release/examples/galaxy stage/examples/
+             build-release/examples/mwidgets build-release/examples/ddemo build-release/examples/galaxy \
+             build-release/examples/clipboard_demo build-release/examples/events_demo stage/examples/
           cp README.md stage/
 
       - uses: actions/upload-artifact@v4

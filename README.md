@@ -290,6 +290,8 @@ if (!path_absolute(path, sizeof path, "save.dat"))
 | **ddemo** | DOOM-style ray caster with DDA walls, floor/ceiling, animated sprite, minimap, z-buffer | pixel-level DDA ray casting, z-buffer occlusion, direct framebuffer writes, minimap with bresenham line |
 | **galaxy** | 80s space shooter (Galaxian-like) with starfield, enemy formation, bullets, scoring | full game loop, direct pixel rendering, collision detection, game state management |
 | **uitest** | Immediate-mode GUI demo: buttons, checkboxes, sliders | `mouse_button_pressed/released`, `mouse_x/y`, draw primitives with hover/active states |
+| **clipboard_demo** | Copy an image in any program, press Ctrl+V and see it drawn (alpha over a checkerboard); copy it back, copy a test pattern or text, see which formats the clipboard offers (text, PNG, files), save as BMP. `--paste` pastes on start | `clipboard_get_image/set_image`, `clipboard_has_data`, `clipboard_get_data`, `EVENT_WINDOW_FOCUS`, `draw_blit` with alpha |
+| **events_demo** | Every event live: a colour-coded stream, the pointer trail, touch points, recognised gestures, polled window/keyboard/mouse state, platform log lines; touch emulation with the mouse | `poll_event` (all `EVENT_*`), `touch_*`, `gesture_*`, `touch_set_mouse_emulation`, `log_set_callback`, `window_set_mode` |
 | **mwidgets** | Desktop widget demo with moveable/resizable windows, tabs, sliders | advanced IMGUI with window management, custom bitmap 5x7 font |
 
 ## Project Structure
