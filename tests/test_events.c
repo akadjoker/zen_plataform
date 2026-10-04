@@ -84,6 +84,12 @@ static void test_hook(PlatformWindow *w)
     fake_key(w, KEY_B, true, false);
     window_begin_frame(w);
     CHECK(seen.n == before);
+
+    fake_touch(w, 3, 5, 6, TOUCH_UP); /* the finger this test put down */
+    fake_key(w, KEY_A, false, false);
+    fake_key(w, KEY_B, false, false);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    window_begin_frame(w);
 }
 
 static void test_text_event(PlatformWindow *w)
@@ -210,6 +216,99 @@ static void test_device_events(PlatformWindow *w)
     CHECK(device_events(w, EVENT_GAMEPAD_DISCONNECTED, 0) == 1);
 }
 
+
+/* ---- a touch screen on a desktop: the first finger is the mouse ---- */
+
+static int count_type(PlatformWindow *w, EventType type)
+{
+    int n = 0;
+    Event e;
+    while (poll_event(w, &e))
+        n += e.type == type;
+    return n;
+}
+
+static void test_real_touch(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    while (poll_event(w, &(Event){0}))
+    {
+    }
+
+    /* finger down: a touch, and the mouse moves to it and presses */
+    fake_real_touch(w, 5, 40, 60, TOUCH_DOWN);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 1 && touch_id(w, 0) == 5);
+    CHECK(mouse_x(w) == 40 && mouse_y(w) == 60);
+    CHECK(mouse_button_down(w, MOUSE_LEFT) && mouse_button_pressed(w, MOUSE_LEFT));
+    CHECK(count_type(w, EVENT_MOUSE_BUTTON) == 1);
+
+    /* dragging it drags the mouse */
+    fake_real_touch(w, 5, 90, 120, TOUCH_MOVE);
+    window_begin_frame(w);
+    CHECK(mouse_x(w) == 90 && mouse_y(w) == 120 && mouse_button_down(w, MOUSE_LEFT));
+
+    /* the system's own echo of the touch (a mouse event) is dropped while a finger is down */
+    fake_mouse_move(w, 7, 7);
+    fake_mouse_button(w, MOUSE_RIGHT, true);
+    window_begin_frame(w);
+    CHECK(mouse_x(w) == 90 && mouse_y(w) == 120);
+    CHECK(!mouse_button_down(w, MOUSE_RIGHT));
+    CHECK(count_type(w, EVENT_MOUSE_MOVE) == 0);
+
+    /* a second finger is a touch only: the mouse stays with the first */
+    fake_real_touch(w, 6, 200, 10, TOUCH_DOWN);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 2);
+    CHECK(mouse_x(w) == 90 && mouse_button_down(w, MOUSE_LEFT));
+    CHECK(count_type(w, EVENT_MOUSE_BUTTON) == 0);
+    fake_real_touch(w, 6, 210, 20, TOUCH_MOVE);
+    window_begin_frame(w);
+    CHECK(mouse_x(w) == 90 && mouse_y(w) == 120);
+
+    /* the first finger lifts: the mouse releases, and the second does not take over */
+    fake_real_touch(w, 5, 90, 120, TOUCH_UP);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 1);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && mouse_button_released(w, MOUSE_LEFT));
+    fake_real_touch(w, 6, 230, 40, TOUCH_MOVE);
+    window_begin_frame(w);
+    CHECK(mouse_x(w) == 90);
+
+    /* all up: real mouse events count again */
+    fake_real_touch(w, 6, 230, 40, TOUCH_UP);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 0);
+    fake_mouse_move(w, 11, 22);
+    window_begin_frame(w);
+    CHECK(mouse_x(w) == 11 && mouse_y(w) == 22);
+
+    /* a cancelled touch also lets go of the mouse */
+    fake_real_touch(w, 9, 5, 5, TOUCH_DOWN);
+    window_begin_frame(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+    fake_real_touch(w, 9, 5, 5, TOUCH_CANCEL);
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && touch_count(w) == 0);
+
+    /* gestures see a real touch like any other */
+    fake_real_touch(w, 1, 100, 100, TOUCH_DOWN);
+    window_begin_frame(w);
+    CHECK(gesture_is_detected(w, GESTURE_TAP));
+    fake_real_touch(w, 1, 100, 100, TOUCH_UP);
+    window_begin_frame(w);
+
+    /* with mouse->touch emulation on, a real finger is not doubled by its own mouse echo */
+    touch_set_mouse_emulation(w, true);
+    fake_real_touch(w, 2, 30, 30, TOUCH_DOWN);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 1);
+    fake_real_touch(w, 2, 30, 30, TOUCH_UP);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 0);
+    touch_set_mouse_emulation(w, false);
+}
+
 static HitTestResult hit_fn(PlatformWindow *w, int x, int y, void *user)
 {
     (void)w;
@@ -296,6 +395,7 @@ int main(void)
     test_lock_mods(w);
     test_capture(w);
     test_device_events(w);
+    test_real_touch(w);
     window_destroy(w);
     test_window_features();
     platform_shutdown();

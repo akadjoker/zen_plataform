@@ -55,6 +55,13 @@ typedef struct
     /* which gamepads and joysticks this window has been told about (and which device
        generation), so connect and disconnect events are per window */
     unsigned pad_seen[GAMEPAD_MAX], joy_seen[JOYSTICK_MAX]; /* 0 = not seen, else generation */
+    /* Real touches on a desktop (XInput2, WM_TOUCH). The first finger also drives the
+       mouse, and while any finger is down the system's own mouse events for it are
+       dropped, so a touch is never delivered twice. */
+    int real_touch;       /* fingers down that came through core_push_touch */
+    int primary_touch;    /* the id of the finger acting as the mouse */
+    bool primary_active;
+    bool synth;           /* core_push_touch is pushing its own mouse events */
     bool mouse_touch;      /* left button emulates one finger */
     bool mouse_touch_down; /* ... and that finger is down now */
 
@@ -83,5 +90,11 @@ struct PlatformWindow
    event list in one call; core_push_char only touches the text queue. */
 void core_push_event(Core *core, const Event *ev);
 void core_push_char(Core *core, uint32_t codepoint);
+
+/* A finger from a touch screen on a desktop backend (the system gave no mouse
+   events for it, or gave ones that must not be counted twice). Raises EVENT_TOUCH
+   and lets the first finger act as the left mouse button. Backends with their own
+   touch model (Android, web) push EVENT_TOUCH through core_push_event instead. */
+void core_push_touch(Core *core, TouchPhase phase, int id, float x, float y, float pressure);
 
 #endif /* CORE_INTERNAL_H */

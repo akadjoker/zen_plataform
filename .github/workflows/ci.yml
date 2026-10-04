@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxrandr-dev libgl-dev xvfb libgl1-mesa-dri libglx-mesa0
+          sudo apt-get install -y libx11-dev libxrandr-dev libxi-dev libgl-dev xvfb libgl1-mesa-dri libglx-mesa0
 
       - name: Configure and build with sanitizers
         run: |

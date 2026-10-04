@@ -17,6 +17,15 @@
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
 #include <X11/XKBlib.h>
+/* XInput 2.2 gives real touch events. Only the header is needed at build time: libXi
+   itself is opened at run time, so nothing new is linked. Without the header the
+   backend simply has no touch input. */
+#if defined(__has_include) && !defined(ZEN_NO_XI2)
+#if __has_include(<X11/extensions/XInput2.h>)
+#include <X11/extensions/XInput2.h>
+#define ZEN_HAVE_XI2 1
+#endif
+#endif
 #include <X11/keysym.h>
 #include <X11/cursorfont.h>
 #include <X11/extensions/Xrandr.h>
@@ -102,6 +111,9 @@ static struct
     Cursor cursors[CURSOR_COUNT]; /* created on first use, shared by every window */
 
     Window helper; /* unmapped window that owns the CLIPBOARD selection */
+    int xi_opcode;   /* XInputExtension, when XInput 2.2 touch is available */
+    bool xi_touch;
+    int (*xi_select)(Display *, Window, void *mask, int count); /* XISelectEvents */
     ClipEntry clip[CLIP_MAX]; /* what we offer while we own the selection */
     int clip_count;
     IncrOut incr[CLIP_INCR_MAX]; /* large pastes being sent in chunks */
@@ -116,7 +128,7 @@ struct BackendWindow
     Colormap colormap;
     XIC xic;
     Core *core; /* set at the start of each pump so handlers can reach the core */
-    XEvent *pending; /* events other windows' pumps read off the shared queue for this one */
+    struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
     int pending_n, pending_cap;
 
     WindowMode mode;
@@ -505,6 +517,28 @@ bool backend_init(void)
     g.helper = XCreateSimpleWindow(g.dpy, g.root, -10, -10, 1, 1, 0, 0, 0);
     XSelectInput(g.dpy, g.helper, PropertyChangeMask);
 
+#if ZEN_HAVE_XI2
+    {
+        int ev, err;
+        if (XQueryExtension(g.dpy, "XInputExtension", &g.xi_opcode, &ev, &err))
+        {
+            SharedLibrary *xi = library_open("libXi.so.6");
+            int (*query)(Display *, int *, int *) = NULL;
+            if (xi)
+            {
+                *(void **)&query = library_symbol(xi, "XIQueryVersion");
+                *(void **)&g.xi_select = library_symbol(xi, "XISelectEvents");
+            }
+            int major = 2, minor = 2;
+            if (query && g.xi_select && query(g.dpy, &major, &minor) == Success && (major > 2 || minor >= 2))
+            {
+                g.xi_touch = true;
+                log_debug("X11: touch input through XInput %d.%d", major, minor);
+            }
+        }
+    }
+#endif
+
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
 
     g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
@@ -728,6 +762,18 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
 
     apply_window_kind(b, cfg);
+#if ZEN_HAVE_XI2
+    if (g.xi_touch)
+    {
+        unsigned char bits[XIMaskLen(XI_LASTEVENT)];
+        memset(bits, 0, sizeof bits);
+        XISetMask(bits, XI_TouchBegin);
+        XISetMask(bits, XI_TouchUpdate);
+        XISetMask(bits, XI_TouchEnd);
+        XIEventMask mask = {.deviceid = XIAllMasterDevices, .mask_len = (int)sizeof bits, .mask = bits};
+        g.xi_select(g.dpy, b->win, &mask, 1);
+    }
+#endif
 
     XMapWindow(g.dpy, b->win);
 
@@ -1306,27 +1352,79 @@ static void answer_selection_request(XSelectionRequestEvent *req)
     XSetErrorHandler(previous);
 }
 
+/* A queued event for a window: an Xlib event or a finger from XInput 2. */
+typedef struct PendingX
+{
+    bool is_touch;
+    XEvent ev;
+    TouchPhase phase;
+    int touch_id;
+    float x, y;
+} PendingX;
+
 /* All windows share one X connection and one event queue, so a window's pump meets
    events that belong to the others. Each such event is kept on its owner's pending
    list and processed in the owner's own pump: that keeps a window's per-frame input
    (edges, the frame's event list) in step with its own begin_frame. */
 #define PENDING_MAX 4096
 
-static void defer_event(BackendWindow *owner, const XEvent *ev)
+static void defer_item(BackendWindow *owner, const PendingX *item)
 {
     if (owner->pending_n == owner->pending_cap)
     {
         if (owner->pending_cap >= PENDING_MAX)
             return; /* a window nobody pumps: drop rather than grow without bound */
         int cap = owner->pending_cap ? owner->pending_cap * 2 : 64;
-        XEvent *grown = realloc(owner->pending, (size_t)cap * sizeof *grown);
+        PendingX *grown = realloc(owner->pending, (size_t)cap * sizeof *grown);
         if (!grown)
             return;
         owner->pending = grown;
         owner->pending_cap = cap;
     }
-    owner->pending[owner->pending_n++] = *ev;
+    owner->pending[owner->pending_n++] = *item;
 }
+
+static void defer_event(BackendWindow *owner, const XEvent *ev)
+{
+    PendingX item;
+    memset(&item, 0, sizeof item);
+    item.ev = *ev;
+    defer_item(owner, &item);
+}
+
+static void process_item(BackendWindow *b, const PendingX *it)
+{
+    if (it->is_touch)
+        core_push_touch(b->core, it->phase, it->touch_id, it->x, it->y, it->phase == TOUCH_UP ? 0.0f : 1.0f);
+    else
+    {
+        XEvent ev = it->ev; /* process_event may touch it */
+        process_event(b, &ev);
+    }
+}
+
+#if ZEN_HAVE_XI2
+/* One XInput 2 touch event: raise it for the window it landed on. */
+static void handle_xi_touch(BackendWindow *b, const XIDeviceEvent *de)
+{
+    PendingX it;
+    memset(&it, 0, sizeof it);
+    it.is_touch = true;
+    it.touch_id = (int)de->detail;
+    it.x = (float)de->event_x;
+    it.y = (float)de->event_y;
+    it.phase = de->evtype == XI_TouchBegin ? TOUCH_DOWN : de->evtype == XI_TouchUpdate ? TOUCH_MOVE : TOUCH_UP;
+
+    if (de->event == b->win)
+    {
+        process_item(b, &it);
+        return;
+    }
+    XPointer found = NULL;
+    if (XFindContext(g.dpy, de->event, g.ctx, &found) == 0 && found)
+        defer_item((BackendWindow *)found, &it);
+}
+#endif
 
 void backend_pump_events(BackendWindow *b, Core *core)
 {
@@ -1334,7 +1432,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
 
     /* Older than anything still in the queue, so first. */
     for (int i = 0; i < b->pending_n; i++)
-        process_event(b, &b->pending[i]);
+        process_item(b, &b->pending[i]);
     b->pending_n = 0;
 
     while (XPending(g.dpy))
@@ -1356,6 +1454,19 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
         if (ev.type == PropertyNotify && clip_incr_property_event(&ev.xproperty))
             continue;
+#if ZEN_HAVE_XI2
+        if (ev.type == GenericEvent && g.xi_touch && ev.xcookie.extension == g.xi_opcode)
+        {
+            if (XGetEventData(g.dpy, &ev.xcookie))
+            {
+                const XIDeviceEvent *de = ev.xcookie.data;
+                if (de->evtype == XI_TouchBegin || de->evtype == XI_TouchUpdate || de->evtype == XI_TouchEnd)
+                    handle_xi_touch(b, de);
+                XFreeEventData(g.dpy, &ev.xcookie);
+            }
+            continue;
+        }
+#endif
 
         if (ev.xany.window == b->win)
         {

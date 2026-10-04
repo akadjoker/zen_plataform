@@ -161,117 +161,14 @@ touch_set_mouse_emulation(w, true);                      // desktop: the left bu
 ```
 
 Gesture detection follows raylib's rgestures: tap, double tap, hold, drag, four
-swipes and pinch in/out. Touch points come from Android, the web and the fake
-backend. The X11 and Win32 backends do not report touch yet, so on those use
-`touch_set_mouse_emulation`, which turns the left button into one finger with a
+swipes and pinch in/out.
+
+Touch points come from touch screens on Windows (WM_TOUCH), X11 (XInput 2.2, with
+libXi opened at run time), Android and the web. On a desktop touch screen the first
+finger also drives the mouse (left button, position), and the system's own mouse events
+for it are dropped while a finger is down, so a touch is never counted twice. Without a
+touch screen, `touch_set_mouse_emulation` turns the left button into one finger with a
 real `EVENT_TOUCH`.
-
-### Logging
-
-```c
-log_set_level(LOGLEVEL_DEBUG);              // default LOGLEVEL_INFO
-log_info("loaded %d assets", n);            // log_debug / log_warn / log_error too
-log_set_callback(my_sink, my_data);         // void my_sink(LogLevel, const char *msg, void *user); NULL restores stderr
-```
-
-The default sink prints `[LEVEL] text` to stderr (the browser console on the web),
-to logcat on Android, and to the debugger output on Windows. The platform logs
-the errors behind `platform_get_error()` at `LOGLEVEL_DEBUG`.
-
-### Dialogs and URLs
-
-```c
-message_box(w, MESSAGE_ERROR, "Save failed", "The disk is full.");
-if (confirm_box(w, "Quit", "Discard changes?") == 1) { /* yes */ }
-
-FileFilter images[] = {{"Images", "*.png;*.jpg"}, {"All files", "*"}};
-char path[1024];
-if (dialog_open_file(w, "Open", NULL, images, 2, path, sizeof path)) { /* ... */ }
-dialog_save_file(w, "Save as", "untitled.png", images, 1, path, sizeof path);
-dialog_pick_folder(w, "Choose a folder", NULL, path, sizeof path);
-int n = dialog_open_files(w, "Open several", NULL, NULL, 0, many, sizeof many);   // paths one per line
-
-open_url("https://example.com");                 // the user's browser
-```
-
-Native dialogs on Windows; `zenity` or `kdialog` on Linux (an error if neither is
-installed); `alert`/`confirm` on the web; none on Android yet. A cancelled dialog
-returns false and leaves `platform_get_error()` empty, so you can tell it from one
-that could not be shown.
-
-### Threads
-
-```c
-static int work(void *user) { /* ... */ return 0; }
-
-PlatformThread *t = thread_create(work, &data, "worker");
-PlatformMutex *m = mutex_create();               // recursive
-PlatformCond *c = cond_create();
-
-mutex_lock(m);
-while (!ready) cond_wait(c, m);                  // or cond_wait_timeout(c, m, 100)
-mutex_unlock(m);
-
-int result = thread_join(t);                     // or thread_detach(t)
-int n = cpu_count();
-```
-
-pthreads and the Win32 API underneath; not available on the web. The platform's window,
-input and clipboard state belong to one thread; `log_message` and the filesystem calls
-are safe from any.
-
-### Vulkan, native handles, shared libraries
-
-```c
-if (vulkan_supported())                         // loader present + the surface extensions
-{
-    WindowConfig cfg = {.title = "vk", .width = 1280, .height = 720, .render = RENDER_VULKAN};
-    PlatformWindow *w = window_create(&cfg);    // a bare window, no GL context
-
-    uint32_t n;  const char *const *ext = vulkan_instance_extensions(&n);
-    PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)vulkan_get_proc_addr();
-    // vkCreateInstance with ext/n in VkInstanceCreateInfo, then:
-    uint64_t surface;
-    vulkan_create_surface(w, instance, NULL, &surface);   // a VkSurfaceKHR
-}
-
-void *hwnd = window_native_handle(w, NATIVE_WINDOW);      // HWND / X11 Window / ANativeWindow*
-SharedLibrary *lib = library_open("libfoo.so");           // dlopen / LoadLibrary
-void *fn = library_symbol(lib, "foo");
-```
-
-zen_platform does not link Vulkan and does not include its headers: the loader
-(`vulkan-1.dll`, `libvulkan.so.1`) is opened at run time, and handles are opaque
-(`VkInstance` is a `void*`, `VkSurfaceKHR` a `uint64_t`). Use the Vulkan headers,
-or volk, in your own code. Supported on X11, Windows and Android; not on the web
-or in the fake backend. `NATIVE_DISPLAY`, `NATIVE_WINDOW` and `NATIVE_GL_CONTEXT`
-return the X11 `Display*`/`Window`/`GLXContext`, the Win32
-`HINSTANCE`/`HWND`/`HGLRC`, and the Android `EGLDisplay`/`ANativeWindow*`/`EGLContext`.
-
-### Clipboard
-
-```c
-clipboard_set("text");                          // text, as before
-const char *t = clipboard_get();                // never NULL, "" when there is no text
-
-clipboard_set_image(&fb);                       // a Framebuffer, as PNG
-Framebuffer img;
-if (clipboard_get_image(&img)) { /* ... */ framebuffer_free(&img); }
-
-ClipboardItem items[] = {{CLIPBOARD_TEXT, "hi", 2}, {"text/html", html, html_len}};
-clipboard_set_items(items, 2);                  // one content, several representations
-if (clipboard_has_data(CLIPBOARD_URIS))         // copied files, as file:// lines
-{
-    size_t n;  char *uris = clipboard_get_data(CLIPBOARD_URIS, &n);  /* ... */  fs_free(uris);
-}
-```
-
-Types are MIME strings. `CLIPBOARD_TEXT`, `CLIPBOARD_PNG` and `CLIPBOARD_URIS` map to
-the native formats (`CF_UNICODETEXT`, `PNG` plus `CF_DIBV5`, `CF_HDROP` on Windows;
-selection targets on X11); any other string is a custom type. On X11 large data goes
-by INCR in both directions, and the application that copied must keep running its
-event loop for others to paste. Android and the web keep the data inside the app,
-and only text reaches the system clipboard on the web.
 
 ### Gamepads
 

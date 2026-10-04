@@ -162,6 +162,10 @@ void core_push_event(Core *core, const Event *ev)
 {
     InputState *s = &core->in;
 
+    /* While a finger is down the system's mouse events are its echo: drop them. */
+    if (s->real_touch > 0 && !s->synth && (ev->type == EVENT_MOUSE_MOVE || ev->type == EVENT_MOUSE_BUTTON))
+        return;
+
     if (core->hook)
         core->hook(core->owner, ev, core->hook_user);
 
@@ -240,6 +244,62 @@ void core_push_event(Core *core, const Event *ev)
     default:
         break;
     }
+}
+
+
+void core_push_touch(Core *core, TouchPhase phase, int id, float x, float y, float pressure)
+{
+    InputState *s = &core->in;
+    Event t = {.type = EVENT_TOUCH};
+    t.data.touch.id = id;
+    t.data.touch.x = x;
+    t.data.touch.y = y;
+    t.data.touch.pressure = pressure;
+    t.data.touch.phase = phase;
+    core_push_event(core, &t);
+
+    bool down = phase == TOUCH_DOWN;
+    bool up = phase == TOUCH_UP || phase == TOUCH_CANCEL;
+    if (down)
+        s->real_touch++;
+    else if (up && s->real_touch > 0)
+        s->real_touch--;
+
+    /* the first finger is the mouse */
+    s->synth = true;
+    if (down && !s->primary_active)
+    {
+        s->primary_active = true;
+        s->primary_touch = id;
+        Event m = {.type = EVENT_MOUSE_MOVE};
+        m.data.mouse.x = (int)x;
+        m.data.mouse.y = (int)y;
+        core_push_event(core, &m);
+        Event b = {.type = EVENT_MOUSE_BUTTON};
+        b.data.mouse.button = MOUSE_LEFT;
+        b.data.mouse.down = true;
+        b.data.mouse.x = (int)x;
+        b.data.mouse.y = (int)y;
+        core_push_event(core, &b);
+    }
+    else if (phase == TOUCH_MOVE && s->primary_active && s->primary_touch == id)
+    {
+        Event m = {.type = EVENT_MOUSE_MOVE};
+        m.data.mouse.x = (int)x;
+        m.data.mouse.y = (int)y;
+        core_push_event(core, &m);
+    }
+    else if (up && s->primary_active && s->primary_touch == id)
+    {
+        s->primary_active = false;
+        Event b = {.type = EVENT_MOUSE_BUTTON};
+        b.data.mouse.button = MOUSE_LEFT;
+        b.data.mouse.down = false;
+        b.data.mouse.x = (int)x;
+        b.data.mouse.y = (int)y;
+        core_push_event(core, &b);
+    }
+    s->synth = false;
 }
 
 /* ========================================================================== */

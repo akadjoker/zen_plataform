@@ -17,6 +17,7 @@
 typedef struct
 {
     bool is_char;
+    bool real_touch; /* goes through core_push_touch, like a desktop touch screen */
     Event ev;
     uint32_t cp;
 } FakeItem;
@@ -100,6 +101,9 @@ void backend_pump_events(BackendWindow *b, Core *core)
         FakeItem *it = &b->pending[i];
         if (it->is_char)
             core_push_char(core, it->cp);
+        else if (it->real_touch)
+            core_push_touch(core, it->ev.data.touch.phase, it->ev.data.touch.id, it->ev.data.touch.x,
+                            it->ev.data.touch.y, it->ev.data.touch.pressure);
         else
             core_push_event(core, &it->ev);
     }
@@ -465,6 +469,18 @@ void fake_wheel(PlatformWindow *w, float x, float y)
     e.data.wheel.x = x;
     e.data.wheel.y = y;
     fake_inject_event(w, &e);
+}
+
+void fake_real_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase)
+{
+    Event e = {.type = EVENT_TOUCH};
+    e.data.touch.id = id;
+    e.data.touch.x = x;
+    e.data.touch.y = y;
+    e.data.touch.pressure = phase == TOUCH_UP ? 0.0f : 1.0f;
+    e.data.touch.phase = phase;
+    FakeItem it = {.real_touch = true, .ev = e};
+    enqueue(w->b, &it);
 }
 
 void fake_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase)

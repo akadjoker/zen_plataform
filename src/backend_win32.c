@@ -91,6 +91,7 @@ static struct
 typedef struct
 {
     bool is_char;
+    bool is_touch; /* a finger from WM_TOUCH: goes through core_push_touch */
     Event ev;
     uint32_t cp;
 } PendingItem;
@@ -150,7 +151,23 @@ static void push(BackendWindow *b, Event *e)
     if (b->pumping && b->core)
         core_push_event(b->core, e);
     else if (b->pending_count < PENDING_MAX)
-        b->pending[b->pending_count++] = (PendingItem){false, *e, 0};
+        b->pending[b->pending_count++] = (PendingItem){.ev = *e};
+}
+
+static void push_touch(BackendWindow *b, TouchPhase phase, int id, float x, float y)
+{
+    if (b->pumping && b->core)
+        core_push_touch(b->core, phase, id, x, y, phase == TOUCH_UP ? 0.0f : 1.0f);
+    else if (b->pending_count < PENDING_MAX)
+    {
+        PendingItem it = {.is_touch = true};
+        it.ev.type = EVENT_TOUCH;
+        it.ev.data.touch.phase = phase;
+        it.ev.data.touch.id = id;
+        it.ev.data.touch.x = x;
+        it.ev.data.touch.y = y;
+        b->pending[b->pending_count++] = it;
+    }
 }
 
 static void push_char(BackendWindow *b, uint32_t cp)
@@ -158,7 +175,7 @@ static void push_char(BackendWindow *b, uint32_t cp)
     if (b->pumping && b->core)
         core_push_char(b->core, cp);
     else if (b->pending_count < PENDING_MAX)
-        b->pending[b->pending_count++] = (PendingItem){true, {0}, cp};
+        b->pending[b->pending_count++] = (PendingItem){.is_char = true, .cp = cp};
 }
 
 static UINT window_dpi(HWND hwnd)
@@ -929,6 +946,32 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         handle_size(b, wparam, lparam);
         live_tick(b);
         return 0;
+    case WM_TOUCH:
+    {
+        /* Fingers on a touch screen. Windows reports them in hundredths of a pixel of the
+           screen; the window's coordinates are client pixels. */
+        UINT count = LOWORD(wparam);
+        TOUCHINPUT inputs[32];
+        if (count > 32)
+            count = 32;
+        if (count && GetTouchInputInfo((HTOUCHINPUT)lparam, count, inputs, sizeof(TOUCHINPUT)))
+        {
+            for (UINT i = 0; i < count; i++)
+            {
+                POINT pt = {inputs[i].x / 100, inputs[i].y / 100};
+                ScreenToClient(hwnd, &pt);
+                TouchPhase phase = (inputs[i].dwFlags & TOUCHEVENTF_DOWN)   ? TOUCH_DOWN
+                                   : (inputs[i].dwFlags & TOUCHEVENTF_UP)   ? TOUCH_UP
+                                   : (inputs[i].dwFlags & TOUCHEVENTF_MOVE) ? TOUCH_MOVE
+                                                                            : TOUCH_MOVE;
+                if (inputs[i].dwFlags & (TOUCHEVENTF_DOWN | TOUCHEVENTF_UP | TOUCHEVENTF_MOVE))
+                    push_touch(b, phase, (int)inputs[i].dwID, (float)pt.x, (float)pt.y);
+            }
+            CloseTouchInputHandle((HTOUCHINPUT)lparam);
+            return 0;
+        }
+        break;
+    }
     case WM_NCCALCSIZE:
         if (b->frameless && wparam)
             return 0; /* the client area is the whole window */
@@ -1459,6 +1502,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
             backend_set_vsync(b, true);
     }
 
+    RegisterTouchWindow(b->hwnd, 0); /* WM_TOUCH instead of the mouse-from-touch conversion */
     DragAcceptFiles(b->hwnd, TRUE);
     ShowWindow(b->hwnd, cfg->kind == WINDOW_KIND_TOOLTIP ? SW_SHOWNOACTIVATE : SW_SHOW);
     UpdateWindow(b->hwnd);
@@ -1507,6 +1551,10 @@ void backend_pump_events(BackendWindow *b, Core *core)
     {
         if (b->pending[i].is_char)
             core_push_char(core, b->pending[i].cp);
+        else if (b->pending[i].is_touch)
+            core_push_touch(core, b->pending[i].ev.data.touch.phase, b->pending[i].ev.data.touch.id,
+                            b->pending[i].ev.data.touch.x, b->pending[i].ev.data.touch.y,
+                            b->pending[i].ev.data.touch.phase == TOUCH_UP ? 0.0f : 1.0f);
         else
             core_push_event(core, &b->pending[i].ev);
     }

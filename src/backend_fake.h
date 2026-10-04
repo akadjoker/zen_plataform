@@ -22,6 +22,7 @@ void fake_set_lock_state(int mask); /* KEYMOD_CAPS_LOCK | KEYMOD_NUM_LOCK, read 
 HitTestResult fake_hit_test(PlatformWindow *w, int x, int y); /* what the window's hit-test function says */
 bool fake_is_decorated(PlatformWindow *w);
 PlatformCursor *fake_cursor_image(PlatformWindow *w); /* the cursor image set last, or NULL */
+void fake_real_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase); /* as a desktop touch screen: also drives the mouse */
 void fake_resize(PlatformWindow *w, int width, int height);    /* EVENT_WINDOW_RESIZE, screen coords */
 void fake_fb_resize(PlatformWindow *w, int width, int height); /* EVENT_WINDOW_FB_RESIZE, pixels */
 
