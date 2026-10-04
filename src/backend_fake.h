@@ -23,6 +23,9 @@ HitTestResult fake_hit_test(PlatformWindow *w, int x, int y); /* what the window
 bool fake_is_decorated(PlatformWindow *w);
 PlatformCursor *fake_cursor_image(PlatformWindow *w); /* the cursor image set last, or NULL */
 void fake_real_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase); /* as a desktop touch screen: also drives the mouse */
+void fake_text_edit(PlatformWindow *w, const char *utf8, int cursor); /* an input method composing */
+bool fake_text_input_on(PlatformWindow *w);
+void fake_text_input_rect(PlatformWindow *w, int out[4]);
 void fake_resize(PlatformWindow *w, int width, int height);    /* EVENT_WINDOW_RESIZE, screen coords */
 void fake_fb_resize(PlatformWindow *w, int width, int height); /* EVENT_WINDOW_FB_RESIZE, pixels */
 

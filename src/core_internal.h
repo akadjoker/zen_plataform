@@ -50,6 +50,9 @@ typedef struct
     } touch[MAX_TOUCH_POINTS];
     int touch_count;
 
+    bool text_input_off;       /* window_text_input_stop was called */
+    char composition[64];      /* the input method's current composition, UTF-8 */
+
     GestureState gesture;
 
     /* which gamepads and joysticks this window has been told about (and which device

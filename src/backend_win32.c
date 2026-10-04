@@ -113,6 +113,8 @@ struct BackendWindow
     int buttons_down;
     bool captured;                /* mouse_capture(true) is in effect */
     bool frameless;               /* no non-client area at all: WM_NCCALCSIZE removes it */
+    bool text_input_off;          /* window_text_input_stop: no input method */
+    int ime_x, ime_y, ime_h;      /* the caret rectangle, for the composition and candidate windows */
     DWORD style_framed, style_frameless; /* the two looks of this window, for window_set_decorated */
     HitTestFunc hit_cb;
     PlatformWindow *hit_w;
@@ -908,6 +910,154 @@ static void handle_char(BackendWindow *b, WPARAM wparam)
         push_char(b, cp);
 }
 
+/* ---- input method (imm32, loaded at run time so nothing new is imported) ---- */
+
+typedef HIMC(WINAPI *PFN_ImmGetContext)(HWND);
+typedef BOOL(WINAPI *PFN_ImmReleaseContext)(HWND, HIMC);
+typedef LONG(WINAPI *PFN_ImmGetCompositionStringW)(HIMC, DWORD, LPVOID, DWORD);
+typedef BOOL(WINAPI *PFN_ImmSetCandidateWindow)(HIMC, LPCANDIDATEFORM);
+typedef BOOL(WINAPI *PFN_ImmSetCompositionWindow)(HIMC, LPCOMPOSITIONFORM);
+typedef HIMC(WINAPI *PFN_ImmAssociateContext)(HWND, HIMC);
+typedef BOOL(WINAPI *PFN_ImmAssociateContextEx)(HWND, HIMC, DWORD);
+
+static struct
+{
+    bool tried;
+    HMODULE lib;
+    PFN_ImmGetContext get_context;
+    PFN_ImmReleaseContext release_context;
+    PFN_ImmGetCompositionStringW get_string;
+    PFN_ImmSetCandidateWindow set_candidate;
+    PFN_ImmSetCompositionWindow set_composition;
+    PFN_ImmAssociateContext associate;
+    PFN_ImmAssociateContextEx associate_ex;
+} imm;
+
+static bool imm_load(void)
+{
+    if (!imm.tried)
+    {
+        imm.tried = true;
+        imm.lib = LoadLibraryW(L"imm32.dll");
+        if (imm.lib)
+        {
+            imm.get_context = (PFN_ImmGetContext)(void *)GetProcAddress(imm.lib, "ImmGetContext");
+            imm.release_context = (PFN_ImmReleaseContext)(void *)GetProcAddress(imm.lib, "ImmReleaseContext");
+            imm.get_string = (PFN_ImmGetCompositionStringW)(void *)GetProcAddress(imm.lib, "ImmGetCompositionStringW");
+            imm.set_candidate = (PFN_ImmSetCandidateWindow)(void *)GetProcAddress(imm.lib, "ImmSetCandidateWindow");
+            imm.set_composition = (PFN_ImmSetCompositionWindow)(void *)GetProcAddress(imm.lib, "ImmSetCompositionWindow");
+            imm.associate = (PFN_ImmAssociateContext)(void *)GetProcAddress(imm.lib, "ImmAssociateContext");
+            imm.associate_ex = (PFN_ImmAssociateContextEx)(void *)GetProcAddress(imm.lib, "ImmAssociateContextEx");
+        }
+    }
+    return imm.get_context && imm.release_context && imm.get_string;
+}
+
+/* Put the composition and candidate windows by the caret. */
+static void imm_place(BackendWindow *b)
+{
+    if (!imm_load() || !imm.set_candidate || !imm.set_composition)
+        return;
+    HIMC ctx = imm.get_context(b->hwnd);
+    if (!ctx)
+        return;
+    COMPOSITIONFORM cf = {CFS_POINT, {b->ime_x, b->ime_y}, {0, 0, 0, 0}};
+    imm.set_composition(ctx, &cf);
+    CANDIDATEFORM cand = {0, CFS_CANDIDATEPOS, {b->ime_x, b->ime_y + b->ime_h}, {0, 0, 0, 0}};
+    imm.set_candidate(ctx, &cand);
+    imm.release_context(b->hwnd, ctx);
+}
+
+/* UTF-16 to the UTF-8 EVENT_TEXT_EDIT carries (cut on a character boundary). */
+static void imm_edit(BackendWindow *b, const wchar_t *wide, int units, int cursor_units)
+{
+    Event e = {.type = EVENT_TEXT_EDIT};
+    int n = 0, cursor = -1;
+    for (int i = 0; i <= units; i++)
+    {
+        if (i == cursor_units)
+            cursor = n;
+        if (i == units)
+            break;
+        uint32_t cp = wide[i];
+        if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < units && wide[i + 1] >= 0xDC00 && wide[i + 1] < 0xE000)
+        {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (wide[i + 1] - 0xDC00);
+            i++;
+        }
+        char buf[4];
+        int len = cp < 0x80 ? (buf[0] = (char)cp, 1)
+                  : cp < 0x800 ? (buf[0] = (char)(0xC0 | (cp >> 6)), buf[1] = (char)(0x80 | (cp & 0x3F)), 2)
+                  : cp < 0x10000 ? (buf[0] = (char)(0xE0 | (cp >> 12)), buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F)),
+                                    buf[2] = (char)(0x80 | (cp & 0x3F)), 3)
+                                 : (buf[0] = (char)(0xF0 | (cp >> 18)), buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F)),
+                                    buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F)), buf[3] = (char)(0x80 | (cp & 0x3F)), 4);
+        if (n + len > (int)sizeof e.data.edit.text - 1)
+            break;
+        memcpy(e.data.edit.text + n, buf, (size_t)len);
+        n += len;
+    }
+    e.data.edit.text[n] = '\0';
+    e.data.edit.cursor = cursor < 0 ? n : cursor;
+    push(b, &e);
+}
+
+/* WM_IME_COMPOSITION: the committed text becomes characters, the composition an edit
+   event. Returns true when it was handled. */
+static bool imm_composition(BackendWindow *b, LPARAM lparam)
+{
+    if (b->text_input_off || !imm_load())
+        return false;
+    HIMC ctx = imm.get_context(b->hwnd);
+    if (!ctx)
+        return false;
+    if (lparam & GCS_RESULTSTR)
+    {
+        wchar_t buf[256];
+        LONG bytes = imm.get_string(ctx, GCS_RESULTSTR, buf, sizeof buf - sizeof(wchar_t));
+        for (LONG i = 0; i < bytes / (LONG)sizeof(wchar_t); i++)
+        {
+            uint32_t cp = buf[i];
+            if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < bytes / (LONG)sizeof(wchar_t))
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (buf[++i] - 0xDC00);
+            if (cp >= 0x20 && cp != 0x7F)
+                push_char(b, cp);
+        }
+    }
+    if (lparam & GCS_COMPSTR)
+    {
+        wchar_t buf[128];
+        LONG bytes = imm.get_string(ctx, GCS_COMPSTR, buf, sizeof buf - sizeof(wchar_t));
+        LONG cursor = imm.get_string(ctx, GCS_CURSORPOS, NULL, 0);
+        imm_edit(b, buf, bytes > 0 ? (int)(bytes / (LONG)sizeof(wchar_t)) : 0, (int)cursor);
+    }
+    imm.release_context(b->hwnd, ctx);
+    return true;
+}
+
+void backend_set_text_input(BackendWindow *b, bool on)
+{
+    b->text_input_off = !on;
+    if (!imm_load())
+        return;
+    if (on)
+    {
+        if (imm.associate_ex)
+            imm.associate_ex(b->hwnd, NULL, 0x0010 /* IACE_DEFAULT */);
+    }
+    else if (imm.associate)
+        imm.associate(b->hwnd, NULL);
+}
+
+void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
+{
+    (void)w;
+    b->ime_x = x;
+    b->ime_y = y;
+    b->ime_h = h;
+    imm_place(b);
+}
+
 static void paint_pixels(BackendWindow *b);
 
 /* The OS runs its own loop while a window is dragged or resized, so the
@@ -946,6 +1096,24 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         handle_size(b, wparam, lparam);
         live_tick(b);
         return 0;
+    case WM_IME_STARTCOMPOSITION:
+        if (!b->text_input_off && imm_load())
+        {
+            imm_place(b);
+            return 0; /* the application shows the composition: no system window */
+        }
+        break;
+    case WM_IME_COMPOSITION:
+        if (imm_composition(b, lparam))
+            return 0;
+        break;
+    case WM_IME_ENDCOMPOSITION:
+        if (!b->text_input_off)
+        {
+            imm_edit(b, L"", 0, 0); /* an empty edit ends the composition */
+            return 0;
+        }
+        break;
     case WM_TOUCH:
     {
         /* Fingers on a touch screen. Windows reports them in hundredths of a pixel of the

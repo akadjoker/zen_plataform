@@ -440,7 +440,25 @@ bool zui_text_input(UiContext *ui, const char *label, char *buf, int cap)
         int cx = r.x + 8 + zui_text_width(ui->font, buf, ui->caret);
         int ch = ui->font ? zui_font_height(ui->font) : 14;
         int cy = r.y + (r.h - ch) / 2;
-        ui_push_rect(ui, zui_rect(cx, cy, 1, ch), COL(ui, UI_COL_TEXT), 0);
+
+        /* An input method composing text: show it at the caret, underlined, and keep its
+           candidate list beside the caret. */
+        const char *comp = ui->win ? window_text_composition(ui->win) : "";
+        int comp_w = 0;
+        if (ui->win && (cx != ui->ime_x || cy != ui->ime_y))
+        {
+            ui->ime_x = cx;
+            ui->ime_y = cy;
+            window_set_text_input_rect(ui->win, cx, cy, 1, ch);
+        }
+        if (comp[0])
+        {
+            comp_w = zui_text_width(ui->font, comp, -1);
+            ui_push_rect(ui, zui_rect(cx, cy, comp_w, ch), COL(ui, UI_COL_INPUT_BG), 0);
+            text_in_cell(ui, cx, r.y, r.h, comp, COL(ui, UI_COL_TEXT));
+            ui_push_rect(ui, zui_rect(cx, cy + ch - 1, comp_w, 1), COL(ui, UI_COL_TEXT), 0);
+        }
+        ui_push_rect(ui, zui_rect(cx + comp_w, cy, 1, ch), COL(ui, UI_COL_TEXT), 0);
     }
     else if (hovered)
         zui_request_cursor(ui, CURSOR_IBEAM);

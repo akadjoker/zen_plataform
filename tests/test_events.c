@@ -309,6 +309,77 @@ static void test_real_touch(PlatformWindow *w)
     touch_set_mouse_emulation(w, false);
 }
 
+
+/* ---- text input and the input method ---- */
+
+static void test_text_input(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    while (char_get_pressed(w))
+    {
+    }
+    CHECK(window_text_input_active(w) && fake_text_input_on(w));
+    CHECK(strcmp(window_text_composition(w), "") == 0);
+
+    /* an input method composing: edit events, and the composition is readable */
+    fake_text_edit(w, "ni", 2);
+    window_begin_frame(w);
+    Event e;
+    bool saw = false;
+    while (poll_event(w, &e))
+        if (e.type == EVENT_TEXT_EDIT)
+            saw = strcmp(e.data.edit.text, "ni") == 0 && e.data.edit.cursor == 2;
+    CHECK(saw);
+    CHECK(strcmp(window_text_composition(w), "ni") == 0);
+
+    /* committing: an empty edit, then the characters */
+    fake_text_edit(w, "", 0);
+    fake_inject_char(w, 0x4F60);
+    window_begin_frame(w);
+    CHECK(strcmp(window_text_composition(w), "") == 0);
+    CHECK(char_get_pressed(w) == 0x4F60);
+
+    /* a long composition is cut to what the event holds, never overflowed */
+    char longtext[200];
+    memset(longtext, 'z', sizeof longtext - 1);
+    longtext[sizeof longtext - 1] = '\0';
+    fake_text_edit(w, longtext, 10);
+    window_begin_frame(w);
+    CHECK(strlen(window_text_composition(w)) == 63);
+    fake_text_edit(w, "", 0);
+    window_begin_frame(w);
+
+    /* the caret rectangle reaches the platform */
+    window_set_text_input_rect(w, 10, 20, 3, 16);
+    int r[4];
+    fake_text_input_rect(w, r);
+    CHECK(r[0] == 10 && r[1] == 20 && r[2] == 3 && r[3] == 16);
+
+    /* stopping: no input method, no characters, no composition */
+    fake_text_edit(w, "ab", 2);
+    window_begin_frame(w);
+    CHECK(strcmp(window_text_composition(w), "ab") == 0);
+    window_text_input_stop(w);
+    CHECK(!window_text_input_active(w) && !fake_text_input_on(w));
+    CHECK(strcmp(window_text_composition(w), "") == 0);
+    fake_inject_char(w, 'q');
+    fake_key(w, KEY_Q, true, false);
+    window_begin_frame(w);
+    CHECK(char_get_pressed(w) == 0);       /* no text */
+    CHECK(key_down(w, KEY_Q));             /* keys still work */
+    int chars = 0;
+    while (poll_event(w, &e))
+        chars += e.type == EVENT_CHAR;
+    CHECK(chars == 0);
+    fake_key(w, KEY_Q, false, false);
+
+    window_text_input_start(w);
+    CHECK(window_text_input_active(w) && fake_text_input_on(w));
+    fake_inject_char(w, 'q');
+    window_begin_frame(w);
+    CHECK(char_get_pressed(w) == 'q');
+}
+
 static HitTestResult hit_fn(PlatformWindow *w, int x, int y, void *user)
 {
     (void)w;
@@ -396,6 +467,7 @@ int main(void)
     test_capture(w);
     test_device_events(w);
     test_real_touch(w);
+    test_text_input(w);
     window_destroy(w);
     test_window_features();
     platform_shutdown();

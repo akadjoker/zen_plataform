@@ -10,6 +10,7 @@
 #include "backend.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -136,6 +137,8 @@ static void gesture_feed_touch(Core *core, TouchPhase phase, int id, float x, fl
 
 void core_push_char(Core *core, uint32_t codepoint)
 {
+    if (core->in.text_input_off)
+        return;
     /* Text is both an event, for poll_event, and an entry in the char queue; the
        EVENT_CHAR case of core_push_event does the queue. */
     Event e = {.type = EVENT_CHAR};
@@ -187,6 +190,9 @@ void core_push_event(Core *core, const Event *ev)
     }
     case EVENT_CHAR:
         char_push(s, ev->data.codepoint);
+        break;
+    case EVENT_TEXT_EDIT:
+        snprintf(s->composition, sizeof s->composition, "%s", ev->data.edit.text);
         break;
     case EVENT_MOUSE_MOVE:
         s->mouse_x = ev->data.mouse.x;
@@ -495,6 +501,34 @@ void window_set_event_hook(PlatformWindow *w, EventHook hook, void *user)
 {
     w->core.hook = hook;
     w->core.hook_user = user;
+}
+
+void window_text_input_start(PlatformWindow *w)
+{
+    w->core.in.text_input_off = false;
+    backend_set_text_input(w->b, true);
+}
+
+void window_text_input_stop(PlatformWindow *w)
+{
+    w->core.in.text_input_off = true;
+    w->core.in.composition[0] = '\0';
+    backend_set_text_input(w->b, false);
+}
+
+bool window_text_input_active(PlatformWindow *w)
+{
+    return !w->core.in.text_input_off;
+}
+
+void window_set_text_input_rect(PlatformWindow *w, int x, int y, int width, int height)
+{
+    backend_set_text_input_rect(w->b, x, y, width, height);
+}
+
+const char *window_text_composition(PlatformWindow *w)
+{
+    return w->core.in.composition;
 }
 
 void window_set_decorated(PlatformWindow *w, bool on)

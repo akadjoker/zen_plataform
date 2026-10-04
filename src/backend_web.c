@@ -812,6 +812,16 @@ void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
     (void)b, (void)c;
 }
 
+void backend_set_text_input(BackendWindow *b, bool on)
+{
+    (void)b, (void)on;
+}
+
+void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
+{
+    (void)b, (void)x, (void)y, (void)w, (void)h;
+}
+
 void backend_set_mouse_mode(BackendWindow *b, int mode)
 {
     b->cursor_mode = mode;

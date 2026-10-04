@@ -9,6 +9,7 @@
 #include "backend_fake.h"
 #include "clipboard_mem.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +33,8 @@ struct BackendWindow
     WindowMode mode;
     int cursor, mouse_mode;
     bool captured;
+    bool text_input;
+    int ime_rect[4];
     bool decorated;
     HitTestFunc hit_cb;
     PlatformWindow *hit_w;
@@ -78,6 +81,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->w = cfg->width;
     b->h = cfg->height;
     b->content_scale = 1.0f;
+    b->text_input = true;
     b->decorated = !cfg->undecorated && cfg->kind != WINDOW_KIND_POPUP && cfg->kind != WINDOW_KIND_TOOLTIP;
     b->fb_w = cfg->width;
     b->fb_h = cfg->height;
@@ -363,6 +367,34 @@ void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
 PlatformCursor *fake_cursor_image(PlatformWindow *w)
 {
     return w->b->cursor_image;
+}
+
+void backend_set_text_input(BackendWindow *b, bool on)
+{
+    b->text_input = on;
+}
+
+void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
+{
+    b->ime_rect[0] = x, b->ime_rect[1] = y, b->ime_rect[2] = w, b->ime_rect[3] = h;
+}
+
+bool fake_text_input_on(PlatformWindow *w)
+{
+    return w->b->text_input;
+}
+
+void fake_text_input_rect(PlatformWindow *w, int out[4])
+{
+    memcpy(out, w->b->ime_rect, sizeof w->b->ime_rect);
+}
+
+void fake_text_edit(PlatformWindow *w, const char *utf8, int cursor)
+{
+    Event e = {.type = EVENT_TEXT_EDIT};
+    snprintf(e.data.edit.text, sizeof e.data.edit.text, "%s", utf8);
+    e.data.edit.cursor = cursor;
+    fake_inject_event(w, &e);
 }
 
 void backend_set_mouse_mode(BackendWindow *b, int mode)

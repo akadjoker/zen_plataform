@@ -162,7 +162,14 @@ extern "C"
         EVENT_GAMEPAD_CONNECTED,
         EVENT_GAMEPAD_DISCONNECTED,
         EVENT_JOYSTICK_CONNECTED,
-        EVENT_JOYSTICK_DISCONNECTED
+        EVENT_JOYSTICK_DISCONNECTED,
+
+        /* An input method (Chinese, Japanese, Korean, dead keys) is composing text that
+           is not final yet: data.edit.text is the UTF-8 composition (cut to 63 bytes),
+           data.edit.cursor the caret as a byte offset in it. An empty text ends the
+           composition, by commit or cancel; what was committed arrives as EVENT_CHAR.
+           Draw the composition, underlined, at the text caret. */
+        EVENT_TEXT_EDIT
     } EventType;
 
     typedef enum
@@ -233,6 +240,11 @@ extern "C"
             {
                 int index;
             } device;
+            struct
+            {
+                char text[64];
+                int cursor;
+            } edit;
         } data;
     } Event;
 
@@ -681,6 +693,19 @@ extern "C"
     /* Next codepoint from the text-input queue. 0 when empty. Independent of the
        key queue, so it carries layout and composed input correctly. */
     PLATFORM_API uint32_t char_get_pressed(PlatformWindow *w);
+
+    /* Text input and input methods. On by default: typed characters arrive as
+       EVENT_CHAR and an input method may compose first (EVENT_TEXT_EDIT). A game that
+       reads keys, not text, can turn it off, so no input method interferes with the
+       keys and no EVENT_CHAR is produced; turn it on again for a text field. */
+    PLATFORM_API void window_text_input_start(PlatformWindow *w);
+    PLATFORM_API void window_text_input_stop(PlatformWindow *w);
+    PLATFORM_API bool window_text_input_active(PlatformWindow *w);
+    /* The rectangle of the text caret in window coordinates: the input method puts its
+       candidate list next to it. Call it whenever the caret moves. */
+    PLATFORM_API void window_set_text_input_rect(PlatformWindow *w, int x, int y, int width, int height);
+    /* The composition being typed now, UTF-8 ("" when none). */
+    PLATFORM_API const char *window_text_composition(PlatformWindow *w);
 
     PLATFORM_API void key_set_exit(PlatformWindow *w, int key); /* sets should_close on press */
 

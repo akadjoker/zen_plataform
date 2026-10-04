@@ -12,6 +12,7 @@
 #include "error_internal.h"
 #include "vulkan_internal.h"
 #include "mime_util.h"
+#include "preedit.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -33,6 +34,7 @@
 #include <GL/glx.h>
 
 #include <limits.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,6 +129,11 @@ struct BackendWindow
     GLXContext glc;
     Colormap colormap;
     XIC xic;
+    /* input method: composing text shown by the application (XIM preedit callbacks) */
+    Preedit preedit;
+    bool preedit_dirty;           /* an EVENT_TEXT_EDIT is due at the end of the pump */
+    bool text_input;              /* window_text_input_start/stop */
+    XIMCallback cb_start, cb_done, cb_draw, cb_caret;
     Core *core; /* set at the start of each pump so handlers can reach the core */
     struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
     int pending_n, pending_cap;
@@ -539,6 +546,12 @@ bool backend_init(void)
     }
 #endif
 
+    /* An input method needs the locale's character set and its modifiers, or XOpenIM
+       can only give the plain built-in one. Only LC_CTYPE is changed: number
+       formatting stays as the application had it. */
+    setlocale(LC_CTYPE, "");
+    if (XSupportsLocale())
+        XSetLocaleModifiers("");
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
 
     g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
@@ -577,6 +590,134 @@ static void set_title(BackendWindow *b, const char *title)
     XStoreName(g.dpy, b->win, title);
     XChangeProperty(g.dpy, b->win, g.NET_WM_NAME, g.UTF8_STRING, 8,
                     PropModeReplace, (const unsigned char *)title, (int)strlen(title));
+}
+
+/* ---- input method: on-the-spot composition through the XIM preedit callbacks ---- */
+
+static int pre_start(XIC ic, XPointer client, XPointer call)
+{
+    (void)ic, (void)client, (void)call;
+    return -1; /* no limit on the composition length */
+}
+
+static void pre_done(XIC ic, XPointer client, XPointer call)
+{
+    (void)ic, (void)call;
+    BackendWindow *b = (BackendWindow *)client;
+    preedit_clear(&b->preedit);
+    b->preedit_dirty = true;
+}
+
+static void pre_draw(XIC ic, XPointer client, XPointer call)
+{
+    (void)ic;
+    BackendWindow *b = (BackendWindow *)client;
+    const XIMPreeditDrawCallbackStruct *d = (const XIMPreeditDrawCallbackStruct *)call;
+    uint32_t ins[PREEDIT_CAP];
+    int n = 0;
+    if (d->text)
+    {
+        const XIMText *t = d->text;
+        if (t->encoding_is_wchar && t->string.wide_char)
+        {
+            for (unsigned i = 0; i < t->length && n < PREEDIT_CAP; i++)
+                ins[n++] = (uint32_t)t->string.wide_char[i];
+        }
+        else if (t->string.multi_byte)
+            n = preedit_from_utf8(t->string.multi_byte, (int)strlen(t->string.multi_byte), ins, PREEDIT_CAP);
+    }
+    preedit_draw(&b->preedit, d->caret, d->chg_first, d->chg_length, ins, n);
+    b->preedit_dirty = true;
+}
+
+static void pre_caret(XIC ic, XPointer client, XPointer call)
+{
+    (void)ic, (void)client, (void)call;
+}
+
+/* Whether the input method can hand the composition to the application. */
+static bool im_has_callbacks(void)
+{
+    XIMStyles *styles = NULL;
+    if (!g.xim || XGetIMValues(g.xim, XNQueryInputStyle, &styles, NULL) != NULL || !styles)
+        return false;
+    bool ok = false;
+    for (unsigned i = 0; i < styles->count_styles; i++)
+        ok |= styles->supported_styles[i] == (XIMPreeditCallbacks | XIMStatusNothing);
+    XFree(styles);
+    return ok;
+}
+
+static XIC create_ic(BackendWindow *b)
+{
+    if (!g.xim)
+        return NULL;
+    /* ZEN_NO_IME=1 keeps the input method out of the application's drawing, should one
+       of them misbehave: it then composes in its own window. */
+    if (!getenv("ZEN_NO_IME") && im_has_callbacks())
+    {
+        b->cb_start = (XIMCallback){(XPointer)b, (XIMProc)(void (*)(void))pre_start};
+        b->cb_done = (XIMCallback){(XPointer)b, (XIMProc)(void (*)(void))pre_done};
+        b->cb_draw = (XIMCallback){(XPointer)b, (XIMProc)(void (*)(void))pre_draw};
+        b->cb_caret = (XIMCallback){(XPointer)b, (XIMProc)(void (*)(void))pre_caret};
+        XVaNestedList list = XVaCreateNestedList(0, XNPreeditStartCallback, &b->cb_start, XNPreeditDoneCallback,
+                                                 &b->cb_done, XNPreeditDrawCallback, &b->cb_draw,
+                                                 XNPreeditCaretCallback, &b->cb_caret, NULL);
+        XIC ic = XCreateIC(g.xim, XNInputStyle, XIMPreeditCallbacks | XIMStatusNothing, XNClientWindow, b->win,
+                           XNFocusWindow, b->win, XNPreeditAttributes, list, NULL);
+        XFree(list);
+        if (ic)
+        {
+            log_debug("X11: the input method composes through preedit callbacks");
+            return ic;
+        }
+    }
+    return XCreateIC(g.xim, XNInputStyle, XIMPreeditNothing | XIMStatusNothing, XNClientWindow, b->win, XNFocusWindow,
+                     b->win, NULL);
+}
+
+/* The composition changed during this pump: tell the application once. */
+static void flush_preedit(BackendWindow *b)
+{
+    if (!b->preedit_dirty || !b->core)
+        return;
+    b->preedit_dirty = false;
+    Event e = {.type = EVENT_TEXT_EDIT};
+    preedit_to_utf8(&b->preedit, e.data.edit.text, (int)sizeof e.data.edit.text, &e.data.edit.cursor);
+    core_push_event(b->core, &e);
+}
+
+void backend_set_text_input(BackendWindow *b, bool on)
+{
+    b->text_input = on;
+    if (!b->xic)
+        return;
+    if (on && b->focused)
+        XSetICFocus(b->xic);
+    else
+    {
+        XUnsetICFocus(b->xic);
+        if (!on)
+        {
+            char *left = Xutf8ResetIC(b->xic); /* drop what the method was composing */
+            if (left)
+                XFree(left);
+            preedit_clear(&b->preedit);
+            b->preedit_dirty = false;
+        }
+    }
+}
+
+void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
+{
+    (void)w;
+    if (!b->xic)
+        return;
+    /* the spot is where the candidate list goes: just under the caret */
+    XPoint spot = {(short)x, (short)(y + h)};
+    XVaNestedList list = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
+    XSetICValues(b->xic, XNPreeditAttributes, list, NULL); /* some methods ignore it */
+    XFree(list);
 }
 
 /* ---- decorations and window kinds ---- */
@@ -742,9 +883,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         XFree(hints);
     }
 
-    if (g.xim)
-        b->xic = XCreateIC(g.xim, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
-                           XNClientWindow, b->win, XNFocusWindow, b->win, NULL);
+    b->text_input = true;
+    b->xic = create_ic(b);
 
     if (cfg->render == RENDER_PIXELS)
     {
@@ -1179,7 +1319,7 @@ static void process_event(BackendWindow *b, XEvent *ev)
     {
         b->focused = ev->type == FocusIn;
         if (b->xic)
-            (b->focused ? XSetICFocus : XUnsetICFocus)(b->xic);
+            (b->focused && b->text_input ? XSetICFocus : XUnsetICFocus)(b->xic);
         Event e = {.type = EVENT_WINDOW_FOCUS};
         e.data.focus.gained = b->focused;
         push(b, &e);
@@ -1434,6 +1574,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
     for (int i = 0; i < b->pending_n; i++)
         process_item(b, &b->pending[i]);
     b->pending_n = 0;
+    flush_preedit(b);
 
     while (XPending(g.dpy))
     {
@@ -1478,6 +1619,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
             defer_event((BackendWindow *)found, &ev);
         /* anything else (the clipboard helper, a window already destroyed) is dropped */
     }
+    flush_preedit(b); /* the input method may have changed the composition while filtering */
 }
 
 

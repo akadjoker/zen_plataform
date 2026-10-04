@@ -309,6 +309,7 @@ src/
   gesture.c               touch gesture recognizer (after raylib's rgestures)
   log.c                   leveled logging with a replaceable sink
   library.c               shared library loading (dlopen / LoadLibrary)
+  preedit.c               the text an input method is composing
   thread.c                threads, recursive mutexes, condition variables, cpu_count
   dialog.c                message boxes, file dialogs, open_url (native, zenity/kdialog, web)
   clipboard.c             clipboard API (text, MIME data, PNG images)
@@ -325,7 +326,8 @@ tests/
   test_app_run.c          frame cycle test
   test_gestures.c         gesture recognizer and touch through the core
   test_log.c              log levels, sink, truncation
-  test_events.c           event hook, text events, lock keys, capture, device events (fake backend)
+  test_events.c           event hook, text and IME events, lock keys, capture, device and touch events (fake backend)
+  test_preedit.c          the composition buffer an input method edits
   test_x11_window.c       capture, lock keys, window kinds, hit test, image cursors on a real X server
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach

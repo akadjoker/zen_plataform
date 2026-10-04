@@ -128,6 +128,7 @@ struct UiContext
     int drag_off_x, drag_off_y;
 
     PlatformWindow *win; /* window this frame is bound to (for cursor requests) */
+    int ime_x, ime_y;    /* the caret rectangle last given to the input method */
     UiDialog   dlg;      /* the (single) modal file dialog */
     UiInput    in;
     UiDrawList dl;

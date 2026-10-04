@@ -77,6 +77,10 @@ void backend_present_pixels(BackendWindow *b);
 void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallback cb, void *user);
 int backend_lock_state(void);
 
+/* input method: engage or release it, and where the caret is (window coordinates) */
+void backend_set_text_input(BackendWindow *b, bool on);
+void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h);
+
 /* mouse */
 bool backend_mouse_capture(BackendWindow *b, bool on);
 PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y);

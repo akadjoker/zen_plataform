@@ -120,6 +120,11 @@ int main(void)
     g_dpy = window_native_handle(a, NATIVE_DISPLAY);
     CHECK(g_dpy != NULL && window_native_handle(b, NATIVE_DISPLAY) == g_dpy);
     CHECK(xwin(a) != xwin(b));
+    /* These keys are injected with XSendEvent, which an input method does not take for
+       real typing. A program that reads keys, not text, turns text input off, so no
+       input method stands between it and the keys: do that here. */
+    window_text_input_stop(a);
+    window_text_input_stop(b);
     settle(a, b);
 
     /* A key aimed at B, read off the queue by A's pump first. */
