@@ -292,6 +292,16 @@ static void list_monitors(MonitorList *ml)
     EnumDisplayMonitors(NULL, NULL, collect_monitor, (LPARAM)ml);
 }
 
+bool backend_mouse_global_position(int *x, int *y)
+{
+    POINT p;
+    if (!GetCursorPos(&p))
+        return false;
+    *x = p.x;
+    *y = p.y;
+    return true;
+}
+
 int backend_monitor_count(void)
 {
     MonitorList ml;

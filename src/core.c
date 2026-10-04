@@ -362,6 +362,11 @@ PlatformWindow *window_create(const WindowConfig *cfg)
     if (!w)
         return NULL;
     w->cfg = *cfg;
+    if (w->cfg.monitor == MONITOR_MOUSE)
+    {
+        int under = monitor_from_mouse();
+        w->cfg.monitor = under >= 0 ? under : MONITOR_CURRENT;
+    }
     w->core.owner = w;
     gesture_state_init(&w->core.in.gesture);
     if (cfg->width > 0 && cfg->height > 0)
@@ -369,7 +374,7 @@ PlatformWindow *window_create(const WindowConfig *cfg)
         w->core.in.gesture.width = (float)cfg->width;
         w->core.in.gesture.height = (float)cfg->height;
     }
-    w->b = backend_create(cfg);
+    w->b = backend_create(&w->cfg);
     if (!w->b)
     {
         free(w);
@@ -752,6 +757,25 @@ int monitor_from_point(int x, int y)
             return i;
     }
     return -1;
+}
+
+bool mouse_global_position(int *x, int *y)
+{
+    int px = 0, py = 0;
+    bool known = backend_mouse_global_position(&px, &py);
+    if (x)
+        *x = known ? px : 0;
+    if (y)
+        *y = known ? py : 0;
+    return known;
+}
+
+int monitor_from_mouse(void)
+{
+    int x, y;
+    if (!mouse_global_position(&x, &y))
+        return -1;
+    return monitor_from_point(x, y);
 }
 
 int monitor_from_window(PlatformWindow *w)

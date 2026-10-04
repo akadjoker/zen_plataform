@@ -2459,6 +2459,14 @@ void *backend_clipboard_get(const char *mime, size_t *size)
 /*  monitors (XRandR, one virtual coordinate space)                           */
 /* ========================================================================== */
 
+bool backend_mouse_global_position(int *x, int *y)
+{
+    Window root, child;
+    int win_x, win_y;
+    unsigned int mask;
+    return XQueryPointer(g.dpy, g.root, &root, &child, x, y, &win_x, &win_y, &mask) == True;
+}
+
 int backend_monitor_count(void)
 {
     int n = 0;

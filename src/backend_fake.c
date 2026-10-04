@@ -415,6 +415,13 @@ void *backend_clipboard_get(const char *mime, size_t *size)
     return clipmem_get(mime, size);
 }
 
+bool backend_mouse_global_position(int *x, int *y)
+{
+    (void)x;
+    (void)y;
+    return false;
+}
+
 int backend_monitor_count(void)
 {
     return 1;

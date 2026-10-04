@@ -163,6 +163,34 @@ static void test_failures(void)
         window_destroy(w);
 }
 
+static void test_monitor_mouse(void)
+{
+    int x = -1, y = -1;
+    bool known = mouse_global_position(&x, &y);
+    int under = monitor_from_mouse();
+    CHECK(known == (under >= 0) || !known);
+    if (!known)
+        return;
+    CHECK(under == monitor_from_point(x, y));
+
+    WindowConfig cfg = {.title = "monitor", .width = 200, .height = 120,
+                        .x = WINDOW_POS_CENTERED, .y = WINDOW_POS_CENTERED,
+                        .monitor = MONITOR_MOUSE};
+    PlatformWindow *w = window_create(&cfg);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    /* The window manager places the window a few events after creation. */
+    for (int i = 0; i < 200 && monitor_from_window(w) != under; i++)
+    {
+        window_begin_frame(w);
+        window_swap(w);
+    }
+    if (under >= 0)
+        CHECK(monitor_from_window(w) == under);
+    window_destroy(w);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -176,6 +204,7 @@ int main(void)
     test_debug();
     test_msaa();
     test_failures();
+    test_monitor_mouse();
 
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);

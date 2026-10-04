@@ -101,6 +101,7 @@ void *backend_clipboard_get(const char *mime, size_t *size);
 /* monitors - one shared virtual coordinate space */
 int backend_monitor_count(void);
 bool backend_monitor_info(int index, MonitorInfo *out);
+bool backend_mouse_global_position(int *x, int *y);
 
 /* Loop. Desktop: while(!should_close){ frame(); }. Web: emscripten_set_main_loop. */
 void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void *user);

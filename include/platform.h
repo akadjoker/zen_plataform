@@ -62,6 +62,7 @@ extern "C"
 #define WINDOW_POS_CENTERED (-1)  /* place centered on the chosen monitor */
 #define WINDOW_POS_UNDEFINED (-2) /* let the system choose the position   */
 #define MONITOR_CURRENT (-1)      /* the monitor the window is mostly on  */
+#define MONITOR_MOUSE (-2)        /* the monitor the mouse pointer is on  */
 
     typedef enum
     {
@@ -89,7 +90,7 @@ extern "C"
         const char *title;
         int width, height; /* screen coordinates, not pixels */
         int x, y;          /* WINDOW_POS_CENTERED / _UNDEFINED, or virtual coord */
-        int monitor;       /* index, or MONITOR_CURRENT */
+        int monitor;       /* index, MONITOR_CURRENT or MONITOR_MOUSE */
         WindowMode mode;
         RenderMode render; /* RENDER_GL (default), RENDER_PIXELS or RENDER_VULKAN */
         GLConfig gl;
@@ -675,6 +676,12 @@ extern "C"
     PLATFORM_API bool monitor_get_info(int index, MonitorInfo *out);
     PLATFORM_API int monitor_from_window(PlatformWindow *w);
     PLATFORM_API int monitor_from_point(int x, int y); /* -1 if none */
+    PLATFORM_API int monitor_from_mouse(void);         /* -1 if the pointer is unknown */
+
+    /* The mouse pointer in the monitors' virtual coordinate space. Needs no
+       window. Returns false where the platform has no global pointer (web,
+       android); x and y are then set to 0. */
+    PLATFORM_API bool mouse_global_position(int *x, int *y);
 
     /* ========================================================================== */
     /*  Keyboard                                                                  */
