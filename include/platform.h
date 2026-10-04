@@ -121,7 +121,22 @@ extern "C"
         EVENT_MOUSE_MOVE,
         EVENT_MOUSE_BUTTON,
         EVENT_MOUSE_WHEEL,
-        EVENT_TOUCH
+        EVENT_TOUCH,
+
+        /* The native window is going away or has come back. Only Android raises
+           them (the activity loses its window when it goes to the background and
+           gets a new one on return); desktop windows keep theirs, so these never
+           fire there. SURFACE_LOST: stop drawing and destroy what hangs on the
+           window, the swapchain first and then the VkSurfaceKHR (or the EGL
+           surface for GL). By the time the application reads the event the system
+           may already have released the window, but a Vulkan surface holds its own
+           reference, so destroying it then is still valid. SURFACE_READY: a new
+           window is there: window_native_handle(NATIVE_WINDOW) is valid again, create
+           the surface and swapchain anew, sized by window_get_framebuffer_size. The
+           first window, the one that exists when window_create returns, raises
+           neither. Between the two, window_is_visible is false. */
+        EVENT_WINDOW_SURFACE_LOST,
+        EVENT_WINDOW_SURFACE_READY
     } EventType;
 
     typedef enum
@@ -306,9 +321,9 @@ extern "C"
          Android          EGLDisplay           ANativeWindow*     EGLContext
          Web, fake        NULL                 NULL               NULL
 
-       On Android the window comes and goes with the activity: ask again after
-       each EVENT_WINDOW_FB_RESIZE that follows a resume. NATIVE_GL_CONTEXT is NULL
-       unless the window is RENDER_GL. */
+       On Android the window comes and goes with the activity: it is NULL between
+       EVENT_WINDOW_SURFACE_LOST and EVENT_WINDOW_SURFACE_READY, so ask again after
+       the latter. NATIVE_GL_CONTEXT is NULL unless the window is RENDER_GL. */
     typedef enum
     {
         NATIVE_DISPLAY,
@@ -339,8 +354,10 @@ extern "C"
        Size the swapchain from window_get_framebuffer_size. Supported on X11,
        Windows and Android; not on the web or in the fake backend. The surface must
        be destroyed (vkDestroySurfaceKHR) before the instance and the window. On
-       Android a surface is invalid once the app is backgrounded: create it again
-       when the window returns. */
+       Android the window is lost when the app goes to the background: on
+       EVENT_WINDOW_SURFACE_LOST destroy the swapchain and then the surface, and on
+       EVENT_WINDOW_SURFACE_READY call vulkan_create_surface again and rebuild the
+       swapchain. Until then vulkan_create_surface fails. */
 
     /* True when the Vulkan loader is present and exposes VK_KHR_surface and this
        platform's surface extension. Does not need a window. */

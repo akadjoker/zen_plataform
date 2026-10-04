@@ -310,16 +310,24 @@ static void handle_cmd(struct android_app *app, int32_t cmd)
             fb.data.resize.w = b->width;
             fb.data.resize.h = b->height;
             push_to_core(b, &fb);
+            /* Not for the first window: backend_create has no core yet, so nothing
+               is pushed then (push_to_core drops it). */
+            Event ready = {.type = EVENT_WINDOW_SURFACE_READY};
+            push_to_core(b, &ready);
         }
         break;
     }
     case APP_CMD_TERM_WINDOW:
+    {
         if (b->render == RENDER_GL)
             egl_term_surface(b);
         else
             b->has_surface = false;
         b->visible = false;
+        Event lost = {.type = EVENT_WINDOW_SURFACE_LOST};
+        push_to_core(b, &lost);
         break;
+    }
     case APP_CMD_GAINED_FOCUS:
     case APP_CMD_LOST_FOCUS:
     {
