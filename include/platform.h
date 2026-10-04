@@ -350,7 +350,9 @@ extern "C"
        `target`. One context can then draw to several windows, so every GL object
        stays valid in all of them. Both windows must be RENDER_GL and created
        with the same framebuffer settings. Where there is only one window
-       (web, Android) `target` must be `context`. window_swap(target) presents. */
+       (web, Android) `target` must be `context`. window_swap(target) presents.
+       Present a window before moving the context to another one: what was drawn
+       and not yet presented may be lost when the context leaves the window. */
     PLATFORM_API void window_make_current_on(PlatformWindow *target, PlatformWindow *context);
     PLATFORM_API void window_set_vsync(PlatformWindow *w, bool on);
     /* Address of a GL function for a loader, or NULL if unavailable. */

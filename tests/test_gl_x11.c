@@ -202,10 +202,7 @@ typedef void (*ReadPixels)(int x, int y, int w, int h, unsigned format, unsigned
 /* One context draws to two windows: each keeps what was drawn to it. */
 static void test_one_context_two_windows(void)
 {
-    WindowConfig cfg = window_config_default();
-    cfg.width = 64;
-    cfg.height = 64;
-    cfg.vsync = false;
+    WindowConfig cfg = {.title = "test_gl_x11", .width = 64, .height = 64};
     PlatformWindow *first = window_create(&cfg);
     PlatformWindow *second = window_create(&cfg);
     CHECK(first != NULL);
@@ -241,7 +238,11 @@ static void test_one_context_two_windows(void)
         read_pixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
         CHECK(pixel[0] == 0 && pixel[2] == 255);
 
+        /* What a window held before the context left it is not kept by every
+           driver, so draw again before reading. */
         window_make_current_on(first, first);
+        clear_color(1.0f, 0.0f, 0.0f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
         read_pixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
         CHECK(pixel[0] == 255 && pixel[2] == 0);
 
