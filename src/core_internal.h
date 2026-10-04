@@ -6,6 +6,7 @@
 #define CORE_INTERNAL_H
 
 #include "platform.h"
+#include "gesture_internal.h"
 
 typedef struct BackendWindow BackendWindow;
 
@@ -48,6 +49,10 @@ typedef struct
         float x, y, pressure;
     } touch[MAX_TOUCH_POINTS];
     int touch_count;
+
+    GestureState gesture;
+    bool gesture_mouse; /* feed gestures from the left mouse button too */
+    bool mouse_gesture_active;
 
     bool close_request; /* set by EVENT_WINDOW_CLOSE, drained into should_close */
     int exit_key;

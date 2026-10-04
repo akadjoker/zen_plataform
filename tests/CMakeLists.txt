@@ -3,6 +3,7 @@
 function(add_fake_test name)
     add_executable(${name} ${name}.c
         ${CMAKE_SOURCE_DIR}/src/core.c
+        ${CMAKE_SOURCE_DIR}/src/gesture.c
         ${CMAKE_SOURCE_DIR}/src/error.c
         ${CMAKE_SOURCE_DIR}/src/gamepad.c
         ${CMAKE_SOURCE_DIR}/src/gamepad_stub.c
@@ -17,6 +18,7 @@ endfunction()
 
 add_fake_test(test_input_logic)
 add_fake_test(test_app_run)
+add_fake_test(test_gestures)
 
 # Portable modules with no window backend: compile just their sources (in ARGN).
 function(add_unit_test name)
@@ -76,6 +78,7 @@ function(add_fake_ext_test name)
     endforeach()
     add_executable(${name} ${name}.c
         ${CMAKE_SOURCE_DIR}/src/core.c
+        ${CMAKE_SOURCE_DIR}/src/gesture.c
         ${CMAKE_SOURCE_DIR}/src/backend_fake.c
         ${srcs})
     target_include_directories(${name} PRIVATE

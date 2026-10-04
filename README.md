@@ -104,6 +104,29 @@ mouse_set_cursor(w, CURSOR_RESIZE_NWSE);
 time_sleep(16);                         // milliseconds
 ```
 
+### Touch and gestures
+
+```c
+for (int i = 0; i < touch_count(w); i++)
+{
+    float x, y;  touch_position(w, i, &x, &y);   // touch_id(w, i) is stable down..up
+}
+
+if (gesture_is_detected(w, GESTURE_TAP)) { /* ... */ }
+if (gesture_is_detected(w, GESTURE_SWIPE_LEFT)) { /* one frame only */ }
+if (gesture_detected(w) == GESTURE_PINCH_OUT)
+{
+    float px, py;  gesture_pinch_vector(w, &px, &py);   // pixels, first to second finger
+}
+gesture_set_enabled(w, GESTURE_TAP | GESTURE_DRAG);      // report only these
+gesture_set_mouse_emulation(w, true);                    // left button acts as one finger, to test on a desktop
+```
+
+Gesture detection follows raylib's rgestures: tap, double tap, hold, drag, four
+swipes and pinch in/out. Touch points come from Android, the web and the fake
+backend. The X11 and Win32 backends do not report touch yet, so on those use
+`gesture_set_mouse_emulation`.
+
 ### Gamepads
 
 ```c
@@ -218,6 +241,7 @@ src/
   backend_web.c           Emscripten backend
   backend_android.c       Android NativeActivity backend
   backend_fake.c          headless backend for tests
+  gesture.c               touch gesture recognizer (after raylib's rgestures)
   draw2d.c                software rasterizer over Framebuffer
   image.c                 BMP load/save
   os.c                    filesystem and path utilities
@@ -225,6 +249,7 @@ src/
 tests/
   test_input_logic.c      input edge/state tests (backend_fake)
   test_app_run.c          frame cycle test
+  test_gestures.c         gesture recognizer and touch through the core
   test_draw2d.c           rasterizer tests (nearest + bilinear blit)
   test_fs.c               filesystem round-trip tests
   test_image.c            BMP read/write round-trip

@@ -404,6 +404,41 @@ extern "C"
     PLATFORM_API int touch_id(PlatformWindow *w, int index); /* stable across down..up */
 
     /* ========================================================================== */
+    /*  Gestures (built on the touch points)                                      */
+    /* ========================================================================== */
+
+    /* Detection follows raylib's rgestures: window_begin_frame updates it, and
+       gesture_detected returns the gesture of the moment, or GESTURE_NONE. TAP and
+       DOUBLETAP turn into HOLD on the next frame; a SWIPE lasts a single frame. */
+    typedef enum
+    {
+        GESTURE_NONE = 0,
+        GESTURE_TAP = 1,
+        GESTURE_DOUBLETAP = 2,
+        GESTURE_HOLD = 4,
+        GESTURE_DRAG = 8,
+        GESTURE_SWIPE_RIGHT = 16,
+        GESTURE_SWIPE_LEFT = 32,
+        GESTURE_SWIPE_UP = 64,
+        GESTURE_SWIPE_DOWN = 128,
+        GESTURE_PINCH_IN = 256,
+        GESTURE_PINCH_OUT = 512,
+        GESTURE_ALL = 1023
+    } Gesture;
+
+    PLATFORM_API void gesture_set_enabled(PlatformWindow *w, unsigned flags); /* GESTURE_* mask, default all */
+    PLATFORM_API unsigned gesture_detected(PlatformWindow *w);
+    PLATFORM_API bool gesture_is_detected(PlatformWindow *w, unsigned gesture);
+    PLATFORM_API float gesture_hold_duration(PlatformWindow *w); /* seconds, while HOLD */
+    PLATFORM_API void gesture_drag_vector(PlatformWindow *w, float *x, float *y); /* pixels, from the touch-down point */
+    PLATFORM_API float gesture_drag_angle(PlatformWindow *w);                      /* degrees, set on a swipe; 0 = right, counterclockwise */
+    PLATFORM_API void gesture_pinch_vector(PlatformWindow *w, float *x, float *y); /* pixels, first to second finger */
+    PLATFORM_API float gesture_pinch_angle(PlatformWindow *w);                     /* degrees, like the drag angle */
+    /* Treat the left mouse button as a single finger, to try gestures on a desktop.
+       Off by default. */
+    PLATFORM_API void gesture_set_mouse_emulation(PlatformWindow *w, bool on);
+
+    /* ========================================================================== */
     /*  Gamepads                                                                  */
     /* ========================================================================== */
 

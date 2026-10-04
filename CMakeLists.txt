@@ -13,7 +13,7 @@ option(PLATFORM_USE_FAKE    "Force the fake backend" OFF)
 option(PLATFORM_SANITIZE    "Build with ASan + UBSan (debug)" OFF)
 # BUILD_SHARED_LIBS (CMake builtin): ON -> .so/.dll, OFF -> .a/.lib
 
-set(CORE_SRC src/core.c src/error.c src/gamepad.c src/io.c src/os.c src/draw2d.c src/image.c src/glad.c)
+set(CORE_SRC src/core.c src/gesture.c src/error.c src/gamepad.c src/io.c src/os.c src/draw2d.c src/image.c src/glad.c)
 if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT EMSCRIPTEN AND NOT PLATFORM_USE_FAKE)
     list(APPEND CORE_SRC src/gamepad_evdev.c)
 elseif(WIN32 AND NOT PLATFORM_USE_FAKE)

@@ -6,6 +6,7 @@
 #include "core_internal.h"
 #include "error_internal.h"
 #include "gamepad_internal.h"
+#include "gesture_internal.h"
 #include "backend.h"
 
 #include <errno.h>
@@ -101,6 +102,39 @@ static void touch_apply(InputState *s, int id, float x, float y, float pressure,
     }
 }
 
+
+/* ---- gestures: fed from touch (and optionally the left mouse button) ---- */
+
+static void gesture_feed_touch(Core *core, TouchPhase phase, int id, float x, float y)
+{
+    InputState *s = &core->in;
+    GVec2 pos[MAX_TOUCH_POINTS];
+    int n = 0;
+    bool known = false;
+    for (int i = 0; i < s->touch_count; i++)
+    {
+        bool me = s->touch[i].id == id;
+        known |= me;
+        pos[n++] = me ? (GVec2){x, y} : (GVec2){s->touch[i].x, s->touch[i].y};
+    }
+    /* A new finger is not in the slots yet; a lifted one still is. */
+    if (!known && phase != TOUCH_UP && phase != TOUCH_CANCEL && n < MAX_TOUCH_POINTS)
+        pos[n++] = (GVec2){x, y};
+
+    GestureAction a = phase == TOUCH_DOWN   ? GESTURE_ACTION_DOWN
+                      : phase == TOUCH_MOVE ? GESTURE_ACTION_MOVE
+                      : phase == TOUCH_UP   ? GESTURE_ACTION_UP
+                                            : GESTURE_ACTION_CANCEL;
+    /* gesture size comes from the window through core_set_gesture_size */
+    gesture_feed(&s->gesture, a, n, pos, s->gesture.width, s->gesture.height, time_seconds());
+}
+
+static void gesture_feed_mouse(InputState *s, GestureAction a, int x, int y)
+{
+    GVec2 p = {(float)x, (float)y};
+    gesture_feed(&s->gesture, a, 1, &p, s->gesture.width, s->gesture.height, time_seconds());
+}
+
 /* ========================================================================== */
 /*  Backend -> core                                                           */
 /* ========================================================================== */
@@ -136,12 +170,20 @@ void core_push_event(Core *core, const Event *ev)
     case EVENT_MOUSE_MOVE:
         s->mouse_x = ev->data.mouse.x;
         s->mouse_y = ev->data.mouse.y;
+        if (s->gesture_mouse && s->mouse_gesture_active)
+            gesture_feed_mouse(s, GESTURE_ACTION_MOVE, s->mouse_x, s->mouse_y);
         break;
     case EVENT_MOUSE_BUTTON:
     {
         int b = ev->data.mouse.button;
         if (b >= 0 && b < MOUSE_BUTTON_MAX)
             s->mouse_down[b] = ev->data.mouse.down;
+        if (s->gesture_mouse && b == MOUSE_LEFT && s->touch_count == 0)
+        {
+            s->mouse_gesture_active = ev->data.mouse.down;
+            gesture_feed_mouse(s, ev->data.mouse.down ? GESTURE_ACTION_DOWN : GESTURE_ACTION_UP,
+                               s->mouse_x, s->mouse_y);
+        }
         break;
     }
     case EVENT_MOUSE_WHEEL:
@@ -149,8 +191,17 @@ void core_push_event(Core *core, const Event *ev)
         s->wheel_y += ev->data.wheel.y;
         break;
     case EVENT_TOUCH:
+        gesture_feed_touch(core, ev->data.touch.phase, ev->data.touch.id, ev->data.touch.x,
+                           ev->data.touch.y);
         touch_apply(s, ev->data.touch.id, ev->data.touch.x, ev->data.touch.y,
                     ev->data.touch.pressure, ev->data.touch.phase);
+        break;
+    case EVENT_WINDOW_RESIZE:
+        if (ev->data.resize.w > 0 && ev->data.resize.h > 0)
+        {
+            s->gesture.width = (float)ev->data.resize.w;
+            s->gesture.height = (float)ev->data.resize.h;
+        }
         break;
     case EVENT_WINDOW_FOCUS:
         if (!ev->data.focus.gained)
@@ -221,6 +272,12 @@ PlatformWindow *window_create(const WindowConfig *cfg)
     if (!w)
         return NULL;
     w->cfg = *cfg;
+    gesture_state_init(&w->core.in.gesture);
+    if (cfg->width > 0 && cfg->height > 0)
+    {
+        w->core.in.gesture.width = (float)cfg->width;
+        w->core.in.gesture.height = (float)cfg->height;
+    }
     w->b = backend_create(cfg);
     if (!w->b)
     {
@@ -269,6 +326,9 @@ void window_begin_frame(PlatformWindow *w)
     /* keycode_q and char_q are not cleared here: the consumer drains them */
 
     gamepad_poll();
+    /* Before the new events: last frame's TAP turns into HOLD and a SWIPE ends, so
+       a gesture born in this frame's events is still visible after this call. */
+    gesture_update(&s->gesture, time_seconds());
     backend_pump_events(w->b, &w->core);
 
     if (s->close_request)
@@ -642,6 +702,52 @@ void touch_position(PlatformWindow *w, int index, float *x, float *y)
     if (y)
         *y = w->core.in.touch[index].y;
 }
+/* ---- gestures ---- */
+
+void gesture_set_enabled(PlatformWindow *w, unsigned flags)
+{
+    w->core.in.gesture.enabled = flags;
+}
+unsigned gesture_detected(PlatformWindow *w)
+{
+    return gesture_state_detected(&w->core.in.gesture);
+}
+bool gesture_is_detected(PlatformWindow *w, unsigned gesture)
+{
+    return gesture != GESTURE_NONE && gesture_detected(w) == gesture;
+}
+float gesture_hold_duration(PlatformWindow *w)
+{
+    return gesture_state_hold_duration(&w->core.in.gesture, time_seconds());
+}
+void gesture_drag_vector(PlatformWindow *w, float *x, float *y)
+{
+    if (x)
+        *x = w->core.in.gesture.drag_vector.x;
+    if (y)
+        *y = w->core.in.gesture.drag_vector.y;
+}
+float gesture_drag_angle(PlatformWindow *w)
+{
+    return w->core.in.gesture.drag_angle;
+}
+void gesture_pinch_vector(PlatformWindow *w, float *x, float *y)
+{
+    if (x)
+        *x = w->core.in.gesture.pinch_vector.x;
+    if (y)
+        *y = w->core.in.gesture.pinch_vector.y;
+}
+float gesture_pinch_angle(PlatformWindow *w)
+{
+    return w->core.in.gesture.pinch_angle;
+}
+void gesture_set_mouse_emulation(PlatformWindow *w, bool on)
+{
+    w->core.in.gesture_mouse = on;
+    w->core.in.mouse_gesture_active = false;
+}
+
 int touch_id(PlatformWindow *w, int index)
 {
     return (index >= 0 && index < w->core.in.touch_count) ? w->core.in.touch[index].id : -1;
