@@ -99,6 +99,11 @@ static unsigned __stdcall trampoline(void *p)
 PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name)
 {
     (void)name;
+    if (!fn)
+    {
+        error_set("thread_create needs a function");
+        return NULL;
+    }
     PlatformThread *t = calloc(1, sizeof *t);
     if (!t)
         return NULL;
