@@ -104,6 +104,19 @@ mouse_set_cursor(w, CURSOR_RESIZE_NWSE);
 time_sleep(16);                         // milliseconds
 ```
 
+### Event hook, live resize, capture, lock keys
+
+```c
+window_set_event_hook(w, my_hook, ui);       // sees every event as it is queued (SDL_AddEventWatch)
+window_set_live_callback(w, redraw, app);    // Windows: called while the OS drags/resizes the window
+mouse_capture(w, true);                      // keep getting the mouse outside the window, off when the drag ends
+if (key_mods(w) & KEYMOD_CAPS_LOCK) { /* ... */ }   // also KEYMOD_NUM_LOCK
+```
+
+The hook runs before the event reaches the polled state, even while Windows runs its
+own loop for a resize, so a UI layer (Dear ImGui) keeps being fed. Text also arrives
+as `EVENT_CHAR` events now, next to `char_get_pressed`.
+
 ### Touch and gestures
 
 ```c
@@ -348,6 +361,8 @@ tests/
   test_app_run.c          frame cycle test
   test_gestures.c         gesture recognizer and touch through the core
   test_log.c              log levels, sink, truncation
+  test_events.c           event hook, text events, lock keys, capture (fake backend)
+  test_x11_window.c       pointer capture and lock state on a real X server
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach
   test_clipboard.c        clipboard API and PNG round trip (fake backend)

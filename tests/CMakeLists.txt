@@ -21,6 +21,7 @@ add_fake_test(test_input_logic)
 add_fake_test(test_app_run)
 add_fake_test(test_gestures)
 add_fake_test(test_log)
+add_fake_test(test_events)
 
 # Portable modules with no window backend: compile just their sources (in ARGN).
 function(add_unit_test name)
@@ -83,6 +84,11 @@ if(PLATFORM_BACKEND_X11)
     target_link_libraries(test_multiwindow_x11 PRIVATE platform)
     add_test(NAME test_multiwindow_x11 COMMAND test_multiwindow_x11)
     set_tests_properties(test_multiwindow_x11 PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(test_x11_window test_x11_window.c)
+    target_link_libraries(test_x11_window PRIVATE platform)
+    add_test(NAME test_x11_window COMMAND test_x11_window)
+    set_tests_properties(test_x11_window PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test_input_x11 test_input_x11.c)
     target_link_libraries(test_input_x11 PRIVATE platform)

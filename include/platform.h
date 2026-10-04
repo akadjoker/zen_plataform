@@ -277,6 +277,24 @@ extern "C"
        frame. */
     PLATFORM_API bool poll_event(PlatformWindow *w, Event *out);
 
+    /* A hook sees every event of a window the moment the platform queues it, before
+       it reaches the polled state or poll_event. It is the counterpart of
+       SDL_AddEventWatch: on Windows, while the user drags a window edge or title bar
+       the OS runs its own loop and the application's loop does not, yet the hook
+       keeps being called, so a UI layer can still be fed (Dear ImGui's platform
+       backend does this). It runs on the thread that drives the window, inside the
+       OS callback. Keep it short; do not call window_begin_frame or poll_event from
+       it. Pass NULL to remove it. */
+    typedef void (*EventHook)(PlatformWindow *w, const Event *e, void *user);
+    PLATFORM_API void window_set_event_hook(PlatformWindow *w, EventHook hook, void *user);
+
+    /* While the OS runs a modal loop for the window (Windows: dragging or resizing
+       it, a system menu), call cb about every 16 ms and on each size change, so the
+       application can redraw instead of freezing. Only draw from it (window_swap or
+       window_present_pixels included); do not call window_begin_frame. On the other
+       platforms nothing blocks the application's loop, so it is never called. */
+    PLATFORM_API void window_set_live_callback(PlatformWindow *w, FrameCallback cb, void *user);
+
     PLATFORM_API void window_set_user_ptr(PlatformWindow *w, void *ptr);
     PLATFORM_API void *window_get_user_ptr(PlatformWindow *w);
 
@@ -553,7 +571,8 @@ extern "C"
 
     /* Next key from this frame's press queue, in order. 0 when empty. */
     PLATFORM_API int key_get_pressed(PlatformWindow *w);
-    /* KEYMOD_* mask of the modifier keys held now. */
+    /* KEYMOD_* mask of the modifier keys held now, plus the Caps Lock and Num Lock
+       states (on the web, where the browser does not say, the locks read as off). */
     PLATFORM_API int key_mods(PlatformWindow *w);
     /* Next codepoint from the text-input queue. 0 when empty. Independent of the
        key queue, so it carries layout and composed input correctly. */
@@ -580,6 +599,10 @@ extern "C"
     PLATFORM_API void mouse_set_position(PlatformWindow *w, int x, int y);
     PLATFORM_API void mouse_set_cursor(PlatformWindow *w, int cursor); /* CURSOR_* shape */
     PLATFORM_API void mouse_set_mode(PlatformWindow *w, int mode);     /* MOUSE_MODE_* */
+    /* Keep receiving mouse motion and buttons while the pointer is outside the window,
+       as when dragging out of it (SDL_CaptureMouse). Turn it off when the drag ends.
+       Returns whether the capture is in effect; another program may hold a grab. */
+    PLATFORM_API bool mouse_capture(PlatformWindow *w, bool on);
 
     /* ========================================================================== */
     /*  Touch (multitouch)                                                        */
@@ -980,7 +1003,9 @@ extern "C"
         KEYMOD_SHIFT = 1,
         KEYMOD_CTRL = 2,
         KEYMOD_ALT = 4,
-        KEYMOD_SUPER = 8
+        KEYMOD_SUPER = 8,
+        KEYMOD_CAPS_LOCK = 16, /* a lock that is on, not a key held down */
+        KEYMOD_NUM_LOCK = 32
     };
 
     enum

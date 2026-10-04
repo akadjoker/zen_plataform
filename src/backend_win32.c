@@ -60,6 +60,7 @@
 #define MAX_MONITORS 16
 #define MONITOR_NAME_CAP 64
 #define PENDING_MAX 256
+#define LIVE_TIMER_ID 1 /* the timer that keeps the live callback going in a modal loop */
 
 typedef BOOL(WINAPI *PFN_wglChoosePixelFormatARB)(HDC, const int *, const FLOAT *, UINT, int *, UINT *);
 typedef HGLRC(WINAPI *PFN_wglCreateContextAttribsARB)(HDC, HGLRC, const int *);
@@ -109,6 +110,11 @@ struct BackendWindow
 
     bool focused, hovered, tracking_leave, minimized, maximized;
     int buttons_down;
+    bool captured;                /* mouse_capture(true) is in effect */
+    bool in_modal, in_live;       /* inside the OS's drag/menu loop; inside the live callback */
+    PlatformWindow *live_w;
+    FrameCallback live_cb;
+    void *live_user;
     int cursor_mode;
     int cursor_shape;
     HCURSOR cursor;
@@ -545,6 +551,41 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     SetCursor(mode == MOUSE_MODE_NORMAL ? b->cursor : NULL);
 }
 
+void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallback cb, void *user)
+{
+    b->live_w = w;
+    b->live_cb = cb;
+    b->live_user = user;
+    if (b->in_modal) /* set from inside a modal loop already running */
+    {
+        if (cb)
+            SetTimer(b->hwnd, LIVE_TIMER_ID, 16, NULL);
+        else
+            KillTimer(b->hwnd, LIVE_TIMER_ID);
+    }
+}
+
+int backend_lock_state(void)
+{
+    return ((GetKeyState(VK_CAPITAL) & 1) ? KEYMOD_CAPS_LOCK : 0) | ((GetKeyState(VK_NUMLOCK) & 1) ? KEYMOD_NUM_LOCK : 0);
+}
+
+bool backend_mouse_capture(BackendWindow *b, bool on)
+{
+    if (on)
+    {
+        SetCapture(b->hwnd);
+        b->captured = GetCapture() == b->hwnd;
+    }
+    else
+    {
+        b->captured = false;
+        if (b->buttons_down == 0 && GetCapture() == b->hwnd)
+            ReleaseCapture();
+    }
+    return b->captured;
+}
+
 void backend_set_mouse_pos(BackendWindow *b, int x, int y)
 {
     POINT p = {x, y};
@@ -565,7 +606,7 @@ static void handle_button(BackendWindow *b, int button, bool down, LPARAM lparam
         if (b->buttons_down++ == 0)
             SetCapture(b->hwnd);
     }
-    else if (b->buttons_down > 0 && --b->buttons_down == 0)
+    else if (b->buttons_down > 0 && --b->buttons_down == 0 && !b->captured)
     {
         ReleaseCapture();
     }
@@ -719,6 +760,18 @@ static void handle_char(BackendWindow *b, WPARAM wparam)
 
 static void paint_pixels(BackendWindow *b);
 
+/* The OS runs its own loop while a window is dragged or resized, so the
+   application's does not; give it a chance to draw. */
+static void live_tick(BackendWindow *b)
+{
+    if (b->live_cb && b->in_modal && !b->in_live)
+    {
+        b->in_live = true;
+        b->live_cb(b->live_w, b->live_user);
+        b->in_live = false;
+    }
+}
+
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     BackendWindow *b = (BackendWindow *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -741,7 +794,30 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
     }
     case WM_SIZE:
         handle_size(b, wparam, lparam);
+        live_tick(b);
         return 0;
+    case WM_ENTERSIZEMOVE:
+    case WM_ENTERMENULOOP:
+        b->in_modal = true;
+        if (b->live_cb)
+            SetTimer(hwnd, LIVE_TIMER_ID, 16, NULL);
+        break;
+    case WM_EXITSIZEMOVE:
+    case WM_EXITMENULOOP:
+        b->in_modal = false;
+        KillTimer(hwnd, LIVE_TIMER_ID);
+        break;
+    case WM_TIMER:
+        if (wparam == LIVE_TIMER_ID)
+        {
+            live_tick(b);
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        if ((HWND)lparam != hwnd)
+            b->captured = false; /* another window or the system took it */
+        break;
     case WM_MOVE:
     {
         Event e = {.type = EVENT_WINDOW_MOVE};

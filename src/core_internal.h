@@ -61,6 +61,9 @@ typedef struct
 typedef struct Core
 {
     InputState in;
+    PlatformWindow *owner; /* the window this core belongs to, for the hook */
+    EventHook hook;
+    void *hook_user;
 } Core;
 
 struct PlatformWindow

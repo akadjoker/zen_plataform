@@ -16,6 +16,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#include <X11/XKBlib.h>
 #include <X11/keysym.h>
 #include <X11/cursorfont.h>
 #include <X11/extensions/Xrandr.h>
@@ -127,7 +128,8 @@ struct BackendWindow
     int cursor_mode; /* MOUSE_MODE_* */
     Cursor active_cursor;
     Cursor hidden_cursor;
-    bool grabbed;
+    bool grabbed;  /* MOUSE_MODE_CAPTURED holds the pointer */
+    bool captured; /* mouse_capture(true) holds it */
 
     RenderMode render;
     GC gc;         /* pixel mode: blits the XImage to the window */
@@ -712,7 +714,7 @@ void backend_destroy(BackendWindow *b)
 {
     if (!b)
         return;
-    if (b->grabbed)
+    if (b->grabbed || b->captured)
         XUngrabPointer(g.dpy, CurrentTime);
     if (b->xic)
         XDestroyIC(b->xic);
@@ -1584,7 +1586,8 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     {
         if (b->grabbed)
         {
-            XUngrabPointer(g.dpy, CurrentTime);
+            if (!b->captured)
+                XUngrabPointer(g.dpy, CurrentTime);
             b->grabbed = false;
         }
         XDefineCursor(g.dpy, b->win, b->active_cursor ? b->active_cursor : None);
@@ -1601,6 +1604,41 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
         }
     }
     XFlush(g.dpy);
+}
+
+void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallback cb, void *user)
+{
+    (void)b, (void)w, (void)cb, (void)user; /* nothing blocks the loop on X11 */
+}
+
+int backend_lock_state(void)
+{
+    XkbStateRec st;
+    if (XkbGetState(g.dpy, XkbUseCoreKbd, &st) != Success)
+        return 0;
+    return ((st.locked_mods & LockMask) ? KEYMOD_CAPS_LOCK : 0) | ((st.locked_mods & Mod2Mask) ? KEYMOD_NUM_LOCK : 0);
+}
+
+bool backend_mouse_capture(BackendWindow *b, bool on)
+{
+    if (on)
+    {
+        if (b->grabbed || b->captured)
+        {
+            b->captured = true;
+            return true;
+        }
+        int r = XGrabPointer(g.dpy, b->win, True, ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                             GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+        b->captured = r == GrabSuccess;
+        XFlush(g.dpy);
+        return b->captured;
+    }
+    if (b->captured && !b->grabbed)
+        XUngrabPointer(g.dpy, CurrentTime);
+    b->captured = false;
+    XFlush(g.dpy);
+    return false;
 }
 
 /* ========================================================================== */

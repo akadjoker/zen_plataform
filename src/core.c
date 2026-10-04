@@ -136,7 +136,11 @@ static void gesture_feed_touch(Core *core, TouchPhase phase, int id, float x, fl
 
 void core_push_char(Core *core, uint32_t codepoint)
 {
-    char_push(&core->in, codepoint);
+    /* Text is both an event, for poll_event, and an entry in the char queue; the
+       EVENT_CHAR case of core_push_event does the queue. */
+    Event e = {.type = EVENT_CHAR};
+    e.data.codepoint = codepoint;
+    core_push_event(core, &e);
 }
 
 
@@ -157,6 +161,9 @@ static void mouse_touch_emit(Core *core, TouchPhase phase)
 void core_push_event(Core *core, const Event *ev)
 {
     InputState *s = &core->in;
+
+    if (core->hook)
+        core->hook(core->owner, ev, core->hook_user);
 
     if (s->fe_count < FRAME_EVENT_MAX)
         s->frame_events[s->fe_count++] = *ev;
@@ -289,6 +296,7 @@ PlatformWindow *window_create(const WindowConfig *cfg)
     if (!w)
         return NULL;
     w->cfg = *cfg;
+    w->core.owner = w;
     gesture_state_init(&w->core.in.gesture);
     if (cfg->width > 0 && cfg->height > 0)
     {
@@ -381,6 +389,22 @@ void window_make_current(PlatformWindow *w)
 {
     backend_make_current(w->b);
 }
+void window_set_event_hook(PlatformWindow *w, EventHook hook, void *user)
+{
+    w->core.hook = hook;
+    w->core.hook_user = user;
+}
+
+void window_set_live_callback(PlatformWindow *w, FrameCallback cb, void *user)
+{
+    backend_set_live_callback(w->b, w, cb, user);
+}
+
+bool mouse_capture(PlatformWindow *w, bool on)
+{
+    return backend_mouse_capture(w->b, on);
+}
+
 void *window_native_handle(PlatformWindow *w, NativeHandleType type)
 {
     return w ? backend_native_handle(w->b, type) : NULL;
@@ -587,7 +611,7 @@ int key_mods(PlatformWindow *w)
         mods |= KEYMOD_ALT;
     if (k[KEY_LEFT_SUPER] || k[KEY_RIGHT_SUPER])
         mods |= KEYMOD_SUPER;
-    return mods;
+    return mods | backend_lock_state();
 }
 
 bool key_down(PlatformWindow *w, int key)

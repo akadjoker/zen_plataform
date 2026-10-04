@@ -30,6 +30,7 @@ struct BackendWindow
     float content_scale;
     WindowMode mode;
     int cursor, mouse_mode;
+    bool captured;
     bool vsync;
     bool flag[5];   /* indexed by WIN_FLAG_* */
     int swap_count; /* lets a test confirm the begin_frame -> frame -> swap cycle */
@@ -281,6 +282,27 @@ void backend_set_cursor(BackendWindow *b, int cursor)
 {
     b->cursor = cursor;
 }
+void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallback cb, void *user)
+{
+    (void)b, (void)w, (void)cb, (void)user;
+}
+
+static int g_fake_locks;
+void fake_set_lock_state(int mask)
+{
+    g_fake_locks = mask;
+}
+int backend_lock_state(void)
+{
+    return g_fake_locks;
+}
+
+bool backend_mouse_capture(BackendWindow *b, bool on)
+{
+    b->captured = on;
+    return on;
+}
+
 void backend_set_mouse_mode(BackendWindow *b, int mode)
 {
     b->mouse_mode = mode;

@@ -71,7 +71,12 @@ bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void 
 bool backend_lock_pixels(BackendWindow *b, Framebuffer *out);
 void backend_present_pixels(BackendWindow *b);
 
+/* modal-loop redraw callback (Windows) and the Caps/Num Lock state (KEYMOD_*_LOCK) */
+void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallback cb, void *user);
+int backend_lock_state(void);
+
 /* mouse */
+bool backend_mouse_capture(BackendWindow *b, bool on);
 void backend_set_mouse_pos(BackendWindow *b, int x, int y);
 void backend_set_cursor(BackendWindow *b, int cursor);   /* CURSOR_* */
 void backend_set_mouse_mode(BackendWindow *b, int mode); /* MOUSE_MODE_* */

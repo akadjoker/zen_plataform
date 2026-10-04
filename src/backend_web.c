@@ -769,6 +769,22 @@ void backend_set_cursor(BackendWindow *b, int cursor)
     EM_ASM({ if (Module['canvas']) Module['canvas'].style.cursor = UTF8ToString($0); }, css);
 }
 
+void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallback cb, void *user)
+{
+    (void)b, (void)w, (void)cb, (void)user;
+}
+
+int backend_lock_state(void)
+{
+    return 0;
+}
+
+bool backend_mouse_capture(BackendWindow *b, bool on)
+{
+    (void)b, (void)on;
+    return false;
+}
+
 void backend_set_mouse_mode(BackendWindow *b, int mode)
 {
     b->cursor_mode = mode;
