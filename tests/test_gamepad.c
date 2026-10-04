@@ -356,6 +356,203 @@ static void test_hotplug_events(void)
     gamepad_shutdown();
 }
 
+
+/* ---- joysticks ---- */
+
+static void test_joystick_slots(void)
+{
+    CHECK(!joystick_connected(0) && joystick_name(0) == NULL);
+    CHECK(joystick_axis_count(0) == 0 && joystick_button_count(0) == 0 && joystick_hat_count(0) == 0);
+
+    int a = joystick_internal_connect("Stick", 4, 12, 1);
+    int b = joystick_internal_connect(NULL, 99, 999, 99); /* clamped to the limits */
+    CHECK(a == 0 && b == 1);
+    CHECK(strcmp(joystick_name(a), "Stick") == 0 && strcmp(joystick_name(b), "Joystick") == 0);
+    CHECK(joystick_axis_count(a) == 4 && joystick_button_count(a) == 12 && joystick_hat_count(a) == 1);
+    CHECK(joystick_axis_count(b) == JOYSTICK_MAX_AXES);
+    CHECK(joystick_button_count(b) == JOYSTICK_MAX_BUTTONS);
+    CHECK(joystick_hat_count(b) == JOYSTICK_MAX_HATS);
+    CHECK(joystick_gamepad_index(a) == -1);
+
+    joystick_internal_set_axis(a, 2, -0.25f);
+    joystick_internal_set_button(a, 11, true);
+    joystick_internal_set_hat(a, 0, JOYHAT_UP | JOYHAT_RIGHT);
+    CHECK(NEAR(joystick_axis(a, 2), -0.25f) && joystick_button(a, 11) && joystick_hat(a, 0) == (JOYHAT_UP | JOYHAT_RIGHT));
+    /* outside what the device has */
+    joystick_internal_set_axis(a, 4, 1.0f);
+    joystick_internal_set_button(a, 12, true);
+    CHECK(joystick_axis(a, 4) == 0.0f && !joystick_button(a, 12) && joystick_hat(a, 1) == 0);
+    CHECK(joystick_axis(a, -1) == 0.0f && !joystick_button(a, -1) && joystick_hat(a, -1) == 0);
+
+    joystick_internal_link_gamepad(a, 2);
+    CHECK(joystick_gamepad_index(a) == 2);
+    joystick_internal_link_gamepad(a, 99);
+    CHECK(joystick_gamepad_index(a) == -1);
+
+    unsigned gen = joystick_internal_generation(a);
+    joystick_internal_disconnect(a);
+    CHECK(!joystick_connected(a) && joystick_name(a) == NULL && !joystick_button(a, 11));
+    CHECK(joystick_internal_connect("Again", 1, 1, 0) == a);
+    CHECK(joystick_internal_generation(a) == gen + 1); /* a different device in the same slot */
+    CHECK(joystick_axis(a, 0) == 0.0f);
+
+    CHECK(!joystick_connected(-1) && !joystick_connected(JOYSTICK_MAX));
+    for (int i = 0; i < JOYSTICK_MAX + 2; i++)
+        joystick_internal_connect("x", 1, 1, 0);
+    CHECK(joystick_internal_connect("full", 1, 1, 0) == -1);
+    gamepad_shutdown();
+    CHECK(!joystick_connected(0) && !joystick_connected(1));
+}
+
+static void setup_joy(EvdevJoy *j, int fd)
+{
+    memset(j, 0, sizeof *j);
+    j->used = true;
+    j->fd = fd;
+    j->axes = 2;
+    j->axis_code[0] = ABS_X;
+    j->axis_min[0] = 0;
+    j->axis_max[0] = 1023;
+    j->axis_code[1] = ABS_THROTTLE;
+    j->axis_min[1] = -100;
+    j->axis_max[1] = 100;
+    j->buttons = 3;
+    j->button_code[0] = BTN_TRIGGER;
+    j->button_code[1] = BTN_THUMB;
+    j->button_code[2] = BTN_TRIGGER_HAPPY1;
+    j->hats = 2;
+    j->slot = joystick_internal_connect("Test Stick", j->axes, j->buttons, j->hats);
+}
+
+static void jfeed(EvdevJoy *j, int type, int code, int value)
+{
+    struct input_event e = ev(type, code, value);
+    joy_event(j, &e);
+}
+
+static void test_joystick_events(void)
+{
+    EvdevJoy j;
+    setup_joy(&j, -1);
+    CHECK(j.slot == 0);
+
+    jfeed(&j, EV_ABS, ABS_X, 0);
+    CHECK(NEAR(joystick_axis(j.slot, 0), -1.0f));
+    jfeed(&j, EV_ABS, ABS_X, 1023);
+    CHECK(NEAR(joystick_axis(j.slot, 0), 1.0f));
+    jfeed(&j, EV_ABS, ABS_X, 512);
+    CHECK(fabsf(joystick_axis(j.slot, 0)) < 0.01f);
+    jfeed(&j, EV_ABS, ABS_THROTTLE, -100);
+    CHECK(NEAR(joystick_axis(j.slot, 1), -1.0f));
+    jfeed(&j, EV_ABS, ABS_Y, 5); /* an axis the device did not announce */
+    CHECK(joystick_axis(j.slot, 0) < 0.5f);
+
+    jfeed(&j, EV_KEY, BTN_THUMB, 1);
+    CHECK(!joystick_button(j.slot, 0) && joystick_button(j.slot, 1) && !joystick_button(j.slot, 2));
+    jfeed(&j, EV_KEY, BTN_TRIGGER_HAPPY1, 1);
+    CHECK(joystick_button(j.slot, 2));
+    jfeed(&j, EV_KEY, BTN_THUMB, 0);
+    CHECK(!joystick_button(j.slot, 1));
+    jfeed(&j, EV_KEY, KEY_A, 1); /* a key that is no button of this device */
+    CHECK(!joystick_button(j.slot, 0));
+
+    /* a hat is two axes, -1 / 0 / 1 */
+    jfeed(&j, EV_ABS, ABS_HAT0X, 1);
+    CHECK(joystick_hat(j.slot, 0) == JOYHAT_RIGHT);
+    jfeed(&j, EV_ABS, ABS_HAT0Y, -1);
+    CHECK(joystick_hat(j.slot, 0) == (JOYHAT_RIGHT | JOYHAT_UP));
+    jfeed(&j, EV_ABS, ABS_HAT0X, -1);
+    jfeed(&j, EV_ABS, ABS_HAT0Y, 1);
+    CHECK(joystick_hat(j.slot, 0) == (JOYHAT_LEFT | JOYHAT_DOWN));
+    jfeed(&j, EV_ABS, ABS_HAT0X, 0);
+    jfeed(&j, EV_ABS, ABS_HAT0Y, 0);
+    CHECK(joystick_hat(j.slot, 0) == 0);
+    jfeed(&j, EV_ABS, ABS_HAT1Y, 1); /* the second hat */
+    CHECK(joystick_hat(j.slot, 1) == JOYHAT_DOWN && joystick_hat(j.slot, 0) == 0);
+    jfeed(&j, EV_ABS, ABS_HAT2X, 1); /* a third: not announced */
+    CHECK(joystick_hat(j.slot, 2) == 0);
+
+    /* dropped events: ignored until the report, then resynchronised (no real device here) */
+    jfeed(&j, EV_SYN, SYN_DROPPED, 0);
+    CHECK(j.dropped);
+    jfeed(&j, EV_KEY, BTN_TRIGGER, 1);
+    CHECK(!joystick_button(j.slot, 0));
+    jfeed(&j, EV_SYN, SYN_REPORT, 0);
+    CHECK(!j.dropped);
+
+    close_joy(&j);
+    CHECK(!j.used && !joystick_connected(0));
+    gamepad_shutdown();
+}
+
+static void test_joystick_reading(void)
+{
+    int fds[2];
+    CHECK(make_pipe(fds) == 0);
+    EvdevJoy j;
+    setup_joy(&j, fds[0]);
+
+    CHECK(read_joy(&j)); /* nothing yet, still alive */
+    put(fds[1], EV_ABS, ABS_X, 1023);
+    put(fds[1], EV_KEY, BTN_TRIGGER, 1);
+    put(fds[1], EV_ABS, ABS_HAT0X, 1);
+    put(fds[1], EV_SYN, SYN_REPORT, 0);
+    CHECK(read_joy(&j));
+    CHECK(NEAR(joystick_axis(j.slot, 0), 1.0f) && joystick_button(j.slot, 0) && joystick_hat(j.slot, 0) == JOYHAT_RIGHT);
+
+    close(fds[1]);
+    CHECK(!read_joy(&j)); /* the device went away */
+    close_joy(&j);
+    gamepad_shutdown();
+}
+
+static void test_joystick_probe(void)
+{
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    CHECK(fd >= 0 && !joy_probe_fd(fd, "/dev/null", -1));
+    close(fd);
+    int fds[2];
+    CHECK(make_pipe(fds) == 0);
+    CHECK(!joy_probe_fd(fds[0], "pipe", -1));
+    close(fds[0]);
+    close(fds[1]);
+    CHECK(!joystick_connected(0));
+
+    CHECK(is_joy_button(BTN_TRIGGER) && is_joy_button(BTN_SOUTH) && is_joy_button(BTN_TRIGGER_HAPPY1));
+    CHECK(!is_joy_button(KEY_A) && !is_joy_button(KEY_ENTER));
+    CHECK(is_hat_code(ABS_HAT0X) && is_hat_code(ABS_HAT3Y) && !is_hat_code(ABS_X) && !is_hat_code(ABS_MISC));
+}
+
+/* ---- rumble ---- */
+
+static void test_rumble(void)
+{
+    CHECK(!gamepad_rumble(0, 1.0f, 1.0f, 100)); /* nothing connected */
+    CHECK(!gamepad_rumble(-1, 1.0f, 1.0f, 100));
+
+    EvdevPad d;
+    setup_pad(&d, -1);
+    d.ff_id = -1;
+    CHECK(!gamepad_rumble(d.slot, 1.0f, 0.5f, 200)); /* a pad without force feedback */
+    CHECK(!gamepad_backend_rumble(d.slot + 1, 1.0f, 1.0f, 100)); /* no such pad */
+
+    /* a pad that claims FF, on a descriptor that is not an evdev node: the upload fails cleanly */
+    int fds[2];
+    CHECK(make_pipe(fds) == 0);
+    d.fd = fds[0];
+    d.can_rumble = true;
+    g_dev[0] = d;
+    CHECK(!gamepad_backend_rumble(d.slot, 1.0f, 1.0f, 100));
+    CHECK(g_dev[0].ff_id == -1);
+    CHECK(gamepad_backend_rumble(d.slot, 0.0f, 0.0f, 100)); /* stopping always works */
+    CHECK(gamepad_backend_rumble(d.slot, 1.0f, 1.0f, 0));
+    CHECK(gamepad_rumble(d.slot, 5.0f, -3.0f, 50) == false); /* out-of-range strengths are clamped, then fail the same way */
+    memset(&g_dev[0], 0, sizeof g_dev[0]);
+    close(fds[0]);
+    close(fds[1]);
+    gamepad_shutdown();
+}
+
 static void test_init_poll_shutdown(void)
 {
     platform_clear_error();
@@ -385,6 +582,11 @@ int main(void)
     test_reading();
     test_probe_rejects();
     test_hotplug_events();
+    test_joystick_slots();
+    test_joystick_events();
+    test_joystick_reading();
+    test_joystick_probe();
+    test_rumble();
     test_init_poll_shutdown();
 
     printf("%d passed, %d failed\n", g_pass, g_fail);

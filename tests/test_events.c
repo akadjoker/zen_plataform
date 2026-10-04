@@ -4,6 +4,7 @@
  */
 #include "platform.h"
 #include "backend_fake.h"
+#include "gamepad_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -136,6 +137,79 @@ static void test_capture(PlatformWindow *w)
     CHECK(!mouse_capture(w, false));
 }
 
+
+/* ---- gamepad and joystick connect / disconnect events, per window ---- */
+
+static int device_events(PlatformWindow *w, EventType type, int index)
+{
+    int n = 0;
+    Event e;
+    while (poll_event(w, &e))
+        n += e.type == type && e.data.device.index == index;
+    return n;
+}
+
+static void test_device_events(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    CHECK(device_events(w, EVENT_GAMEPAD_CONNECTED, 0) == 0);
+
+    int pad = gamepad_internal_connect("Pad");
+    CHECK(pad == 0);
+    window_begin_frame(w);
+    CHECK(device_events(w, EVENT_GAMEPAD_CONNECTED, 0) == 1);
+    window_begin_frame(w);
+    CHECK(device_events(w, EVENT_GAMEPAD_CONNECTED, 0) == 0); /* told once */
+
+    gamepad_internal_disconnect(pad);
+    window_begin_frame(w);
+    CHECK(device_events(w, EVENT_GAMEPAD_DISCONNECTED, 0) == 1);
+
+    /* gone and back between two frames: a different device, so both events */
+    pad = gamepad_internal_connect("Pad");
+    window_begin_frame(w);
+    poll_event(w, &(Event){0}); /* (consume) */
+    gamepad_internal_disconnect(pad);
+    pad = gamepad_internal_connect("Other pad");
+    window_begin_frame(w);
+    int disc = 0, conn = 0;
+    Event e;
+    EventType order[4];
+    int n = 0;
+    while (poll_event(w, &e))
+    {
+        if (e.type == EVENT_GAMEPAD_DISCONNECTED && e.data.device.index == 0)
+            disc++, order[n++] = e.type;
+        if (e.type == EVENT_GAMEPAD_CONNECTED && e.data.device.index == 0)
+            conn++, order[n++] = e.type;
+    }
+    CHECK(disc == 1 && conn == 1);
+    CHECK(n == 2 && order[0] == EVENT_GAMEPAD_DISCONNECTED && order[1] == EVENT_GAMEPAD_CONNECTED);
+
+    /* a second window starts from nothing: it is told about the pad already there */
+    WindowConfig cfg = {.title = "w2", .width = 100, .height = 80, .x = WINDOW_POS_UNDEFINED, .y = WINDOW_POS_UNDEFINED};
+    PlatformWindow *w2 = window_create(&cfg);
+    CHECK(w2 != NULL);
+    if (w2)
+    {
+        window_begin_frame(w2);
+        CHECK(device_events(w2, EVENT_GAMEPAD_CONNECTED, 0) == 1);
+        window_destroy(w2);
+    }
+
+    /* joysticks the same way */
+    int joy = joystick_internal_connect("Stick", 2, 4, 1);
+    window_begin_frame(w);
+    CHECK(device_events(w, EVENT_JOYSTICK_CONNECTED, joy) == 1);
+    joystick_internal_disconnect(joy);
+    window_begin_frame(w);
+    CHECK(device_events(w, EVENT_JOYSTICK_DISCONNECTED, joy) == 1);
+
+    gamepad_internal_disconnect(pad);
+    window_begin_frame(w);
+    CHECK(device_events(w, EVENT_GAMEPAD_DISCONNECTED, 0) == 1);
+}
+
 static HitTestResult hit_fn(PlatformWindow *w, int x, int y, void *user)
 {
     (void)w;
@@ -221,6 +295,7 @@ int main(void)
     test_text_event(w);
     test_lock_mods(w);
     test_capture(w);
+    test_device_events(w);
     window_destroy(w);
     test_window_features();
     platform_shutdown();

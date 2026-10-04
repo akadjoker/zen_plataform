@@ -287,9 +287,29 @@ for (int i = 0; i < GAMEPAD_MAX; i++)
 
 Polled; `window_begin_frame` refreshes the state. Layout and order follow
 SDL_GameController. Linux reads `/dev/input/event*` (evdev) and needs read
-permission on them, normally the `input` group. Pads are detected at startup and
-on hot-plug. Only pads that follow the kernel gamepad layout are listed; there is
-no mapping database.
+permission on them, normally the `input` group (and write permission for
+vibration). Pads are detected at startup and on hot-plug. Only pads that follow the
+kernel gamepad layout are gamepads; there is no mapping database.
+
+```c
+gamepad_rumble(0, 0.8f, 0.3f, 250);      // strong (low) motor, weak (high) motor, milliseconds; 0 ms stops
+
+// Hot-plug as events, per window, including pads already connected at the first frame
+case EVENT_GAMEPAD_CONNECTED:    /* e.data.device.index */ break;
+case EVENT_GAMEPAD_DISCONNECTED: break;
+
+// Everything that is not a standard gamepad: sticks, wheels, arcade encoders. Raw order, no mapping.
+for (int i = 0; i < JOYSTICK_MAX; i++)
+    if (joystick_connected(i))
+    {
+        float x = joystick_axis(i, 0);                  // -1..1
+        bool fire = joystick_button(i, 0);
+        int hat = joystick_hat(i, 0);                   // JOYHAT_UP | JOYHAT_RIGHT ...
+        int pad = joystick_gamepad_index(i);            // its gamepad slot, or -1
+    }
+```
+
+Windows reads pads through XInput (with vibration) and other joysticks through winmm.
 
 ### Event queue
 
@@ -408,7 +428,7 @@ tests/
   test_app_run.c          frame cycle test
   test_gestures.c         gesture recognizer and touch through the core
   test_log.c              log levels, sink, truncation
-  test_events.c           event hook, text events, lock keys, capture (fake backend)
+  test_events.c           event hook, text events, lock keys, capture, device events (fake backend)
   test_x11_window.c       capture, lock keys, window kinds, hit test, image cursors on a real X server
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach

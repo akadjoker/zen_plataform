@@ -338,6 +338,47 @@ void *window_get_user_ptr(PlatformWindow *w)
     return w->user;
 }
 
+/* Tell this window about devices that came or went since it last looked. A slot
+   whose generation changed is a different device: the old one went, a new one came. */
+static void device_events(Core *core)
+{
+    InputState *s = &core->in;
+    for (int i = 0; i < GAMEPAD_MAX; i++)
+    {
+        unsigned now = gamepad_connected(i) ? gamepad_internal_generation(i) : 0;
+        if (s->pad_seen[i] && s->pad_seen[i] != now)
+        {
+            Event e = {.type = EVENT_GAMEPAD_DISCONNECTED};
+            e.data.device.index = i;
+            core_push_event(core, &e);
+        }
+        if (now && s->pad_seen[i] != now)
+        {
+            Event e = {.type = EVENT_GAMEPAD_CONNECTED};
+            e.data.device.index = i;
+            core_push_event(core, &e);
+        }
+        s->pad_seen[i] = now;
+    }
+    for (int i = 0; i < JOYSTICK_MAX; i++)
+    {
+        unsigned now = joystick_connected(i) ? joystick_internal_generation(i) : 0;
+        if (s->joy_seen[i] && s->joy_seen[i] != now)
+        {
+            Event e = {.type = EVENT_JOYSTICK_DISCONNECTED};
+            e.data.device.index = i;
+            core_push_event(core, &e);
+        }
+        if (now && s->joy_seen[i] != now)
+        {
+            Event e = {.type = EVENT_JOYSTICK_CONNECTED};
+            e.data.device.index = i;
+            core_push_event(core, &e);
+        }
+        s->joy_seen[i] = now;
+    }
+}
+
 void window_begin_frame(PlatformWindow *w)
 {
     InputState *s = &w->core.in;
@@ -351,6 +392,7 @@ void window_begin_frame(PlatformWindow *w)
     /* keycode_q and char_q are not cleared here: the consumer drains them */
 
     gamepad_poll();
+    device_events(&w->core);
     /* Before the new events: last frame's TAP turns into HOLD and a SWIPE ends, so
        a gesture born in this frame's events is still visible after this call. */
     gesture_update(&s->gesture, time_seconds());

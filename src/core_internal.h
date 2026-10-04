@@ -51,6 +51,10 @@ typedef struct
     int touch_count;
 
     GestureState gesture;
+
+    /* which gamepads and joysticks this window has been told about (and which device
+       generation), so connect and disconnect events are per window */
+    unsigned pad_seen[GAMEPAD_MAX], joy_seen[JOYSTICK_MAX]; /* 0 = not seen, else generation */
     bool mouse_touch;      /* left button emulates one finger */
     bool mouse_touch_down; /* ... and that finger is down now */
 

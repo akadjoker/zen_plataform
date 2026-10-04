@@ -153,7 +153,16 @@ extern "C"
            first window, the one that exists when window_create returns, raises
            neither. Between the two, window_is_visible is false. */
         EVENT_WINDOW_SURFACE_LOST,
-        EVENT_WINDOW_SURFACE_READY
+        EVENT_WINDOW_SURFACE_READY,
+
+        /* A gamepad or joystick appeared or went away; data.device.index is its slot
+           (gamepad_*(index), joystick_*(index)). Every window gets them, including one
+           for each device already connected at the window's first frame, so a game can
+           build its player list from events alone. */
+        EVENT_GAMEPAD_CONNECTED,
+        EVENT_GAMEPAD_DISCONNECTED,
+        EVENT_JOYSTICK_CONNECTED,
+        EVENT_JOYSTICK_DISCONNECTED
     } EventType;
 
     typedef enum
@@ -220,6 +229,10 @@ extern "C"
                 int count;
                 const char **paths;
             } drop;
+            struct
+            {
+                int index;
+            } device;
         } data;
     } Event;
 
@@ -806,6 +819,47 @@ extern "C"
     PLATFORM_API const char *gamepad_name(int index); /* NULL when not connected */
     PLATFORM_API bool gamepad_button_down(int index, int button);
     PLATFORM_API float gamepad_axis(int index, int axis);
+
+    /* Vibration. strong drives the low-frequency (heavy) motor and weak the
+       high-frequency one, each 0..1; the pad stops after `milliseconds` (0 stops it
+       now, and a new call replaces the one running). Returns false when the pad is
+       not connected or cannot vibrate (on Linux the device node must be writable). */
+    PLATFORM_API bool gamepad_rumble(int index, float strong, float weak, uint32_t milliseconds);
+
+    /* ========================================================================== */
+    /*  Joysticks (every game controller, as the device reports it)               */
+    /* ========================================================================== */
+
+    /* For what does not follow the standard gamepad layout: flight sticks, racing
+       wheels, arcade encoders, odd pads. Axes, buttons and hats come in the device's
+       own order, with no mapping. A standard gamepad is listed here too; use
+       joystick_gamepad_index to find its gamepad slot. */
+    enum
+    {
+        JOYSTICK_MAX = 8,
+        JOYSTICK_MAX_AXES = 16,
+        JOYSTICK_MAX_BUTTONS = 64,
+        JOYSTICK_MAX_HATS = 4
+    };
+
+    /* joystick_hat is a mask of these. */
+    enum
+    {
+        JOYHAT_UP = 1,
+        JOYHAT_RIGHT = 2,
+        JOYHAT_DOWN = 4,
+        JOYHAT_LEFT = 8
+    };
+
+    PLATFORM_API bool joystick_connected(int index);
+    PLATFORM_API const char *joystick_name(int index); /* NULL when not connected */
+    PLATFORM_API int joystick_axis_count(int index);
+    PLATFORM_API int joystick_button_count(int index);
+    PLATFORM_API int joystick_hat_count(int index);
+    PLATFORM_API float joystick_axis(int index, int axis); /* -1..1, no deadzone */
+    PLATFORM_API bool joystick_button(int index, int button);
+    PLATFORM_API int joystick_hat(int index, int hat); /* JOYHAT_* mask, 0 centred */
+    PLATFORM_API int joystick_gamepad_index(int index); /* the gamepad slot of this joystick, or -1 */
 
     /* ========================================================================== */
     /*  Time                                                                      */

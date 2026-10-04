@@ -239,6 +239,22 @@ static void log_event(Demo *d, const Event *e)
     case EVENT_WINDOW_SURFACE_READY:
         push_line(d, K_WINDOW, "WINDOW_SURFACE_READY");
         break;
+    case EVENT_GAMEPAD_CONNECTED:
+        push_line(d, K_WINDOW, "GAMEPAD_CONNECTED %d  %s", e->data.device.index, gamepad_name(e->data.device.index));
+        break;
+    case EVENT_GAMEPAD_DISCONNECTED:
+        push_line(d, K_WINDOW, "GAMEPAD_DISCONNECTED %d", e->data.device.index);
+        break;
+    case EVENT_JOYSTICK_CONNECTED:
+    {
+        int j = e->data.device.index;
+        push_line(d, K_WINDOW, "JOYSTICK_CONNECTED %d  %s  (%d axes, %d buttons, %d hats)", j, joystick_name(j),
+                  joystick_axis_count(j), joystick_button_count(j), joystick_hat_count(j));
+        break;
+    }
+    case EVENT_JOYSTICK_DISCONNECTED:
+        push_line(d, K_WINDOW, "JOYSTICK_DISCONNECTED %d", e->data.device.index);
+        break;
     case EVENT_KEY:
         push_line(d, K_KEY, "KEY %s %s%s  %s scancode %d", key_name(e->data.key.key, kn, sizeof kn),
                   e->data.key.down ? "down" : "up", e->data.key.repeat ? " (repeat)" : "",
