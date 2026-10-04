@@ -88,8 +88,8 @@ target_link_libraries(zen_ui PUBLIC platform)
 
 # zen_2d (r2d): batched 2D engine on GL, and the zen_ui GL renderer. Separate
 # library so the toolkit core never depends on OpenGL. Desktop uses GL 3.3 core
-# via glad; web (WebGL2) and Android (GLES3) use the GLES3 path in r2d.c.
-if(NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX))
+# via glad (Linux and Windows); web (WebGL2) and Android (GLES3) use the GLES3 path in r2d.c.
+if(NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_library(zen_2d src/r2d/r2d.c src/r2d/r2d_ui.c)
     target_include_directories(zen_2d PUBLIC include PRIVATE src/r2d)
     target_compile_features(zen_2d PUBLIC c_std_11)
@@ -101,7 +101,10 @@ if(NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX))
         target_link_libraries(zen_2d PUBLIC zen_ui platform GLESv3 m)
     else()
         find_package(OpenGL REQUIRED)
-        target_link_libraries(zen_2d PUBLIC zen_ui platform OpenGL::GL m)
+        target_link_libraries(zen_2d PUBLIC zen_ui platform OpenGL::GL)
+        if(NOT WIN32)
+            target_link_libraries(zen_2d PUBLIC m)
+        endif()
     endif()
 endif()
 

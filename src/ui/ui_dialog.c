@@ -10,9 +10,9 @@
 #include "ui_internal.h"
 #include "ui_font.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -67,11 +67,26 @@ static void fmt_date(int64_t t, char *out, int cap)
     if (t <= 0) { snprintf(out, cap, "-"); return; }
     time_t tt = (time_t)t;
     struct tm lt;
+#ifdef _WIN32
+    localtime_s(&lt, &tt);
+#else
     localtime_r(&tt, &lt);
+#endif
     strftime(out, (size_t)cap, "%Y-%m-%d %H:%M", &lt);
 }
 
 /* ------------------------------------------------------------ listing ----- */
+
+/* strcasecmp is POSIX only (strings.h is missing on MSVC). */
+static int ui_stricmp(const char *a, const char *b)
+{
+    for (;; a++, b++)
+    {
+        int ca = tolower((unsigned char)*a), cb = tolower((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        if (!ca) return 0;
+    }
+}
 
 static int g_sort_col;
 static bool g_sort_desc;
@@ -82,7 +97,7 @@ static int cmp_entry(const void *a, const void *b)
     int r;
     if (g_sort_col == 1) r = (x->size > y->size) - (x->size < y->size);
     else if (g_sort_col == 2) r = (x->mtime > y->mtime) - (x->mtime < y->mtime);
-    else r = strcasecmp(x->name, y->name);
+    else r = ui_stricmp(x->name, y->name);
     return g_sort_desc ? -r : r;
 }
 

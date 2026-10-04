@@ -289,11 +289,17 @@ static void test_knob_drag(PlatformWindow *w, UiContext *ui)
     fake_mouse_button(w, MOUSE_LEFT, false);
     const UiDrawList *dl = run_frame(w, ui, widgets_knob);
 
-    int gradient_count = 0;
+    /* body and ring are rects, the pointer is a line */
+    int rect_count = 0, line_count = 0;
     for (int i = 0; i < dl->count; i++)
-        if (dl->cmds[i].type == UI_CMD_GRADIENT)
-            gradient_count++;
-    CHECK(gradient_count >= 1);
+    {
+        if (dl->cmds[i].type == UI_CMD_RECT)
+            rect_count++;
+        else if (dl->cmds[i].type == UI_CMD_LINE)
+            line_count++;
+    }
+    CHECK(rect_count >= 2);
+    CHECK(line_count >= 1);
 }
 
 /* ------------------------------------------------------------------ progress -- */
@@ -923,6 +929,7 @@ int main(void)
     {
         PlatformWindow *w = make_window(RENDER_PIXELS);
         CHECK(w != NULL);
+        UiFont *bf = NULL;
         UiContext *ui = zui_create();
         CHECK(ui != NULL);
 
@@ -930,7 +937,7 @@ int main(void)
            (which references the generated TTF data we stubbed). Set before
            the first frame. */
         {
-            UiFont *bf = zui_font_builtin(2);
+            bf = zui_font_builtin(2);
             CHECK(bf != NULL);
             zui_set_font(ui, bf);
         }
@@ -966,6 +973,7 @@ int main(void)
         test_draw_list_populated(w, ui);
 
         zui_destroy(ui);
+        zui_font_free(bf);
         window_destroy(w);
     }
 
@@ -977,11 +985,12 @@ int main(void)
     {
         PlatformWindow *w = make_window(RENDER_GL);
         CHECK(w != NULL);
+        UiFont *bf = NULL;
         UiContext *ui = zui_create();
         CHECK(ui != NULL);
 
         {
-            UiFont *bf = zui_font_builtin(2);
+            bf = zui_font_builtin(2);
             CHECK(bf != NULL);
             zui_set_font(ui, bf);
         }
@@ -1015,6 +1024,7 @@ int main(void)
         test_draw_list_populated(w, ui);
 
         zui_destroy(ui);
+        zui_font_free(bf);
         window_destroy(w);
     }
 
