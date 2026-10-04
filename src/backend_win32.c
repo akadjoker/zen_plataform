@@ -1528,6 +1528,12 @@ void backend_make_current(BackendWindow *b)
         wglMakeCurrent(b->hdc, b->glrc);
 }
 
+void backend_make_current_on(BackendWindow *target, BackendWindow *context)
+{
+    if (target->render == RENDER_GL && context->render == RENDER_GL)
+        wglMakeCurrent(target->hdc, context->glrc);
+}
+
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     (void)b;

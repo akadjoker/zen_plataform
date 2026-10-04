@@ -346,6 +346,12 @@ extern "C"
     /* ========================================================================== */
 
     PLATFORM_API void window_make_current(PlatformWindow *w);
+    /* Make the GL context of `context` current, drawing to the surface of
+       `target`. One context can then draw to several windows, so every GL object
+       stays valid in all of them. Both windows must be RENDER_GL and created
+       with the same framebuffer settings. Where there is only one window
+       (web, Android) `target` must be `context`. window_swap(target) presents. */
+    PLATFORM_API void window_make_current_on(PlatformWindow *target, PlatformWindow *context);
     PLATFORM_API void window_set_vsync(PlatformWindow *w, bool on);
     /* Address of a GL function for a loader, or NULL if unavailable. */
     PLATFORM_API void *gl_proc_address(const char *name);

@@ -570,6 +570,12 @@ void backend_make_current(BackendWindow *b)
         eglMakeCurrent(b->dpy, b->surface, b->surface, b->ctx);
 }
 
+void backend_make_current_on(BackendWindow *target, BackendWindow *context)
+{
+    if (target == context)
+        backend_make_current(context);
+}
+
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     if (b->render == RENDER_GL)

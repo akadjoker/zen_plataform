@@ -1683,6 +1683,12 @@ void backend_make_current(BackendWindow *b)
         glXMakeCurrent(g.dpy, b->win, b->glc);
 }
 
+void backend_make_current_on(BackendWindow *target, BackendWindow *context)
+{
+    if (target->render == RENDER_GL && context->render == RENDER_GL)
+        glXMakeCurrent(g.dpy, target->win, context->glc);
+}
+
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     int interval = on ? 1 : 0;

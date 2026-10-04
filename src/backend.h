@@ -56,6 +56,7 @@ void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, v
 
 /* GL context */
 void backend_make_current(BackendWindow *b);
+void backend_make_current_on(BackendWindow *target, BackendWindow *context);
 void backend_set_vsync(BackendWindow *b, bool on);
 void *backend_gl_proc_address(const char *name);
 

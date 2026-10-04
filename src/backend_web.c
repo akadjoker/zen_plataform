@@ -514,6 +514,12 @@ void backend_make_current(BackendWindow *b)
         emscripten_webgl_make_context_current(b->gl);
 }
 
+void backend_make_current_on(BackendWindow *target, BackendWindow *context)
+{
+    if (target == context)
+        backend_make_current(context);
+}
+
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     (void)b;

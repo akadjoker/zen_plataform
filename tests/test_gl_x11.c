@@ -191,6 +191,67 @@ static void test_monitor_mouse(void)
     window_destroy(w);
 }
 
+typedef void (*ClearColor)(float r, float g, float b, float a);
+typedef void (*Clear)(unsigned mask);
+typedef void (*ReadPixels)(int x, int y, int w, int h, unsigned format, unsigned type, void *out);
+
+#define GL_COLOR_BUFFER_BIT 0x4000
+#define GL_RGBA 0x1908
+#define GL_UNSIGNED_BYTE 0x1401
+
+/* One context draws to two windows: each keeps what was drawn to it. */
+static void test_one_context_two_windows(void)
+{
+    WindowConfig cfg = window_config_default();
+    cfg.width = 64;
+    cfg.height = 64;
+    cfg.vsync = false;
+    PlatformWindow *first = window_create(&cfg);
+    PlatformWindow *second = window_create(&cfg);
+    CHECK(first != NULL);
+    CHECK(second != NULL);
+    if (!first || !second)
+    {
+        if (first)
+            window_destroy(first);
+        if (second)
+            window_destroy(second);
+        return;
+    }
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(first);
+        window_begin_frame(second);
+    }
+
+    window_make_current(first);
+    ClearColor clear_color = (ClearColor)gl_proc_address("glClearColor");
+    Clear clear = (Clear)gl_proc_address("glClear");
+    ReadPixels read_pixels = (ReadPixels)gl_proc_address("glReadPixels");
+    CHECK(clear_color && clear && read_pixels);
+    if (clear_color && clear && read_pixels)
+    {
+        unsigned char pixel[4] = {0, 0, 0, 0};
+        clear_color(1.0f, 0.0f, 0.0f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+
+        window_make_current_on(second, first);
+        clear_color(0.0f, 0.0f, 1.0f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        read_pixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        CHECK(pixel[0] == 0 && pixel[2] == 255);
+
+        window_make_current_on(first, first);
+        read_pixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        CHECK(pixel[0] == 255 && pixel[2] == 0);
+
+        window_swap(second);
+        window_swap(first);
+    }
+    window_destroy(second);
+    window_destroy(first);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -205,6 +266,7 @@ int main(void)
     test_msaa();
     test_failures();
     test_monitor_mouse();
+    test_one_context_two_windows();
 
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);

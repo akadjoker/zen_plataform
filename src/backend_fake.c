@@ -253,6 +253,11 @@ void backend_make_current(BackendWindow *b)
 {
     (void)b;
 }
+void backend_make_current_on(BackendWindow *target, BackendWindow *context)
+{
+    (void)target;
+    (void)context;
+}
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     b->vsync = on;

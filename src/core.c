@@ -502,6 +502,10 @@ void window_make_current(PlatformWindow *w)
 {
     backend_make_current(w->b);
 }
+void window_make_current_on(PlatformWindow *target, PlatformWindow *context)
+{
+    backend_make_current_on(target->b, context->b);
+}
 void window_set_event_hook(PlatformWindow *w, EventHook hook, void *user)
 {
     w->core.hook = hook;
