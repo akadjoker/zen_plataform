@@ -127,6 +127,12 @@ struct BackendWindow
 
     int cursor_mode; /* MOUSE_MODE_* */
     Cursor active_cursor;
+    int cursor_idx;                /* the CURSOR_* shape chosen with mouse_set_cursor */
+    HitTestFunc hit_cb;            /* custom title bar / edges */
+    PlatformWindow *hit_w;
+    void *hit_user;
+    bool hit_press;                /* a press was handed to the window manager */
+    int hit_cursor;                /* resize cursor showing from the hit test, or -1 */
     Cursor hidden_cursor;
     bool grabbed;  /* MOUSE_MODE_CAPTURED holds the pointer */
     bool captured; /* mouse_capture(true) holds it */
@@ -539,6 +545,64 @@ static void set_title(BackendWindow *b, const char *title)
                     PropModeReplace, (const unsigned char *)title, (int)strlen(title));
 }
 
+/* ---- decorations and window kinds ---- */
+
+static void apply_decorations(BackendWindow *b, bool decorated)
+{
+    /* _MOTIF_WM_HINTS: flags = MWM_HINTS_DECORATIONS, decorations = all or none */
+    long hints[5] = {2, 0, decorated ? 1 : 0, 0, 0};
+    XChangeProperty(g.dpy, b->win, g.MOTIF_WM_HINTS, g.MOTIF_WM_HINTS, 32, PropModeReplace,
+                    (unsigned char *)hints, 5);
+}
+
+static void apply_window_kind(BackendWindow *b, const WindowConfig *cfg)
+{
+    WindowKind k = cfg->kind;
+    if (cfg->undecorated || k == WINDOW_KIND_POPUP || k == WINDOW_KIND_TOOLTIP)
+        apply_decorations(b, false);
+
+    if (cfg->parent && cfg->parent->b)
+        XSetTransientForHint(g.dpy, b->win, cfg->parent->b->win);
+
+    const char *type = k == WINDOW_KIND_DIALOG    ? "_NET_WM_WINDOW_TYPE_DIALOG"
+                       : k == WINDOW_KIND_UTILITY ? "_NET_WM_WINDOW_TYPE_UTILITY"
+                       : k == WINDOW_KIND_POPUP   ? "_NET_WM_WINDOW_TYPE_POPUP_MENU"
+                       : k == WINDOW_KIND_TOOLTIP ? "_NET_WM_WINDOW_TYPE_TOOLTIP"
+                                                  : NULL;
+    if (type)
+    {
+        Atom t = XInternAtom(g.dpy, type, False);
+        XChangeProperty(g.dpy, b->win, XInternAtom(g.dpy, "_NET_WM_WINDOW_TYPE", False), XA_ATOM, 32,
+                        PropModeReplace, (unsigned char *)&t, 1);
+    }
+    if (k == WINDOW_KIND_UTILITY || k == WINDOW_KIND_POPUP || k == WINDOW_KIND_TOOLTIP)
+    {
+        Atom state[2];
+        int n = 0;
+        state[n++] = XInternAtom(g.dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
+        if (k != WINDOW_KIND_UTILITY)
+            state[n++] = g.NET_WM_STATE_ABOVE;
+        XChangeProperty(g.dpy, b->win, g.NET_WM_STATE, XA_ATOM, 32, PropModeReplace, (unsigned char *)state, n);
+    }
+    if (k == WINDOW_KIND_TOOLTIP)
+    {
+        XWMHints *h = XAllocWMHints(); /* a tooltip must never take the focus */
+        if (h)
+        {
+            h->flags = InputHint;
+            h->input = False;
+            XSetWMHints(g.dpy, b->win, h);
+            XFree(h);
+        }
+    }
+}
+
+void backend_set_decorated(BackendWindow *b, bool on)
+{
+    apply_decorations(b, on);
+    XFlush(g.dpy);
+}
+
 BackendWindow *backend_create(const WindowConfig *cfg)
 {
     /* Pixel and Vulkan windows take the default TrueColor visual (no GLX involved);
@@ -610,6 +674,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->pos_y = y;
     b->mode = cfg->mode;
     b->cursor_mode = MOUSE_MODE_NORMAL;
+    b->hit_cursor = -1;
 
     XSaveContext(g.dpy, b->win, g.ctx, (XPointer)b);
     XSetWMProtocols(g.dpy, b->win, &g.WM_DELETE_WINDOW, 1);
@@ -661,6 +726,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         }
         glXMakeCurrent(g.dpy, b->win, b->glc);
     }
+
+    apply_window_kind(b, cfg);
 
     XMapWindow(g.dpy, b->win);
 
@@ -858,6 +925,109 @@ static void handle_button(BackendWindow *b, XEvent *ev, bool down)
     push(b, &e);
 }
 
+/* ---- hit test: a custom title bar and resize edges ---- */
+
+static unsigned int cursor_shape(int cursor);
+
+static Cursor shape_cursor(int cursor)
+{
+    if (cursor < 0 || cursor >= CURSOR_COUNT)
+        cursor = CURSOR_DEFAULT;
+    if (!g.cursors[cursor])
+        g.cursors[cursor] = XCreateFontCursor(g.dpy, cursor_shape(cursor));
+    return g.cursors[cursor];
+}
+
+/* _NET_WM_MOVERESIZE directions, in HitTestResult order after HIT_DRAG. */
+static int hit_direction(HitTestResult r)
+{
+    switch (r)
+    {
+    case HIT_RESIZE_TOPLEFT: return 0;
+    case HIT_RESIZE_TOP: return 1;
+    case HIT_RESIZE_TOPRIGHT: return 2;
+    case HIT_RESIZE_RIGHT: return 3;
+    case HIT_RESIZE_BOTTOMRIGHT: return 4;
+    case HIT_RESIZE_BOTTOM: return 5;
+    case HIT_RESIZE_BOTTOMLEFT: return 6;
+    case HIT_RESIZE_LEFT: return 7;
+    default: return 8; /* _NET_WM_MOVERESIZE_MOVE */
+    }
+}
+
+static int hit_cursor_for(HitTestResult r)
+{
+    switch (r)
+    {
+    case HIT_RESIZE_TOPLEFT:
+    case HIT_RESIZE_BOTTOMRIGHT: return CURSOR_RESIZE_NWSE;
+    case HIT_RESIZE_TOPRIGHT:
+    case HIT_RESIZE_BOTTOMLEFT: return CURSOR_RESIZE_NESW;
+    case HIT_RESIZE_TOP:
+    case HIT_RESIZE_BOTTOM: return CURSOR_RESIZE_NS;
+    case HIT_RESIZE_LEFT:
+    case HIT_RESIZE_RIGHT: return CURSOR_RESIZE_EW;
+    default: return -1;
+    }
+}
+
+/* Returns true when the press was taken by the window manager. A press that came
+   from XSendEvent is consumed too but not forwarded: it is not a real button
+   press, and the window manager would wait for a release that never comes. */
+static bool hit_press(BackendWindow *b, const XEvent *ev)
+{
+    if (!b->hit_cb || ev->xbutton.button != Button1)
+        return false;
+    HitTestResult r = b->hit_cb(b->hit_w, ev->xbutton.x, ev->xbutton.y, b->hit_user);
+    if (r == HIT_NORMAL)
+        return false;
+    b->hit_press = true;
+    if (ev->xbutton.send_event)
+        return true;
+
+    XUngrabPointer(g.dpy, CurrentTime);
+    XEvent m;
+    memset(&m, 0, sizeof m);
+    m.xclient.type = ClientMessage;
+    m.xclient.window = b->win;
+    m.xclient.message_type = XInternAtom(g.dpy, "_NET_WM_MOVERESIZE", False);
+    m.xclient.format = 32;
+    m.xclient.data.l[0] = ev->xbutton.x_root;
+    m.xclient.data.l[1] = ev->xbutton.y_root;
+    m.xclient.data.l[2] = hit_direction(r);
+    m.xclient.data.l[3] = Button1;
+    m.xclient.data.l[4] = 1; /* a normal application */
+    XSendEvent(g.dpy, g.root, False, SubstructureNotifyMask | SubstructureRedirectMask, &m);
+    XFlush(g.dpy);
+    return true;
+}
+
+/* The pointer over a resize edge shows the matching resize cursor. */
+static void hit_motion(BackendWindow *b, int x, int y)
+{
+    if (!b->hit_cb || b->cursor_mode != MOUSE_MODE_NORMAL)
+        return;
+    int want = hit_cursor_for(b->hit_cb(b->hit_w, x, y, b->hit_user));
+    if (want == b->hit_cursor)
+        return;
+    b->hit_cursor = want;
+    XDefineCursor(g.dpy, b->win, want >= 0 ? shape_cursor(want) : (b->active_cursor ? b->active_cursor : None));
+    XFlush(g.dpy);
+}
+
+void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, void *user)
+{
+    b->hit_cb = fn;
+    b->hit_w = w;
+    b->hit_user = user;
+    if (!fn && b->hit_cursor >= 0)
+    {
+        b->hit_cursor = -1;
+        XDefineCursor(g.dpy, b->win, b->active_cursor ? b->active_cursor : None);
+        XFlush(g.dpy);
+    }
+}
+
 static void process_event(BackendWindow *b, XEvent *ev)
 {
     switch (ev->type)
@@ -925,14 +1095,22 @@ static void process_event(BackendWindow *b, XEvent *ev)
         break;
 
     case ButtonPress:
+        if (hit_press(b, ev))
+            break;
         handle_button(b, ev, true);
         break;
     case ButtonRelease:
+        if (b->hit_press && ev->xbutton.button == Button1)
+        {
+            b->hit_press = false; /* the release of a press the window manager took */
+            break;
+        }
         handle_button(b, ev, false);
         break;
 
     case MotionNotify:
     {
+        hit_motion(b, ev->xmotion.x, ev->xmotion.y);
         Event e = {.type = EVENT_MOUSE_MOVE};
         e.data.mouse.x = ev->xmotion.x;
         e.data.mouse.y = ev->xmotion.y;
@@ -1569,10 +1747,102 @@ void backend_set_cursor(BackendWindow *b, int cursor)
 {
     if (cursor < 0 || cursor >= CURSOR_COUNT)
         cursor = CURSOR_DEFAULT;
-    if (!g.cursors[cursor])
-        g.cursors[cursor] = XCreateFontCursor(g.dpy, cursor_shape(cursor));
-    b->active_cursor = g.cursors[cursor];
-    if (b->cursor_mode == MOUSE_MODE_NORMAL)
+    b->cursor_idx = cursor;
+    b->active_cursor = shape_cursor(cursor);
+    if (b->cursor_mode == MOUSE_MODE_NORMAL && b->hit_cursor < 0)
+    {
+        XDefineCursor(g.dpy, b->win, b->active_cursor);
+        XFlush(g.dpy);
+    }
+}
+
+/* ---- cursors from an image (libXcursor, found at run time) ---- */
+
+struct PlatformCursor
+{
+    Cursor cursor;
+};
+
+typedef struct
+{
+    uint32_t version, size, width, height, xhot, yhot, delay;
+    uint32_t *pixels;
+} ZenXcursorImage;
+
+static struct
+{
+    bool tried;
+    ZenXcursorImage *(*image_create)(int, int);
+    void (*image_destroy)(ZenXcursorImage *);
+    Cursor (*image_load)(Display *, const ZenXcursorImage *);
+} g_xcursor;
+
+static bool xcursor_load(void)
+{
+    if (!g_xcursor.tried)
+    {
+        g_xcursor.tried = true;
+        SharedLibrary *lib = library_open("libXcursor.so.1");
+        if (lib)
+        {
+            *(void **)&g_xcursor.image_create = library_symbol(lib, "XcursorImageCreate");
+            *(void **)&g_xcursor.image_destroy = library_symbol(lib, "XcursorImageDestroy");
+            *(void **)&g_xcursor.image_load = library_symbol(lib, "XcursorImageLoadCursor");
+        }
+    }
+    return g_xcursor.image_create && g_xcursor.image_destroy && g_xcursor.image_load;
+}
+
+PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y)
+{
+    if (!xcursor_load())
+    {
+        error_set("cursors from an image need libXcursor, which is not installed");
+        return NULL;
+    }
+    ZenXcursorImage *img = g_xcursor.image_create(w, h);
+    if (!img)
+        return NULL;
+    img->xhot = (uint32_t)hot_x;
+    img->yhot = (uint32_t)hot_y;
+    for (int i = 0; i < w * h; i++) /* Xcursor wants premultiplied alpha */
+    {
+        uint32_t p = argb[i], a = p >> 24;
+        uint32_t r = ((p >> 16) & 0xFF) * a / 255, gr = ((p >> 8) & 0xFF) * a / 255, bl = (p & 0xFF) * a / 255;
+        img->pixels[i] = (a << 24) | (r << 16) | (gr << 8) | bl;
+    }
+    Cursor c = g_xcursor.image_load(g.dpy, img);
+    g_xcursor.image_destroy(img);
+    if (!c)
+    {
+        error_set("cannot create the cursor");
+        return NULL;
+    }
+    PlatformCursor *pc = malloc(sizeof *pc);
+    if (!pc)
+    {
+        XFreeCursor(g.dpy, c);
+        return NULL;
+    }
+    pc->cursor = c;
+    return pc;
+}
+
+void backend_cursor_destroy(PlatformCursor *c)
+{
+    XFreeCursor(g.dpy, c->cursor);
+    free(c);
+}
+
+void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
+{
+    if (!c)
+    {
+        backend_set_cursor(b, b->cursor_idx);
+        return;
+    }
+    b->active_cursor = c->cursor;
+    if (b->cursor_mode == MOUSE_MODE_NORMAL && b->hit_cursor < 0)
     {
         XDefineCursor(g.dpy, b->win, b->active_cursor);
         XFlush(g.dpy);

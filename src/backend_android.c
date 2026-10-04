@@ -782,6 +782,33 @@ bool backend_mouse_capture(BackendWindow *b, bool on)
     return false;
 }
 
+void backend_set_decorated(BackendWindow *b, bool on)
+{
+    (void)b, (void)on;
+}
+
+void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, void *user)
+{
+    (void)b, (void)w, (void)fn, (void)user;
+}
+
+PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y)
+{
+    (void)argb, (void)w, (void)h, (void)hot_x, (void)hot_y;
+    error_set("cursors from an image are not supported here");
+    return NULL;
+}
+
+void backend_cursor_destroy(PlatformCursor *c)
+{
+    (void)c;
+}
+
+void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
+{
+    (void)b, (void)c;
+}
+
 void backend_set_mouse_mode(BackendWindow *b, int mode)
 {
     (void)b;

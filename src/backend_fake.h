@@ -19,6 +19,9 @@ void fake_mouse_button(PlatformWindow *w, int button, bool down);
 void fake_wheel(PlatformWindow *w, float x, float y);
 void fake_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase);
 void fake_set_lock_state(int mask); /* KEYMOD_CAPS_LOCK | KEYMOD_NUM_LOCK, read back by key_mods */
+HitTestResult fake_hit_test(PlatformWindow *w, int x, int y); /* what the window's hit-test function says */
+bool fake_is_decorated(PlatformWindow *w);
+PlatformCursor *fake_cursor_image(PlatformWindow *w); /* the cursor image set last, or NULL */
 void fake_resize(PlatformWindow *w, int width, int height);    /* EVENT_WINDOW_RESIZE, screen coords */
 void fake_fb_resize(PlatformWindow *w, int width, int height); /* EVENT_WINDOW_FB_RESIZE, pixels */
 

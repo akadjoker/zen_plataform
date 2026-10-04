@@ -51,6 +51,8 @@ WindowMode backend_get_mode(BackendWindow *b);
 void backend_set_icon(BackendWindow *b, int w, int h, const uint8_t *rgba);
 void backend_set_opacity(BackendWindow *b, float a);
 void backend_set_always_on_top(BackendWindow *b, bool on);
+void backend_set_decorated(BackendWindow *b, bool on);
+void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, void *user);
 
 /* GL context */
 void backend_make_current(BackendWindow *b);
@@ -77,6 +79,9 @@ int backend_lock_state(void);
 
 /* mouse */
 bool backend_mouse_capture(BackendWindow *b, bool on);
+PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y);
+void backend_cursor_destroy(PlatformCursor *c);
+void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c); /* NULL: back to the shape */
 void backend_set_mouse_pos(BackendWindow *b, int x, int y);
 void backend_set_cursor(BackendWindow *b, int cursor);   /* CURSOR_* */
 void backend_set_mouse_mode(BackendWindow *b, int mode); /* MOUSE_MODE_* */

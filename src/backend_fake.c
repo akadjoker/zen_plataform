@@ -31,6 +31,11 @@ struct BackendWindow
     WindowMode mode;
     int cursor, mouse_mode;
     bool captured;
+    bool decorated;
+    HitTestFunc hit_cb;
+    PlatformWindow *hit_w;
+    void *hit_user;
+    PlatformCursor *cursor_image;
     bool vsync;
     bool flag[5];   /* indexed by WIN_FLAG_* */
     int swap_count; /* lets a test confirm the begin_frame -> frame -> swap cycle */
@@ -72,6 +77,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->w = cfg->width;
     b->h = cfg->height;
     b->content_scale = 1.0f;
+    b->decorated = !cfg->undecorated && cfg->kind != WINDOW_KIND_POPUP && cfg->kind != WINDOW_KIND_TOOLTIP;
     b->fb_w = cfg->width;
     b->fb_h = cfg->height;
     b->mode = cfg->mode;
@@ -301,6 +307,58 @@ bool backend_mouse_capture(BackendWindow *b, bool on)
 {
     b->captured = on;
     return on;
+}
+
+struct PlatformCursor
+{
+    int w, h, hot_x, hot_y;
+    uint32_t first_pixel;
+};
+
+void backend_set_decorated(BackendWindow *b, bool on)
+{
+    b->decorated = on;
+}
+
+void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, void *user)
+{
+    b->hit_cb = fn;
+    b->hit_w = w;
+    b->hit_user = user;
+}
+
+HitTestResult fake_hit_test(PlatformWindow *w, int x, int y)
+{
+    BackendWindow *b = w->b;
+    return b->hit_cb ? b->hit_cb(b->hit_w, x, y, b->hit_user) : HIT_NORMAL;
+}
+
+bool fake_is_decorated(PlatformWindow *w)
+{
+    return w->b->decorated;
+}
+
+PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y)
+{
+    PlatformCursor *c = malloc(sizeof *c);
+    if (c)
+        *c = (PlatformCursor){w, h, hot_x, hot_y, argb[0]};
+    return c;
+}
+
+void backend_cursor_destroy(PlatformCursor *c)
+{
+    free(c);
+}
+
+void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
+{
+    b->cursor_image = c;
+}
+
+PlatformCursor *fake_cursor_image(PlatformWindow *w)
+{
+    return w->b->cursor_image;
 }
 
 void backend_set_mouse_mode(BackendWindow *b, int mode)

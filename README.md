@@ -117,6 +117,31 @@ The hook runs before the event reaches the polled state, even while Windows runs
 own loop for a resize, so a UI layer (Dear ImGui) keeps being fed. Text also arrives
 as `EVENT_CHAR` events now, next to `char_get_pressed`.
 
+### Window kinds, custom title bars, cursor images
+
+```c
+WindowConfig tip = {.title = "tip", .width = 160, .height = 40, .kind = WINDOW_KIND_TOOLTIP, .parent = main_window};
+WindowConfig dlg = {.title = "Settings", .width = 400, .height = 300, .kind = WINDOW_KIND_DIALOG, .parent = main_window};
+WindowConfig bar = {.title = "Mine", .width = 800, .height = 600, .undecorated = true, .resizable = true};
+
+HitTestResult hit(PlatformWindow *w, int x, int y, void *user)
+{
+    if (y < 32) return HIT_DRAG;                    // my title bar
+    if (x > 790) return HIT_RESIZE_RIGHT;           // my right edge
+    return HIT_NORMAL;
+}
+window_set_hit_test(w, hit, NULL);
+window_set_decorated(w, true);                      // show or hide the real frame at run time
+
+PlatformCursor *c = cursor_create(argb, 32, 32, 4, 4);   // 0xAARRGGBB pixels, hot spot
+mouse_set_cursor_image(w, c);                       // NULL goes back to mouse_set_cursor's shape
+```
+
+A `POPUP` or `TOOLTIP` has no decorations and stays out of the taskbar; a `TOOLTIP`
+never takes the focus. Presses on a hit-test title bar or edge go to the window
+manager, which drags or resizes the window. On X11 the image cursors need
+libXcursor at run time.
+
 ### Touch and gestures
 
 ```c
@@ -362,7 +387,7 @@ tests/
   test_gestures.c         gesture recognizer and touch through the core
   test_log.c              log levels, sink, truncation
   test_events.c           event hook, text events, lock keys, capture (fake backend)
-  test_x11_window.c       pointer capture and lock state on a real X server
+  test_x11_window.c       capture, lock keys, window kinds, hit test, image cursors on a real X server
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach
   test_clipboard.c        clipboard API and PNG round trip (fake backend)

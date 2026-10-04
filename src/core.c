@@ -395,6 +395,38 @@ void window_set_event_hook(PlatformWindow *w, EventHook hook, void *user)
     w->core.hook_user = user;
 }
 
+void window_set_decorated(PlatformWindow *w, bool on)
+{
+    backend_set_decorated(w->b, on);
+}
+
+void window_set_hit_test(PlatformWindow *w, HitTestFunc fn, void *user)
+{
+    backend_set_hit_test(w->b, w, fn, user);
+}
+
+PlatformCursor *cursor_create(const uint32_t *argb, int width, int height, int hot_x, int hot_y)
+{
+    if (!argb || width < 1 || height < 1 || width > 256 || height > 256 || hot_x < 0 || hot_y < 0 ||
+        hot_x >= width || hot_y >= height)
+    {
+        error_set("invalid cursor image");
+        return NULL;
+    }
+    return backend_cursor_create(argb, width, height, hot_x, hot_y);
+}
+
+void cursor_destroy(PlatformCursor *cursor)
+{
+    if (cursor)
+        backend_cursor_destroy(cursor);
+}
+
+void mouse_set_cursor_image(PlatformWindow *w, PlatformCursor *cursor)
+{
+    backend_set_cursor_image(w->b, cursor);
+}
+
 void window_set_live_callback(PlatformWindow *w, FrameCallback cb, void *user)
 {
     backend_set_live_callback(w->b, w, cb, user);

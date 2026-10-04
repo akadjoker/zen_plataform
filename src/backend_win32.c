@@ -111,6 +111,11 @@ struct BackendWindow
     bool focused, hovered, tracking_leave, minimized, maximized;
     int buttons_down;
     bool captured;                /* mouse_capture(true) is in effect */
+    bool frameless;               /* no non-client area at all: WM_NCCALCSIZE removes it */
+    DWORD style_framed, style_frameless; /* the two looks of this window, for window_set_decorated */
+    HitTestFunc hit_cb;
+    PlatformWindow *hit_w;
+    void *hit_user;
     bool in_modal, in_live;       /* inside the OS's drag/menu loop; inside the live callback */
     PlatformWindow *live_w;
     FrameCallback live_cb;
@@ -179,6 +184,41 @@ static DWORD window_style(bool resizable, WindowMode mode)
     if (!resizable)
         style &= ~(DWORD)(WS_THICKFRAME | WS_MAXIMIZEBOX);
     return style;
+}
+
+/* The style bits and extended style of a window of a given kind. `framed` is the
+   look with a title bar and border, `frameless` the look without; frameless windows
+   keep WS_THICKFRAME (for resizing through the hit test) and lose the frame in
+   WM_NCCALCSIZE. */
+static void kind_styles(const WindowConfig *cfg, DWORD *framed, DWORD *frameless, DWORD *ex, bool *start_frameless)
+{
+    DWORD resize = cfg->resizable ? (WS_THICKFRAME | WS_MAXIMIZEBOX) : 0;
+    *ex = 0;
+    *start_frameless = cfg->undecorated;
+    *frameless = WS_POPUP | WS_MINIMIZEBOX | resize;
+    switch (cfg->kind)
+    {
+    case WINDOW_KIND_DIALOG:
+        *framed = WS_POPUP | WS_CAPTION | WS_SYSMENU | (cfg->resizable ? WS_THICKFRAME : 0);
+        break;
+    case WINDOW_KIND_UTILITY:
+        *framed = WS_POPUP | WS_CAPTION | WS_SYSMENU | (cfg->resizable ? WS_THICKFRAME : 0);
+        *ex = WS_EX_TOOLWINDOW;
+        break;
+    case WINDOW_KIND_POPUP:
+        *framed = *frameless = WS_POPUP;
+        *ex = WS_EX_TOOLWINDOW;
+        *start_frameless = true;
+        break;
+    case WINDOW_KIND_TOOLTIP:
+        *framed = *frameless = WS_POPUP;
+        *ex = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
+        *start_frameless = true;
+        break;
+    default:
+        *framed = window_style(cfg->resizable, WINDOW_WINDOWED);
+        break;
+    }
 }
 
 static void client_size(BackendWindow *b, int *w, int *h)
@@ -533,6 +573,99 @@ void backend_set_cursor(BackendWindow *b, int cursor)
         SetCursor(b->cursor);
 }
 
+void backend_set_decorated(BackendWindow *b, bool on)
+{
+    if (b->mode != WINDOW_WINDOWED)
+        return; /* fullscreen has none; the choice shows when it returns to a window */
+    b->frameless = !on;
+    DWORD cur = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_STYLE);
+    DWORD keep = cur & (WS_VISIBLE | WS_MAXIMIZE | WS_MINIMIZE);
+    SetWindowLongPtrW(b->hwnd, GWL_STYLE, (LONG_PTR)(keep | (on ? b->style_framed : b->style_frameless)));
+    SetWindowPos(b->hwnd, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, void *user)
+{
+    b->hit_cb = fn;
+    b->hit_w = w;
+    b->hit_user = user;
+}
+
+struct PlatformCursor
+{
+    HCURSOR handle;
+};
+
+PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y)
+{
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h; /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void *bits = NULL;
+    HDC dc = GetDC(NULL);
+    HBITMAP color = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, dc);
+    HBITMAP mask = CreateBitmap(w, h, 1, 1, NULL);
+    if (!color || !mask || !bits)
+    {
+        if (color)
+            DeleteObject(color);
+        if (mask)
+            DeleteObject(mask);
+        error_set("cannot create the cursor bitmap");
+        return NULL;
+    }
+    memcpy(bits, argb, (size_t)w * (size_t)h * 4); /* 0xAARRGGBB is BGRA in memory, what a 32-bit DIB holds */
+
+    ICONINFO ii;
+    memset(&ii, 0, sizeof ii);
+    ii.fIcon = FALSE;
+    ii.xHotspot = (DWORD)hot_x;
+    ii.yHotspot = (DWORD)hot_y;
+    ii.hbmMask = mask;
+    ii.hbmColor = color;
+    HICON icon = CreateIconIndirect(&ii);
+    DeleteObject(color);
+    DeleteObject(mask);
+    if (!icon)
+    {
+        error_set("cannot create the cursor");
+        return NULL;
+    }
+    PlatformCursor *c = malloc(sizeof *c);
+    if (!c)
+    {
+        DestroyIcon(icon);
+        return NULL;
+    }
+    c->handle = (HCURSOR)icon;
+    return c;
+}
+
+void backend_cursor_destroy(PlatformCursor *c)
+{
+    DestroyIcon((HICON)c->handle);
+    free(c);
+}
+
+void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
+{
+    if (!c)
+    {
+        backend_set_cursor(b, b->cursor_shape);
+        return;
+    }
+    b->cursor = c->handle;
+    if (b->cursor_mode == MOUSE_MODE_NORMAL && b->hovered)
+        SetCursor(b->cursor);
+}
+
 void backend_set_mouse_mode(BackendWindow *b, int mode)
 {
     bool was_captured = b->cursor_mode == MOUSE_MODE_CAPTURED;
@@ -796,6 +929,35 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         handle_size(b, wparam, lparam);
         live_tick(b);
         return 0;
+    case WM_NCCALCSIZE:
+        if (b->frameless && wparam)
+            return 0; /* the client area is the whole window */
+        break;
+    case WM_NCHITTEST:
+        if (b->hit_cb)
+        {
+            POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ScreenToClient(hwnd, &pt);
+            switch (b->hit_cb(b->hit_w, pt.x, pt.y, b->hit_user))
+            {
+            case HIT_DRAG: return HTCAPTION;
+            case HIT_RESIZE_TOPLEFT: return HTTOPLEFT;
+            case HIT_RESIZE_TOP: return HTTOP;
+            case HIT_RESIZE_TOPRIGHT: return HTTOPRIGHT;
+            case HIT_RESIZE_RIGHT: return HTRIGHT;
+            case HIT_RESIZE_BOTTOMRIGHT: return HTBOTTOMRIGHT;
+            case HIT_RESIZE_BOTTOM: return HTBOTTOM;
+            case HIT_RESIZE_BOTTOMLEFT: return HTBOTTOMLEFT;
+            case HIT_RESIZE_LEFT: return HTLEFT;
+            default:
+                if (b->frameless)
+                    return HTCLIENT;
+                break; /* a framed window keeps its own frame hits */
+            }
+        }
+        else if (b->frameless)
+            return HTCLIENT;
+        break;
     case WM_ENTERSIZEMOVE:
     case WM_ENTERMENULOOP:
         b->in_modal = true;
@@ -1240,9 +1402,15 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     if (cfg->render == RENDER_GL)
         load_wgl();
 
-    DWORD style = window_style(cfg->resizable, WINDOW_WINDOWED);
+    DWORD ex;
+    bool frameless;
+    kind_styles(cfg, &b->style_framed, &b->style_frameless, &ex, &frameless);
+    b->frameless = frameless;
+    DWORD style = frameless ? b->style_frameless : b->style_framed;
+    HWND owner = cfg->parent && cfg->parent->b ? cfg->parent->b->hwnd : NULL;
     RECT rc = {0, 0, w, h};
-    adjust_rect(&rc, style, 0, NULL);
+    if (!frameless)
+        adjust_rect(&rc, style, ex, NULL); /* a frameless window's client area is the whole window */
     int outer_w = rc.right - rc.left;
     int outer_h = rc.bottom - rc.top;
 
@@ -1264,7 +1432,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         y = cfg->y + rc.top;
     }
 
-    b->hwnd = CreateWindowExW(0, WINDOW_CLASS, title, style, x, y, outer_w, outer_h, NULL, NULL, g.instance, b);
+    b->hwnd = CreateWindowExW(ex, WINDOW_CLASS, title, style, x, y, outer_w, outer_h, owner, NULL, g.instance, b);
     if (!b->hwnd)
     {
         win32_error("cannot create the window", NULL);
@@ -1292,7 +1460,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
 
     DragAcceptFiles(b->hwnd, TRUE);
-    ShowWindow(b->hwnd, SW_SHOW);
+    ShowWindow(b->hwnd, cfg->kind == WINDOW_KIND_TOOLTIP ? SW_SHOWNOACTIVATE : SW_SHOW);
     UpdateWindow(b->hwnd);
     b->focused = GetFocus() == b->hwnd;
 

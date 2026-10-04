@@ -32,6 +32,20 @@ extern "C"
         WINDOW_FULLSCREEN_BORDERLESS
     } WindowMode;
 
+    /* What a window is for. A DIALOG, UTILITY, POPUP or TOOLTIP window with a
+       WindowConfig.parent stays above that window. POPUP and TOOLTIP have no
+       decorations; UTILITY is a tool palette. The window manager is told the kind
+       (X11 window types, Win32 owned/tool/no-activate styles), so menus and tooltips
+       keep out of the taskbar, and a TOOLTIP never takes the focus. */
+    typedef enum
+    {
+        WINDOW_KIND_NORMAL,
+        WINDOW_KIND_DIALOG,
+        WINDOW_KIND_UTILITY,
+        WINDOW_KIND_POPUP,
+        WINDOW_KIND_TOOLTIP
+    } WindowKind;
+
     /* How the window is drawn to. RENDER_GL gives a GL context (window_swap);
        RENDER_PIXELS gives a CPU framebuffer blitted by the backend, no GL at all
        (window_lock_pixels / window_present_pixels); RENDER_VULKAN gives a bare
@@ -81,6 +95,9 @@ extern "C"
         GLConfig gl;
         bool resizable;
         bool vsync;
+        bool undecorated;      /* no title bar or border: draw your own (see window_set_hit_test) */
+        WindowKind kind;       /* WINDOW_KIND_NORMAL by default */
+        PlatformWindow *parent; /* the window a dialog, utility, popup or tooltip belongs to, or NULL */
     } WindowConfig;
 
     typedef struct
@@ -550,6 +567,30 @@ extern "C"
     PLATFORM_API void window_set_icon(PlatformWindow *w, int width, int height, const uint8_t *rgba);
     PLATFORM_API void window_set_opacity(PlatformWindow *w, float alpha); /* 0..1 */
     PLATFORM_API void window_set_always_on_top(PlatformWindow *w, bool on);
+    /* Show or hide the title bar and border of a window. */
+    PLATFORM_API void window_set_decorated(PlatformWindow *w, bool on);
+
+    /* Custom title bars and borders. For a window without decorations (or with them),
+       tell the platform which parts of it act as a title bar to drag or as an edge to
+       resize by: it calls the function with the pointer position in window
+       coordinates, and the answer makes the window manager drag or resize the window
+       there. Presses on those parts are not delivered to the application.
+       HIT_NORMAL (the default) is the ordinary client area. Pass NULL to remove it. */
+    typedef enum
+    {
+        HIT_NORMAL,
+        HIT_DRAG,
+        HIT_RESIZE_TOPLEFT,
+        HIT_RESIZE_TOP,
+        HIT_RESIZE_TOPRIGHT,
+        HIT_RESIZE_RIGHT,
+        HIT_RESIZE_BOTTOMRIGHT,
+        HIT_RESIZE_BOTTOM,
+        HIT_RESIZE_BOTTOMLEFT,
+        HIT_RESIZE_LEFT
+    } HitTestResult;
+    typedef HitTestResult (*HitTestFunc)(PlatformWindow *w, int x, int y, void *user);
+    PLATFORM_API void window_set_hit_test(PlatformWindow *w, HitTestFunc fn, void *user);
 
     /* ========================================================================== */
     /*  Monitors (all share one virtual coordinate space)                         */
@@ -598,6 +639,17 @@ extern "C"
 
     PLATFORM_API void mouse_set_position(PlatformWindow *w, int x, int y);
     PLATFORM_API void mouse_set_cursor(PlatformWindow *w, int cursor); /* CURSOR_* shape */
+
+    /* A cursor from an image: 0xAARRGGBB pixels, width and height from 1 to 256, the
+       hot spot (the pixel that points) inside it. NULL on failure (X11 needs
+       libXcursor at run time; not supported on Android and the web). The pixels are
+       copied. mouse_set_cursor_image(w, NULL) goes back to the shape chosen with
+       mouse_set_cursor. A cursor may be shared by windows; destroy it after they
+       stop using it. */
+    typedef struct PlatformCursor PlatformCursor;
+    PLATFORM_API PlatformCursor *cursor_create(const uint32_t *argb, int width, int height, int hot_x, int hot_y);
+    PLATFORM_API void cursor_destroy(PlatformCursor *cursor);
+    PLATFORM_API void mouse_set_cursor_image(PlatformWindow *w, PlatformCursor *cursor);
     PLATFORM_API void mouse_set_mode(PlatformWindow *w, int mode);     /* MOUSE_MODE_* */
     /* Keep receiving mouse motion and buttons while the pointer is outside the window,
        as when dragging out of it (SDL_CaptureMouse). Turn it off when the drag ends.

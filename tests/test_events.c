@@ -136,6 +136,79 @@ static void test_capture(PlatformWindow *w)
     CHECK(!mouse_capture(w, false));
 }
 
+static HitTestResult hit_fn(PlatformWindow *w, int x, int y, void *user)
+{
+    (void)w;
+    int *calls = user;
+    (*calls)++;
+    if (y < 30)
+        return x > 280 ? HIT_NORMAL : HIT_DRAG;
+    if (x >= 316)
+        return HIT_RESIZE_RIGHT;
+    return HIT_NORMAL;
+}
+
+static void test_window_features(void)
+{
+    WindowConfig cfg = {.title = "f", .width = 320, .height = 200, .x = WINDOW_POS_UNDEFINED, .y = WINDOW_POS_UNDEFINED};
+    PlatformWindow *w = window_create(&cfg);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+
+    /* decorations: on by default, off for undecorated, popups and tooltips, switchable */
+    CHECK(fake_is_decorated(w));
+    window_set_decorated(w, false);
+    CHECK(!fake_is_decorated(w));
+    window_set_decorated(w, true);
+    CHECK(fake_is_decorated(w));
+
+    WindowConfig pc = cfg;
+    pc.kind = WINDOW_KIND_POPUP;
+    pc.parent = w;
+    PlatformWindow *popup = window_create(&pc);
+    CHECK(popup && !fake_is_decorated(popup));
+    pc.kind = WINDOW_KIND_NORMAL;
+    pc.undecorated = true;
+    PlatformWindow *bare = window_create(&pc);
+    CHECK(bare && !fake_is_decorated(bare));
+    if (popup)
+        window_destroy(popup);
+    if (bare)
+        window_destroy(bare);
+
+    /* hit test */
+    int calls = 0;
+    CHECK(fake_hit_test(w, 10, 10) == HIT_NORMAL); /* none set yet */
+    window_set_hit_test(w, hit_fn, &calls);
+    CHECK(fake_hit_test(w, 100, 10) == HIT_DRAG);
+    CHECK(fake_hit_test(w, 318, 100) == HIT_RESIZE_RIGHT);
+    CHECK(fake_hit_test(w, 100, 100) == HIT_NORMAL);
+    CHECK(calls == 3);
+    window_set_hit_test(w, NULL, NULL);
+    CHECK(fake_hit_test(w, 100, 10) == HIT_NORMAL);
+
+    /* cursor images */
+    uint32_t px[4 * 4];
+    for (int i = 0; i < 16; i++)
+        px[i] = 0xFF000000u | (uint32_t)i;
+    CHECK(cursor_create(NULL, 4, 4, 0, 0) == NULL);
+    CHECK(cursor_create(px, 0, 4, 0, 0) == NULL);
+    CHECK(cursor_create(px, 4, 4, 4, 0) == NULL);  /* the hot spot is outside */
+    CHECK(cursor_create(px, 4, 4, 0, -1) == NULL);
+    CHECK(cursor_create(px, 300, 4, 0, 0) == NULL); /* too large */
+    PlatformCursor *c = cursor_create(px, 4, 4, 1, 2);
+    CHECK(c != NULL);
+    mouse_set_cursor_image(w, c);
+    CHECK(fake_cursor_image(w) == c);
+    mouse_set_cursor_image(w, NULL);
+    CHECK(fake_cursor_image(w) == NULL);
+    cursor_destroy(c);
+    cursor_destroy(NULL); /* harmless */
+
+    window_destroy(w);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -149,6 +222,7 @@ int main(void)
     test_lock_mods(w);
     test_capture(w);
     window_destroy(w);
+    test_window_features();
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
