@@ -67,7 +67,7 @@ version in `release_version`; the release is created on the chosen commit.
 | Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |
-| macOS/iOS | `backend_cocoa.mm` | Obj-C++, in progress |
+| macOS/iOS | none | not supported yet; only the headless fake backend builds (`-DPLATFORM_USE_FAKE=ON`) |
 
 ## API Overview
 
@@ -218,7 +218,6 @@ src/
   backend_web.c           Emscripten backend
   backend_android.c       Android NativeActivity backend
   backend_fake.c          headless backend for tests
-  backend_cocoa.mm        macOS/iOS backend (future)
   draw2d.c                software rasterizer over Framebuffer
   image.c                 BMP load/save
   os.c                    filesystem and path utilities
