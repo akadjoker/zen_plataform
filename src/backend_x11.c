@@ -96,6 +96,7 @@ static struct
     Window root;
     XContext ctx; /* xid -> BackendWindow* */
     XIM xim;
+    bool detectable_repeat; /* a held key sends presses only, no synthetic releases */
 
     Atom WM_PROTOCOLS, WM_DELETE_WINDOW, NET_WM_NAME, UTF8_STRING;
     Atom NET_WM_STATE, NET_WM_STATE_FULLSCREEN, NET_WM_STATE_MAXIMIZED_VERT,
@@ -495,6 +496,12 @@ bool backend_init(void)
     g.screen = DefaultScreen(g.dpy);
     g.root = RootWindow(g.dpy, g.screen);
     g.ctx = XUniqueContext();
+
+    /* Without this a held key arrives as release/press pairs, and an input method
+       that takes the events apart makes the key read as up between them. */
+    Bool detectable = False;
+    XkbSetDetectableAutoRepeat(g.dpy, True, &detectable);
+    g.detectable_repeat = detectable == True;
 
     g.WM_PROTOCOLS = XInternAtom(g.dpy, "WM_PROTOCOLS", False);
     g.WM_DELETE_WINDOW = XInternAtom(g.dpy, "WM_DELETE_WINDOW", False);
@@ -1005,10 +1012,11 @@ static void handle_key(BackendWindow *b, XEvent *ev, bool down)
 {
     KeySym ks = XLookupKeysym(&ev->xkey, 0);
     Event e = {.type = EVENT_KEY};
-    e.data.key.key = translate_keysym(ks);
+    int key = translate_keysym(ks);
+    e.data.key.key = key;
     e.data.key.scancode = (int)ev->xkey.keycode;
     e.data.key.down = down;
-    e.data.key.repeat = false;
+    e.data.key.repeat = down && key > 0 && key < KEY_MAX && b->core->in.key_down[key];
     e.data.key.mods = translate_mods(ev->xkey.state);
     push(b, &e);
 
@@ -1261,7 +1269,7 @@ static void process_event(BackendWindow *b, XEvent *ev)
         break;
     case KeyRelease:
         /* swallow the synthetic release of an auto-repeat pair */
-        if (XEventsQueued(g.dpy, QueuedAfterReading))
+        if (!g.detectable_repeat && XEventsQueued(g.dpy, QueuedAfterReading))
         {
             XEvent next;
             XPeekEvent(g.dpy, &next);
