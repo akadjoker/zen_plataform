@@ -329,6 +329,7 @@ tests/
   test_library.c          shared library loading
   test_clipboard.c        clipboard API and PNG round trip (fake backend)
   test_clipboard_x11.c    real X11 selections against forked clients, INCR included
+  test_multiwindow_x11.c  two windows on one X connection: events reach their own window
   test_vulkan.c           RENDER_VULKAN window, handles, a real VkSurfaceKHR (skips without a driver)
   test_draw2d.c           rasterizer tests (nearest + bilinear blit)
   test_fs.c               filesystem round-trip tests

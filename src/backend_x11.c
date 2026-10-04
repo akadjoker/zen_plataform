@@ -115,6 +115,8 @@ struct BackendWindow
     Colormap colormap;
     XIC xic;
     Core *core; /* set at the start of each pump so handlers can reach the core */
+    XEvent *pending; /* events other windows' pumps read off the shared queue for this one */
+    int pending_n, pending_cap;
 
     WindowMode mode;
     int width, height;
@@ -725,6 +727,7 @@ void backend_destroy(BackendWindow *b)
             glXDestroyContext(g.dpy, b->glc);
     }
     XDeleteContext(g.dpy, b->win, g.ctx);
+    free(b->pending);
     if (b->hidden_cursor)
         XFreeCursor(g.dpy, b->hidden_cursor);
     XDestroyWindow(g.dpy, b->win);
@@ -1123,9 +1126,37 @@ static void answer_selection_request(XSelectionRequestEvent *req)
     XSetErrorHandler(previous);
 }
 
+/* All windows share one X connection and one event queue, so a window's pump meets
+   events that belong to the others. Each such event is kept on its owner's pending
+   list and processed in the owner's own pump: that keeps a window's per-frame input
+   (edges, the frame's event list) in step with its own begin_frame. */
+#define PENDING_MAX 4096
+
+static void defer_event(BackendWindow *owner, const XEvent *ev)
+{
+    if (owner->pending_n == owner->pending_cap)
+    {
+        if (owner->pending_cap >= PENDING_MAX)
+            return; /* a window nobody pumps: drop rather than grow without bound */
+        int cap = owner->pending_cap ? owner->pending_cap * 2 : 64;
+        XEvent *grown = realloc(owner->pending, (size_t)cap * sizeof *grown);
+        if (!grown)
+            return;
+        owner->pending = grown;
+        owner->pending_cap = cap;
+    }
+    owner->pending[owner->pending_n++] = *ev;
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
+
+    /* Older than anything still in the queue, so first. */
+    for (int i = 0; i < b->pending_n; i++)
+        process_event(b, &b->pending[i]);
+    b->pending_n = 0;
+
     while (XPending(g.dpy))
     {
         XEvent ev;
@@ -1145,9 +1176,16 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
         if (ev.type == PropertyNotify && clip_incr_property_event(&ev.xproperty))
             continue;
-        if (ev.xany.window != b->win)
-            continue; /* MVP is single-window; other windows are not dispatched here */
-        process_event(b, &ev);
+
+        if (ev.xany.window == b->win)
+        {
+            process_event(b, &ev);
+            continue;
+        }
+        XPointer found = NULL;
+        if (XFindContext(g.dpy, ev.xany.window, g.ctx, &found) == 0 && found)
+            defer_event((BackendWindow *)found, &ev);
+        /* anything else (the clipboard helper, a window already destroyed) is dropped */
     }
 }
 
