@@ -119,13 +119,26 @@ if (gesture_detected(w) == GESTURE_PINCH_OUT)
     float px, py;  gesture_pinch_vector(w, &px, &py);   // pixels, first to second finger
 }
 gesture_set_enabled(w, GESTURE_TAP | GESTURE_DRAG);      // report only these
-gesture_set_mouse_emulation(w, true);                    // left button acts as one finger, to test on a desktop
+touch_set_mouse_emulation(w, true);                      // desktop: the left button becomes one finger (TOUCH_ID_MOUSE)
 ```
 
 Gesture detection follows raylib's rgestures: tap, double tap, hold, drag, four
 swipes and pinch in/out. Touch points come from Android, the web and the fake
 backend. The X11 and Win32 backends do not report touch yet, so on those use
-`gesture_set_mouse_emulation`.
+`touch_set_mouse_emulation`, which turns the left button into one finger with a
+real `EVENT_TOUCH`.
+
+### Logging
+
+```c
+log_set_level(LOGLEVEL_DEBUG);              // default LOGLEVEL_INFO
+log_info("loaded %d assets", n);            // log_debug / log_warn / log_error too
+log_set_callback(my_sink, my_data);         // void my_sink(LogLevel, const char *msg, void *user); NULL restores stderr
+```
+
+The default sink prints `[LEVEL] text` to stderr (the browser console on the web),
+to logcat on Android, and to the debugger output on Windows. The platform logs
+the errors behind `platform_get_error()` at `LOGLEVEL_DEBUG`.
 
 ### Gamepads
 
@@ -242,6 +255,7 @@ src/
   backend_android.c       Android NativeActivity backend
   backend_fake.c          headless backend for tests
   gesture.c               touch gesture recognizer (after raylib's rgestures)
+  log.c                   leveled logging with a replaceable sink
   draw2d.c                software rasterizer over Framebuffer
   image.c                 BMP load/save
   os.c                    filesystem and path utilities

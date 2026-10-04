@@ -129,11 +129,6 @@ static void gesture_feed_touch(Core *core, TouchPhase phase, int id, float x, fl
     gesture_feed(&s->gesture, a, n, pos, s->gesture.width, s->gesture.height, time_seconds());
 }
 
-static void gesture_feed_mouse(InputState *s, GestureAction a, int x, int y)
-{
-    GVec2 p = {(float)x, (float)y};
-    gesture_feed(&s->gesture, a, 1, &p, s->gesture.width, s->gesture.height, time_seconds());
-}
 
 /* ========================================================================== */
 /*  Backend -> core                                                           */
@@ -142,6 +137,21 @@ static void gesture_feed_mouse(InputState *s, GestureAction a, int x, int y)
 void core_push_char(Core *core, uint32_t codepoint)
 {
     char_push(&core->in, codepoint);
+}
+
+
+/* Desktop has no touch device: with emulation on, the left button becomes one
+   finger (TOUCH_ID_MOUSE) and goes through the same path as a real touch. */
+static void mouse_touch_emit(Core *core, TouchPhase phase)
+{
+    InputState *s = &core->in;
+    Event t = {.type = EVENT_TOUCH};
+    t.data.touch.id = TOUCH_ID_MOUSE;
+    t.data.touch.x = (float)s->mouse_x;
+    t.data.touch.y = (float)s->mouse_y;
+    t.data.touch.pressure = phase == TOUCH_UP ? 0.0f : 1.0f;
+    t.data.touch.phase = phase;
+    core_push_event(core, &t);
 }
 
 void core_push_event(Core *core, const Event *ev)
@@ -170,19 +180,26 @@ void core_push_event(Core *core, const Event *ev)
     case EVENT_MOUSE_MOVE:
         s->mouse_x = ev->data.mouse.x;
         s->mouse_y = ev->data.mouse.y;
-        if (s->gesture_mouse && s->mouse_gesture_active)
-            gesture_feed_mouse(s, GESTURE_ACTION_MOVE, s->mouse_x, s->mouse_y);
+        if (s->mouse_touch && s->mouse_touch_down)
+            mouse_touch_emit(core, TOUCH_MOVE);
         break;
     case EVENT_MOUSE_BUTTON:
     {
         int b = ev->data.mouse.button;
         if (b >= 0 && b < MOUSE_BUTTON_MAX)
             s->mouse_down[b] = ev->data.mouse.down;
-        if (s->gesture_mouse && b == MOUSE_LEFT && s->touch_count == 0)
+        if (s->mouse_touch && b == MOUSE_LEFT)
         {
-            s->mouse_gesture_active = ev->data.mouse.down;
-            gesture_feed_mouse(s, ev->data.mouse.down ? GESTURE_ACTION_DOWN : GESTURE_ACTION_UP,
-                               s->mouse_x, s->mouse_y);
+            if (ev->data.mouse.down && !s->mouse_touch_down && s->touch_count == 0)
+            {
+                s->mouse_touch_down = true;
+                mouse_touch_emit(core, TOUCH_DOWN);
+            }
+            else if (!ev->data.mouse.down && s->mouse_touch_down)
+            {
+                s->mouse_touch_down = false;
+                mouse_touch_emit(core, TOUCH_UP);
+            }
         }
         break;
     }
@@ -742,10 +759,15 @@ float gesture_pinch_angle(PlatformWindow *w)
 {
     return w->core.in.gesture.pinch_angle;
 }
-void gesture_set_mouse_emulation(PlatformWindow *w, bool on)
+void touch_set_mouse_emulation(PlatformWindow *w, bool on)
 {
-    w->core.in.gesture_mouse = on;
-    w->core.in.mouse_gesture_active = false;
+    InputState *s = &w->core.in;
+    if (!on && s->mouse_touch_down)
+    {
+        s->mouse_touch_down = false;
+        mouse_touch_emit(&w->core, TOUCH_UP);
+    }
+    s->mouse_touch = on;
 }
 
 int touch_id(PlatformWindow *w, int index)

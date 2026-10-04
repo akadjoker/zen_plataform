@@ -223,14 +223,44 @@ static void test_mouse_emulation(void)
     fake_mouse_button(w, MOUSE_LEFT, false);
     window_begin_frame(w);
 
-    gesture_set_mouse_emulation(w, true);
+    touch_set_mouse_emulation(w, true);
     fake_mouse_move(w, 50, 50);
     fake_mouse_button(w, MOUSE_LEFT, true);
     window_begin_frame(w);
+    CHECK(touch_count(w) == 1);
+    CHECK(touch_id(w, 0) == TOUCH_ID_MOUSE);
+    CHECK(touch_x(w, 0) == 50 && touch_y(w, 0) == 50);
     CHECK(gesture_is_detected(w, GESTURE_TAP));
+
+    /* the finger follows the pointer while the button is held, and a touch event is in the stream */
+    fake_mouse_move(w, 80, 90);
+    window_begin_frame(w);
+    CHECK(touch_x(w, 0) == 80 && touch_y(w, 0) == 90);
+    bool saw_touch = false;
+    Event ev;
+    while (poll_event(w, &ev))
+        if (ev.type == EVENT_TOUCH && ev.data.touch.id == TOUCH_ID_MOUSE && ev.data.touch.phase == TOUCH_MOVE)
+            saw_touch = true;
+    CHECK(saw_touch);
+
+    /* lifting after a fast 50 px move is a swipe (down: y grows downwards) */
     fake_mouse_button(w, MOUSE_LEFT, false);
     window_begin_frame(w);
+    CHECK(touch_count(w) == 0);
+    CHECK(gesture_detected(w) == GESTURE_SWIPE_DOWN);
+    window_begin_frame(w);
     CHECK(gesture_detected(w) == GESTURE_NONE);
+
+    /* switching it off while the button is down lifts the finger */
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 1);
+    touch_set_mouse_emulation(w, false);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 0);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 0);
 
     window_destroy(w);
 }

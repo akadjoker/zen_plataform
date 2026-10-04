@@ -199,6 +199,43 @@ extern "C"
     PLATFORM_API const char *platform_get_error(void);
     PLATFORM_API void platform_clear_error(void);
 
+    /* ========================================================================== */
+    /*  Logging                                                                   */
+    /* ========================================================================== */
+
+    /* Messages below the current level are dropped (default LOGLEVEL_INFO). The
+       default sink prints "[LEVEL] text" to stderr, to logcat on Android, and to
+       the debugger output on Windows. log_set_callback replaces it, NULL restores
+       it. The platform itself logs the errors it reports through
+       platform_get_error at LOGLEVEL_DEBUG. Set the level and callback before
+       starting threads; the text is cut at 1023 bytes. */
+    typedef enum
+    {
+        LOGLEVEL_DEBUG,
+        LOGLEVEL_INFO,
+        LOGLEVEL_WARN,
+        LOGLEVEL_ERROR,
+        LOGLEVEL_OFF
+    } LogLevel;
+
+    typedef void (*LogCallback)(LogLevel level, const char *message, void *user);
+
+#if defined(__GNUC__) || defined(__clang__)
+#define PLATFORM_PRINTF(f, a) __attribute__((format(printf, f, a)))
+#else
+#define PLATFORM_PRINTF(f, a)
+#endif
+
+    PLATFORM_API void log_set_level(LogLevel level);
+    PLATFORM_API LogLevel log_get_level(void);
+    PLATFORM_API void log_set_callback(LogCallback cb, void *user);
+    PLATFORM_API void log_message(LogLevel level, const char *fmt, ...) PLATFORM_PRINTF(2, 3);
+
+#define log_debug(...) log_message(LOGLEVEL_DEBUG, __VA_ARGS__)
+#define log_info(...) log_message(LOGLEVEL_INFO, __VA_ARGS__)
+#define log_warn(...) log_message(LOGLEVEL_WARN, __VA_ARGS__)
+#define log_error(...) log_message(LOGLEVEL_ERROR, __VA_ARGS__)
+
     PLATFORM_API PlatformWindow *window_create(const WindowConfig *cfg);
     PLATFORM_API void window_destroy(PlatformWindow *w);
 
@@ -403,6 +440,14 @@ extern "C"
     PLATFORM_API void touch_position(PlatformWindow *w, int index, float *x, float *y);
     PLATFORM_API int touch_id(PlatformWindow *w, int index); /* stable across down..up */
 
+    /* Desktop backends report no touch. With emulation on, the left mouse button is
+       one finger: it raises EVENT_TOUCH (id TOUCH_ID_MOUSE) and shows up in
+       touch_count/touch_position and in the gestures, like a real touch. Off by
+       default, so an app that handles both mouse and touch does not see the click
+       twice. Real touches that are active take priority over the mouse. */
+#define TOUCH_ID_MOUSE (-2)
+    PLATFORM_API void touch_set_mouse_emulation(PlatformWindow *w, bool on);
+
     /* ========================================================================== */
     /*  Gestures (built on the touch points)                                      */
     /* ========================================================================== */
@@ -434,9 +479,6 @@ extern "C"
     PLATFORM_API float gesture_drag_angle(PlatformWindow *w);                      /* degrees, set on a swipe; 0 = right, counterclockwise */
     PLATFORM_API void gesture_pinch_vector(PlatformWindow *w, float *x, float *y); /* pixels, first to second finger */
     PLATFORM_API float gesture_pinch_angle(PlatformWindow *w);                     /* degrees, like the drag angle */
-    /* Treat the left mouse button as a single finger, to try gestures on a desktop.
-       Off by default. */
-    PLATFORM_API void gesture_set_mouse_emulation(PlatformWindow *w, bool on);
 
     /* ========================================================================== */
     /*  Gamepads                                                                  */

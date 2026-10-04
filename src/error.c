@@ -20,6 +20,7 @@ bool error_set(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(g_error, sizeof g_error, fmt, ap);
     va_end(ap);
+    log_message(LOGLEVEL_DEBUG, "%s", g_error);
     return false;
 }
 

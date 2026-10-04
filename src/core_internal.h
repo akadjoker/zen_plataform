@@ -51,8 +51,8 @@ typedef struct
     int touch_count;
 
     GestureState gesture;
-    bool gesture_mouse; /* feed gestures from the left mouse button too */
-    bool mouse_gesture_active;
+    bool mouse_touch;      /* left button emulates one finger */
+    bool mouse_touch_down; /* ... and that finger is down now */
 
     bool close_request; /* set by EVENT_WINDOW_CLOSE, drained into should_close */
     int exit_key;

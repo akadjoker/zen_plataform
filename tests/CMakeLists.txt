@@ -5,6 +5,7 @@ function(add_fake_test name)
         ${CMAKE_SOURCE_DIR}/src/core.c
         ${CMAKE_SOURCE_DIR}/src/gesture.c
         ${CMAKE_SOURCE_DIR}/src/error.c
+        ${CMAKE_SOURCE_DIR}/src/log.c
         ${CMAKE_SOURCE_DIR}/src/gamepad.c
         ${CMAKE_SOURCE_DIR}/src/gamepad_stub.c
         ${CMAKE_SOURCE_DIR}/src/backend_fake.c)
@@ -19,6 +20,7 @@ endfunction()
 add_fake_test(test_input_logic)
 add_fake_test(test_app_run)
 add_fake_test(test_gestures)
+add_fake_test(test_log)
 
 # Portable modules with no window backend: compile just their sources (in ARGN).
 function(add_unit_test name)
@@ -35,9 +37,9 @@ function(add_unit_test name)
 endfunction()
 
 if(WIN32)
-    set(FS_SRC src/os.c src/error.c src/io.c src/io_win32.c src/fs_win32.c src/win32_util.c)
+    set(FS_SRC src/os.c src/error.c src/log.c src/io.c src/io_win32.c src/fs_win32.c src/win32_util.c)
 else()
-    set(FS_SRC src/os.c src/error.c src/io.c src/io_posix.c src/fs_posix.c)
+    set(FS_SRC src/os.c src/error.c src/log.c src/io.c src/io_posix.c src/fs_posix.c)
 endif()
 add_unit_test(test_fs ${FS_SRC})
 add_unit_test(test_path ${FS_SRC})
