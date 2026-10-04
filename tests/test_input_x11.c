@@ -105,6 +105,12 @@ static bool wait_released(PlatformWindow *w, int key)
     return false;
 }
 
+/* The modifier keys held, without the lock states the machine happens to be in. */
+static int held_mods(PlatformWindow *w)
+{
+    return key_mods(w) & ~(KEYMOD_CAPS_LOCK | KEYMOD_NUM_LOCK);
+}
+
 static void test_translation(PlatformWindow *w)
 {
     static const struct
@@ -162,13 +168,13 @@ static void test_modifiers(PlatformWindow *w)
     KeyCode ctrl = XKeysymToKeycode(g_dpy, XK_Control_R);
     KeyCode a = XKeysymToKeycode(g_dpy, XK_a);
 
-    CHECK(key_mods(w) == 0);
+    CHECK(held_mods(w) == 0);
     send_key(shift, true, 0);
     CHECK(wait_pressed(w, KEY_LEFT_SHIFT));
-    CHECK(key_mods(w) == KEYMOD_SHIFT);
+    CHECK(held_mods(w) == KEYMOD_SHIFT);
     send_key(ctrl, true, ShiftMask);
     CHECK(wait_pressed(w, KEY_RIGHT_CONTROL));
-    CHECK(key_mods(w) == (KEYMOD_SHIFT | KEYMOD_CTRL));
+    CHECK(held_mods(w) == (KEYMOD_SHIFT | KEYMOD_CTRL));
 
     send_key(a, true, ShiftMask | ControlMask);
     window_begin_frame(w);
@@ -193,10 +199,51 @@ static void test_modifiers(PlatformWindow *w)
     CHECK(wait_released(w, KEY_A));
     send_key(shift, false, ShiftMask | ControlMask);
     CHECK(wait_released(w, KEY_LEFT_SHIFT));
-    CHECK(key_mods(w) == KEYMOD_CTRL);
+    CHECK(held_mods(w) == KEYMOD_CTRL);
     send_key(ctrl, false, ControlMask);
     CHECK(wait_released(w, KEY_RIGHT_CONTROL));
-    CHECK(key_mods(w) == 0);
+    CHECK(held_mods(w) == 0);
+}
+
+/* A press of a key that is already down is an auto-repeat: the key stays down, it
+   is not a new press, and the event says so. */
+static void test_repeat(PlatformWindow *w)
+{
+    KeyCode a = XKeysymToKeycode(g_dpy, XK_a);
+
+    send_key(a, true, 0);
+    CHECK(wait_pressed(w, KEY_A));
+    Event ev;
+    while (poll_event(w, &ev))
+    {
+    }
+
+    send_key(a, true, 0);
+    int repeats = 0;
+    int presses = 0;
+    for (int i = 0; i < 500 && repeats == 0 && presses == 0; i++)
+    {
+        window_begin_frame(w);
+        CHECK(!key_pressed(w, KEY_A));
+        while (poll_event(w, &ev))
+        {
+            if (ev.type != EVENT_KEY || ev.data.key.key != KEY_A || !ev.data.key.down)
+                continue;
+            if (ev.data.key.repeat)
+                repeats++;
+            else
+                presses++;
+        }
+        if (repeats == 0 && presses == 0)
+            time_sleep(2);
+    }
+    CHECK(repeats == 1);
+    CHECK(presses == 0);
+    CHECK(key_down(w, KEY_A));
+
+    send_key(a, false, 0);
+    CHECK(wait_released(w, KEY_A));
+    CHECK(!key_down(w, KEY_A));
 }
 
 static void test_focus_loss(PlatformWindow *w)
@@ -208,13 +255,13 @@ static void test_focus_loss(PlatformWindow *w)
     CHECK(wait_pressed(w, KEY_LEFT_ALT));
     send_key(a, true, Mod1Mask);
     CHECK(wait_pressed(w, KEY_A));
-    CHECK(key_mods(w) == KEYMOD_ALT);
+    CHECK(held_mods(w) == KEYMOD_ALT);
 
     send_focus_out();
     CHECK(wait_released(w, KEY_LEFT_ALT));
     CHECK(!key_down(w, KEY_A));
     CHECK(!key_down(w, KEY_LEFT_ALT));
-    CHECK(key_mods(w) == 0);
+    CHECK(held_mods(w) == 0);
     CHECK(!window_is_focused(w));
 }
 
@@ -271,6 +318,7 @@ int main(void)
     {
         test_translation(w);
         test_modifiers(w);
+        test_repeat(w);
         test_focus_loss(w);
         test_cursors(w);
     }
