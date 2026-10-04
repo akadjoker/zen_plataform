@@ -85,6 +85,10 @@ if(PLATFORM_BACKEND_X11)
     add_test(NAME test_multiwindow_x11 COMMAND test_multiwindow_x11)
     set_tests_properties(test_multiwindow_x11 PROPERTIES SKIP_RETURN_CODE 77)
 
+    add_executable(test_dialog test_dialog.c)
+    target_link_libraries(test_dialog PRIVATE platform)
+    add_test(NAME test_dialog COMMAND test_dialog)
+
     add_executable(test_x11_window test_x11_window.c)
     target_link_libraries(test_x11_window PRIVATE platform)
     add_test(NAME test_x11_window COMMAND test_x11_window)

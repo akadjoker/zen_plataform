@@ -178,6 +178,27 @@ The default sink prints `[LEVEL] text` to stderr (the browser console on the web
 to logcat on Android, and to the debugger output on Windows. The platform logs
 the errors behind `platform_get_error()` at `LOGLEVEL_DEBUG`.
 
+### Dialogs and URLs
+
+```c
+message_box(w, MESSAGE_ERROR, "Save failed", "The disk is full.");
+if (confirm_box(w, "Quit", "Discard changes?") == 1) { /* yes */ }
+
+FileFilter images[] = {{"Images", "*.png;*.jpg"}, {"All files", "*"}};
+char path[1024];
+if (dialog_open_file(w, "Open", NULL, images, 2, path, sizeof path)) { /* ... */ }
+dialog_save_file(w, "Save as", "untitled.png", images, 1, path, sizeof path);
+dialog_pick_folder(w, "Choose a folder", NULL, path, sizeof path);
+int n = dialog_open_files(w, "Open several", NULL, NULL, 0, many, sizeof many);   // paths one per line
+
+open_url("https://example.com");                 // the user's browser
+```
+
+Native dialogs on Windows; `zenity` or `kdialog` on Linux (an error if neither is
+installed); `alert`/`confirm` on the web; none on Android yet. A cancelled dialog
+returns false and leaves `platform_get_error()` empty, so you can tell it from one
+that could not be shown.
+
 ### Threads
 
 ```c
@@ -372,6 +393,7 @@ src/
   log.c                   leveled logging with a replaceable sink
   library.c               shared library loading (dlopen / LoadLibrary)
   thread.c                threads, recursive mutexes, condition variables, cpu_count
+  dialog.c                message boxes, file dialogs, open_url (native, zenity/kdialog, web)
   clipboard.c             clipboard API (text, MIME data, PNG images)
   png.c                   minimal PNG encoder and decoder for the clipboard
   clipboard_mem.h         in-process clipboard store for fake, Android and web
@@ -390,6 +412,7 @@ tests/
   test_x11_window.c       capture, lock keys, window kinds, hit test, image cursors on a real X server
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach
+  test_dialog.c           zenity/kdialog/xdg-open arguments and answers, with stand-in programs
   test_clipboard.c        clipboard API and PNG round trip (fake backend)
   test_clipboard_x11.c    real X11 selections against forked clients, INCR included
   test_multiwindow_x11.c  two windows on one X connection: events reach their own window

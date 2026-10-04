@@ -325,6 +325,56 @@ extern "C"
     PLATFORM_API void *gl_proc_address(const char *name);
 
     /* ========================================================================== */
+    /*  Dialogs and URLs                                                          */
+    /* ========================================================================== */
+
+    /* The system's own dialogs, blocking until the user answers. On Windows they are
+       the native ones; on Linux they run zenity or kdialog, whichever is installed
+       (-1 or false with an error when neither is); on the web message_box and
+       confirm_box are alert() and confirm(). Android has none yet. `parent` (may be
+       NULL) is the window the dialog belongs to.
+
+       A dialog the user cancels returns false (or 0) and leaves platform_get_error()
+       empty; one that could not be shown also sets the error, so tell them apart
+       with platform_get_error()[0]. */
+    typedef enum
+    {
+        MESSAGE_INFO,
+        MESSAGE_WARNING,
+        MESSAGE_ERROR
+    } MessageKind;
+
+    PLATFORM_API bool message_box(PlatformWindow *parent, MessageKind kind, const char *title, const char *message);
+    /* 1 for Yes, 0 for No, -1 when the dialog could not be shown. */
+    PLATFORM_API int confirm_box(PlatformWindow *parent, const char *title, const char *message);
+
+    /* A filter is a name and its patterns, separated by ';': {"Images", "*.png;*.jpg"}.
+       No filters (count 0) shows every file. default_path (may be NULL) is a folder or
+       a file to start at. Paths come back in UTF-8, into `out` of `cap` bytes; false if
+       the path does not fit. */
+    typedef struct
+    {
+        const char *name;
+        const char *patterns;
+    } FileFilter;
+
+    PLATFORM_API bool dialog_open_file(PlatformWindow *parent, const char *title, const char *default_path,
+                                       const FileFilter *filters, int filter_count, char *out, size_t cap);
+    PLATFORM_API bool dialog_save_file(PlatformWindow *parent, const char *title, const char *default_path,
+                                       const FileFilter *filters, int filter_count, char *out, size_t cap);
+    PLATFORM_API bool dialog_pick_folder(PlatformWindow *parent, const char *title, const char *default_path,
+                                         char *out, size_t cap);
+    /* Several files: the paths go into `out` one per line ('\n'), and the count is
+       returned (0 when cancelled or on failure). */
+    PLATFORM_API int dialog_open_files(PlatformWindow *parent, const char *title, const char *default_path,
+                                       const FileFilter *filters, int filter_count, char *out, size_t cap);
+
+    /* Open a URL in the user's browser (or the handler for its scheme: mailto:,
+       file://). Returns false if it could not be started. A URL that starts with '-'
+       or holds control characters is refused. The browser is not waited for. */
+    PLATFORM_API bool open_url(const char *url);
+
+    /* ========================================================================== */
     /*  Shared libraries                                                          */
     /* ========================================================================== */
 
