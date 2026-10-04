@@ -140,6 +140,27 @@ The default sink prints `[LEVEL] text` to stderr (the browser console on the web
 to logcat on Android, and to the debugger output on Windows. The platform logs
 the errors behind `platform_get_error()` at `LOGLEVEL_DEBUG`.
 
+### Threads
+
+```c
+static int work(void *user) { /* ... */ return 0; }
+
+PlatformThread *t = thread_create(work, &data, "worker");
+PlatformMutex *m = mutex_create();               // recursive
+PlatformCond *c = cond_create();
+
+mutex_lock(m);
+while (!ready) cond_wait(c, m);                  // or cond_wait_timeout(c, m, 100)
+mutex_unlock(m);
+
+int result = thread_join(t);                     // or thread_detach(t)
+int n = cpu_count();
+```
+
+pthreads and the Win32 API underneath; not available on the web. The platform's window,
+input and clipboard state belong to one thread; `log_message` and the filesystem calls
+are safe from any.
+
 ### Vulkan, native handles, shared libraries
 
 ```c
@@ -312,6 +333,7 @@ src/
   gesture.c               touch gesture recognizer (after raylib's rgestures)
   log.c                   leveled logging with a replaceable sink
   library.c               shared library loading (dlopen / LoadLibrary)
+  thread.c                threads, recursive mutexes, condition variables, cpu_count
   clipboard.c             clipboard API (text, MIME data, PNG images)
   png.c                   minimal PNG encoder and decoder for the clipboard
   clipboard_mem.h         in-process clipboard store for fake, Android and web
@@ -327,6 +349,7 @@ tests/
   test_gestures.c         gesture recognizer and touch through the core
   test_log.c              log levels, sink, truncation
   test_library.c          shared library loading
+  test_thread.c           threads, mutex, condition, timeout, detach
   test_clipboard.c        clipboard API and PNG round trip (fake backend)
   test_clipboard_x11.c    real X11 selections against forked clients, INCR included
   test_multiwindow_x11.c  two windows on one X connection: events reach their own window

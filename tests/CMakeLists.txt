@@ -136,6 +136,17 @@ add_fake_ext_test(test_clipboard
     src/png.c
     src/draw2d.c)
 
+# Threads: the fake core only supplies time_sleep and time_seconds to the test.
+add_fake_ext_test(test_thread
+    ${FS_SRC}
+    src/gamepad.c
+    src/gamepad_stub.c
+    src/thread.c)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_thread PRIVATE Threads::Threads)
+endif()
+
 # The test also needs libm for stb_truetype math functions (sqrt, floor, etc.)
 if(NOT WIN32)
     target_link_libraries(test_widgets PRIVATE m)

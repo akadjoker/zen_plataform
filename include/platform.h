@@ -305,6 +305,49 @@ extern "C"
     PLATFORM_API void library_close(SharedLibrary *lib);
 
     /* ========================================================================== */
+    /*  Threads                                                                   */
+    /* ========================================================================== */
+
+    /* Threads, recursive mutexes and condition variables, over pthreads and the
+       Win32 API. Not available on the web (the create functions return NULL).
+       The platform's own state is not thread-safe: window, input, clipboard and
+       log-level calls belong to the thread that runs the window. log_message and
+       the filesystem calls may be used from any thread. */
+    typedef struct PlatformThread PlatformThread;
+    typedef struct PlatformMutex PlatformMutex;
+    typedef struct PlatformCond PlatformCond;
+    typedef int (*ThreadFunc)(void *user);
+
+    /* Start a thread running fn(user). name (may be NULL) shows in debuggers; Linux
+       keeps its first 15 bytes. NULL on failure (platform_get_error()). */
+    PLATFORM_API PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name);
+    /* Wait for the thread to end and return fn's result. Frees the handle. */
+    PLATFORM_API int thread_join(PlatformThread *t);
+    /* Let the thread run to completion on its own. The handle is gone after this. */
+    PLATFORM_API void thread_detach(PlatformThread *t);
+    PLATFORM_API uint64_t thread_current_id(void);
+
+    /* A mutex may be locked again by the thread that holds it, once per unlock.
+       Do not wait on a condition while holding it more than once. */
+    PLATFORM_API PlatformMutex *mutex_create(void);
+    PLATFORM_API void mutex_destroy(PlatformMutex *m);
+    PLATFORM_API void mutex_lock(PlatformMutex *m);
+    PLATFORM_API bool mutex_try_lock(PlatformMutex *m); /* true if it got the lock */
+    PLATFORM_API void mutex_unlock(PlatformMutex *m);
+
+    /* cond_wait releases the mutex and sleeps until signalled, then takes the
+       mutex again; it may wake spuriously, so wait in a loop on your condition. */
+    PLATFORM_API PlatformCond *cond_create(void);
+    PLATFORM_API void cond_destroy(PlatformCond *c);
+    PLATFORM_API void cond_signal(PlatformCond *c);
+    PLATFORM_API void cond_broadcast(PlatformCond *c);
+    PLATFORM_API void cond_wait(PlatformCond *c, PlatformMutex *m);
+    /* false when the time ran out, true when it was signalled (or woke early). */
+    PLATFORM_API bool cond_wait_timeout(PlatformCond *c, PlatformMutex *m, uint32_t milliseconds);
+
+    PLATFORM_API int cpu_count(void); /* logical processors, at least 1 */
+
+    /* ========================================================================== */
     /*  Native handles                                                            */
     /* ========================================================================== */
 
