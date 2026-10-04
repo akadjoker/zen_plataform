@@ -187,10 +187,8 @@ int main(void)
 
     /* ---------- cleanup ---------- */
     zui_destroy(sp.ui);
-    zui_destroy(sg.ui);
     r2d_shutdown();
     window_destroy(wp);
-    window_destroy(wg);
     platform_shutdown();
     printf("clean exit\n");
     return 0;
