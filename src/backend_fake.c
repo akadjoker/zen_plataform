@@ -5,6 +5,7 @@
  */
 #include "core_internal.h"
 #include "backend.h"
+#include "error_internal.h"
 #include "backend_fake.h"
 
 #include <stdlib.h>
@@ -95,6 +96,28 @@ void backend_pump_events(BackendWindow *b, Core *core)
             core_push_event(core, &it->ev);
     }
     b->pending_count = 0;
+}
+
+void *backend_native_handle(BackendWindow *b, NativeHandleType type)
+{
+    (void)b;
+    (void)type;
+    return NULL;
+}
+
+const char *const *backend_vulkan_extensions(uint32_t *count)
+{
+    *count = 0;
+    return NULL;
+}
+
+bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void *allocator, uint64_t *out_surface)
+{
+    (void)b;
+    (void)instance;
+    (void)allocator;
+    (void)out_surface;
+    return error_set("Vulkan is not available in the fake backend");
 }
 
 void backend_swap(BackendWindow *b)

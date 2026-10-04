@@ -440,6 +440,32 @@ void backend_pump_events(BackendWindow *b, Core *core)
     b->pending_count = 0;
 }
 
+/* ========================================================================== */
+/*  native handles and Vulkan: none on the web                                */
+/* ========================================================================== */
+
+void *backend_native_handle(BackendWindow *b, NativeHandleType type)
+{
+    (void)b;
+    (void)type;
+    return NULL;
+}
+
+const char *const *backend_vulkan_extensions(uint32_t *count)
+{
+    *count = 0;
+    return NULL;
+}
+
+bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void *allocator, uint64_t *out_surface)
+{
+    (void)b;
+    (void)instance;
+    (void)allocator;
+    (void)out_surface;
+    return error_set("Vulkan is not available on the web");
+}
+
 void backend_swap(BackendWindow *b)
 {
     (void)b; /* the browser presents the canvas after the frame callback returns */

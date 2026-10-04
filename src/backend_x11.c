@@ -10,6 +10,7 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "vulkan_internal.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -501,12 +502,12 @@ static void set_title(BackendWindow *b, const char *title)
 
 BackendWindow *backend_create(const WindowConfig *cfg)
 {
-    /* Pixel windows take the default TrueColor visual (no GLX involved); GL
-       windows take the visual of a chosen framebuffer config. */
+    /* Pixel and Vulkan windows take the default TrueColor visual (no GLX involved);
+       GL windows take the visual of a chosen framebuffer config. */
     GLXFBConfig fb = NULL;
     XVisualInfo vinfo;
     XVisualInfo *vi;
-    if (cfg->render == RENDER_PIXELS)
+    if (cfg->render != RENDER_GL)
     {
         vi = &vinfo;
         if (!XMatchVisualInfo(g.dpy, g.screen, DefaultDepth(g.dpy, g.screen), TrueColor, vi))
@@ -611,7 +612,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     {
         b->gc = XCreateGC(g.dpy, b->win, 0, NULL);
     }
-    else
+    else if (cfg->render == RENDER_GL)
     {
         b->glc = create_context(fb, &cfg->gl);
         if (!b->glc)
@@ -987,6 +988,51 @@ void backend_pump_events(BackendWindow *b, Core *core)
             continue; /* MVP is single-window; other windows are not dispatched here */
         process_event(b, &ev);
     }
+}
+
+
+/* ========================================================================== */
+/*  native handles and Vulkan                                                 */
+/* ========================================================================== */
+
+void *backend_native_handle(BackendWindow *b, NativeHandleType type)
+{
+    switch (type)
+    {
+    case NATIVE_DISPLAY:
+        return g.dpy;
+    case NATIVE_WINDOW:
+        return (void *)(uintptr_t)b->win;
+    case NATIVE_GL_CONTEXT:
+        return b->glc;
+    }
+    return NULL;
+}
+
+const char *const *backend_vulkan_extensions(uint32_t *count)
+{
+    static const char *const ext[] = {"VK_KHR_surface", "VK_KHR_xlib_surface"};
+    *count = 2;
+    return ext;
+}
+
+typedef struct
+{
+    int sType;
+    const void *pNext;
+    uint32_t flags;
+    Display *dpy;
+    Window window;
+} ZenVkXlibSurfaceCreateInfo;
+
+bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void *allocator, uint64_t *out_surface)
+{
+    ZenVkXlibSurfaceCreateInfo info = {
+        .sType = ZEN_VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+        .dpy = g.dpy,
+        .window = b->win,
+    };
+    return vulkan_call_create_surface(instance, "vkCreateXlibSurfaceKHR", &info, allocator, out_surface);
 }
 
 void backend_swap(BackendWindow *b)

@@ -34,11 +34,15 @@ extern "C"
 
     /* How the window is drawn to. RENDER_GL gives a GL context (window_swap);
        RENDER_PIXELS gives a CPU framebuffer blitted by the backend, no GL at all
-       (window_lock_pixels / window_present_pixels). Chosen once, at creation. */
+       (window_lock_pixels / window_present_pixels); RENDER_VULKAN gives a bare
+       window with no GL context, for the application to draw on through a
+       VkSurfaceKHR (see Vulkan below; window_swap does nothing). Chosen once, at
+       creation. */
     typedef enum
     {
         RENDER_GL,
-        RENDER_PIXELS
+        RENDER_PIXELS,
+        RENDER_VULKAN
     } RenderMode;
 
 #define WINDOW_POS_CENTERED (-1)  /* place centered on the chosen monitor */
@@ -73,7 +77,7 @@ extern "C"
         int x, y;          /* WINDOW_POS_CENTERED / _UNDEFINED, or virtual coord */
         int monitor;       /* index, or MONITOR_CURRENT */
         WindowMode mode;
-        RenderMode render; /* RENDER_GL (default) or RENDER_PIXELS */
+        RenderMode render; /* RENDER_GL (default), RENDER_PIXELS or RENDER_VULKAN */
         GLConfig gl;
         bool resizable;
         bool vsync;
@@ -269,6 +273,93 @@ extern "C"
     PLATFORM_API void window_set_vsync(PlatformWindow *w, bool on);
     /* Address of a GL function for a loader, or NULL if unavailable. */
     PLATFORM_API void *gl_proc_address(const char *name);
+
+    /* ========================================================================== */
+    /*  Shared libraries                                                          */
+    /* ========================================================================== */
+
+    /* Load a library at run time and look up its symbols (dlopen / LoadLibrary).
+       Pass a name the system resolves ("libvulkan.so.1", "vulkan-1.dll") or a
+       path (UTF-8). library_open and library_symbol return NULL and set
+       platform_get_error() on failure. A function pointer comes back as void*:
+       cast it to the right type. Not supported on the web. */
+    typedef struct SharedLibrary SharedLibrary;
+
+    PLATFORM_API SharedLibrary *library_open(const char *path);
+    PLATFORM_API void *library_symbol(SharedLibrary *lib, const char *name);
+    PLATFORM_API void library_close(SharedLibrary *lib);
+
+    /* ========================================================================== */
+    /*  Native handles                                                            */
+    /* ========================================================================== */
+
+    /* The OS objects behind a window, for libraries that attach to them (a Dear
+       ImGui platform backend, a video player, a Vulkan or Metal layer). Every value
+       comes back as a pointer; an integer handle (an X11 Window) is cast to
+       uintptr_t and then to void*. NULL when the platform has no such object.
+       They belong to the window: do not destroy them, and they are gone after
+       window_destroy.
+
+                          NATIVE_DISPLAY       NATIVE_WINDOW      NATIVE_GL_CONTEXT
+         X11              Display*             Window             GLXContext
+         Win32            HINSTANCE            HWND               HGLRC
+         Android          EGLDisplay           ANativeWindow*     EGLContext
+         Web, fake        NULL                 NULL               NULL
+
+       On Android the window comes and goes with the activity: ask again after
+       each EVENT_WINDOW_FB_RESIZE that follows a resume. NATIVE_GL_CONTEXT is NULL
+       unless the window is RENDER_GL. */
+    typedef enum
+    {
+        NATIVE_DISPLAY,
+        NATIVE_WINDOW,
+        NATIVE_GL_CONTEXT
+    } NativeHandleType;
+
+    PLATFORM_API void *window_native_handle(PlatformWindow *w, NativeHandleType type);
+
+    /* ========================================================================== */
+    /*  Vulkan                                                                    */
+    /* ========================================================================== */
+
+    /* zen_platform does not link Vulkan and does not need its headers. It loads
+       the loader at run time (vulkan-1.dll, libvulkan.so.1) and hands you what you
+       need to start: the loader entry point, the instance extensions the window
+       system requires, and a surface for a RENDER_VULKAN window. Handles are
+       opaque here: a VkInstance is a void*, a VkSurfaceKHR a uint64_t.
+
+         if (!vulkan_supported()) { ... fall back to GL ... }
+         uint32_t n; const char *const *ext = vulkan_instance_extensions(&n);
+         // pass ext/n in VkInstanceCreateInfo, then:
+         PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)vulkan_get_proc_addr();
+         ... vkCreateInstance ...
+         uint64_t surface;
+         if (!vulkan_create_surface(w, instance, NULL, &surface)) { platform_get_error(); }
+
+       Size the swapchain from window_get_framebuffer_size. Supported on X11,
+       Windows and Android; not on the web or in the fake backend. The surface must
+       be destroyed (vkDestroySurfaceKHR) before the instance and the window. On
+       Android a surface is invalid once the app is backgrounded: create it again
+       when the window returns. */
+
+    /* True when the Vulkan loader is present and exposes VK_KHR_surface and this
+       platform's surface extension. Does not need a window. */
+    PLATFORM_API bool vulkan_supported(void);
+
+    /* The loader's vkGetInstanceProcAddr (cast it to PFN_vkGetInstanceProcAddr), or
+       NULL when the loader cannot be loaded. */
+    PLATFORM_API void *vulkan_get_proc_addr(void);
+
+    /* Instance extensions the window system needs, count in *count. The array is
+       static. NULL and 0 on a platform without Vulkan. */
+    PLATFORM_API const char *const *vulkan_instance_extensions(uint32_t *count);
+
+    /* Creates the VkSurfaceKHR of a RENDER_VULKAN window on `instance` (a
+       VkInstance created with the extensions above). allocator is a
+       const VkAllocationCallbacks* or NULL. Returns false and sets
+       platform_get_error() on failure. */
+    PLATFORM_API bool vulkan_create_surface(PlatformWindow *w, void *instance, const void *allocator,
+                                            uint64_t *out_surface);
 
     /* ========================================================================== */
     /*  Pixel surface (software framebuffer,  RENDER_PIXELS windows only)    */

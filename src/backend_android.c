@@ -10,6 +10,7 @@
 #include "backend.h"
 #include "os_backend.h"
 #include "error_internal.h"
+#include "vulkan_internal.h"
 
 #include <android_native_app_glue.h>
 #include <android/keycodes.h>
@@ -252,6 +253,18 @@ static void egl_term_surface(BackendWindow *b)
 }
 
 /* Pixel mode: no EGL, the framebuffer goes straight to the ANativeWindow. */
+/* A Vulkan window only records the size: the swapchain owns the buffers, so the
+   window's format and geometry are left alone. */
+static bool vulkan_init_surface(BackendWindow *b)
+{
+    if (!g_app->window)
+        return false;
+    b->width = ANativeWindow_getWidth(g_app->window);
+    b->height = ANativeWindow_getHeight(g_app->window);
+    b->has_surface = true;
+    return true;
+}
+
 static bool native_init_surface(BackendWindow *b)
 {
     if (!g_app->window || b->has_surface)
@@ -283,7 +296,9 @@ static void handle_cmd(struct android_app *app, int32_t cmd)
     {
     case APP_CMD_INIT_WINDOW:
     {
-        bool ok = b->render == RENDER_GL ? egl_init_surface(b) : native_init_surface(b);
+        bool ok = b->render == RENDER_GL       ? egl_init_surface(b)
+                  : b->render == RENDER_VULKAN ? vulkan_init_surface(b)
+                                               : native_init_surface(b);
         if (ok)
         {
             b->visible = true;
@@ -477,6 +492,50 @@ void backend_pump_events(BackendWindow *b, Core *core)
             break;
         }
     }
+}
+
+/* ========================================================================== */
+/*  native handles and Vulkan                                                 */
+/* ========================================================================== */
+
+void *backend_native_handle(BackendWindow *b, NativeHandleType type)
+{
+    switch (type)
+    {
+    case NATIVE_DISPLAY:
+        return b->render == RENDER_GL ? (void *)b->dpy : NULL;
+    case NATIVE_WINDOW:
+        return b->has_surface && g_app ? (void *)g_app->window : NULL;
+    case NATIVE_GL_CONTEXT:
+        return b->render == RENDER_GL ? (void *)b->ctx : NULL;
+    }
+    return NULL;
+}
+
+const char *const *backend_vulkan_extensions(uint32_t *count)
+{
+    static const char *const ext[] = {"VK_KHR_surface", "VK_KHR_android_surface"};
+    *count = 2;
+    return ext;
+}
+
+typedef struct
+{
+    int sType;
+    const void *pNext;
+    uint32_t flags;
+    ANativeWindow *window;
+} ZenVkAndroidSurfaceCreateInfo;
+
+bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void *allocator, uint64_t *out_surface)
+{
+    if (!b->has_surface || !g_app || !g_app->window)
+        return error_set("the Android window is not available (app in the background?)");
+    ZenVkAndroidSurfaceCreateInfo info = {
+        .sType = ZEN_VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+        .window = g_app->window,
+    };
+    return vulkan_call_create_surface(instance, "vkCreateAndroidSurfaceKHR", &info, allocator, out_surface);
 }
 
 void backend_swap(BackendWindow *b)

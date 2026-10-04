@@ -381,6 +381,11 @@ void window_make_current(PlatformWindow *w)
 {
     backend_make_current(w->b);
 }
+void *window_native_handle(PlatformWindow *w, NativeHandleType type)
+{
+    return w ? backend_native_handle(w->b, type) : NULL;
+}
+
 void window_set_vsync(PlatformWindow *w, bool on)
 {
     backend_set_vsync(w->b, on);

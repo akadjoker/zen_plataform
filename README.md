@@ -63,7 +63,7 @@ version in `release_version`; the release is created on the chosen commit.
 
 | Platform | Backend | Notes |
 |---|---|---|
-| Linux / X11 | `backend_x11.c` | requires X11 + Xrandr + GL/GLX dev packages |
+| Linux / X11 | `backend_x11.c` | requires X11 + Xrandr + GL/GLX dev packages; Vulkan loaded at run time |
 | Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |
@@ -139,6 +139,34 @@ log_set_callback(my_sink, my_data);         // void my_sink(LogLevel, const char
 The default sink prints `[LEVEL] text` to stderr (the browser console on the web),
 to logcat on Android, and to the debugger output on Windows. The platform logs
 the errors behind `platform_get_error()` at `LOGLEVEL_DEBUG`.
+
+### Vulkan, native handles, shared libraries
+
+```c
+if (vulkan_supported())                         // loader present + the surface extensions
+{
+    WindowConfig cfg = {.title = "vk", .width = 1280, .height = 720, .render = RENDER_VULKAN};
+    PlatformWindow *w = window_create(&cfg);    // a bare window, no GL context
+
+    uint32_t n;  const char *const *ext = vulkan_instance_extensions(&n);
+    PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)vulkan_get_proc_addr();
+    // vkCreateInstance with ext/n in VkInstanceCreateInfo, then:
+    uint64_t surface;
+    vulkan_create_surface(w, instance, NULL, &surface);   // a VkSurfaceKHR
+}
+
+void *hwnd = window_native_handle(w, NATIVE_WINDOW);      // HWND / X11 Window / ANativeWindow*
+SharedLibrary *lib = library_open("libfoo.so");           // dlopen / LoadLibrary
+void *fn = library_symbol(lib, "foo");
+```
+
+zen_platform does not link Vulkan and does not include its headers: the loader
+(`vulkan-1.dll`, `libvulkan.so.1`) is opened at run time, and handles are opaque
+(`VkInstance` is a `void*`, `VkSurfaceKHR` a `uint64_t`). Use the Vulkan headers,
+or volk, in your own code. Supported on X11, Windows and Android; not on the web
+or in the fake backend. `NATIVE_DISPLAY`, `NATIVE_WINDOW` and `NATIVE_GL_CONTEXT`
+return the X11 `Display*`/`Window`/`GLXContext`, the Win32
+`HINSTANCE`/`HWND`/`HGLRC`, and the Android `EGLDisplay`/`ANativeWindow*`/`EGLContext`.
 
 ### Gamepads
 
@@ -256,6 +284,9 @@ src/
   backend_fake.c          headless backend for tests
   gesture.c               touch gesture recognizer (after raylib's rgestures)
   log.c                   leveled logging with a replaceable sink
+  library.c               shared library loading (dlopen / LoadLibrary)
+  vulkan.c                Vulkan loader and surface creation (no Vulkan SDK needed)
+  vulkan_internal.h       the few Vulkan declarations the backends use
   draw2d.c                software rasterizer over Framebuffer
   image.c                 BMP load/save
   os.c                    filesystem and path utilities
@@ -264,6 +295,9 @@ tests/
   test_input_logic.c      input edge/state tests (backend_fake)
   test_app_run.c          frame cycle test
   test_gestures.c         gesture recognizer and touch through the core
+  test_log.c              log levels, sink, truncation
+  test_library.c          shared library loading
+  test_vulkan.c           RENDER_VULKAN window, handles, a real VkSurfaceKHR (skips without a driver)
   test_draw2d.c           rasterizer tests (nearest + bilinear blit)
   test_fs.c               filesystem round-trip tests
   test_image.c            BMP read/write round-trip

@@ -57,6 +57,16 @@ void backend_make_current(BackendWindow *b);
 void backend_set_vsync(BackendWindow *b, bool on);
 void *backend_gl_proc_address(const char *name);
 
+/* native handles (NativeHandleType); NULL when there is no such object */
+void *backend_native_handle(BackendWindow *b, NativeHandleType type);
+
+/* Vulkan: the instance extensions the window system needs (a static array; NULL
+   where Vulkan is not supported), and surface creation for a RENDER_VULKAN
+   window. The loader and the vkGetInstanceProcAddr plumbing are in vulkan.c; a
+   backend fills its create info and calls vulkan_call_create_surface. */
+const char *const *backend_vulkan_extensions(uint32_t *count);
+bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void *allocator, uint64_t *out_surface);
+
 /* pixel surface (RENDER_PIXELS windows); lock returns false for RENDER_GL */
 bool backend_lock_pixels(BackendWindow *b, Framebuffer *out);
 void backend_present_pixels(BackendWindow *b);

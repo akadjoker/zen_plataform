@@ -9,6 +9,7 @@
 #include "backend.h"
 #include "win32_util.h"
 #include "error_internal.h"
+#include "vulkan_internal.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
@@ -1084,6 +1085,50 @@ void *backend_gl_proc_address(const char *name)
         p = g.opengl32 ? (void *)GetProcAddress(g.opengl32, name) : NULL;
     }
     return p;
+}
+
+/* ========================================================================== */
+/*  native handles and Vulkan                                                 */
+/* ========================================================================== */
+
+void *backend_native_handle(BackendWindow *b, NativeHandleType type)
+{
+    switch (type)
+    {
+    case NATIVE_DISPLAY:
+        return (void *)g.instance;
+    case NATIVE_WINDOW:
+        return (void *)b->hwnd;
+    case NATIVE_GL_CONTEXT:
+        return (void *)b->glrc;
+    }
+    return NULL;
+}
+
+const char *const *backend_vulkan_extensions(uint32_t *count)
+{
+    static const char *const ext[] = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+    *count = 2;
+    return ext;
+}
+
+typedef struct
+{
+    int sType;
+    const void *pNext;
+    uint32_t flags;
+    HINSTANCE hinstance;
+    HWND hwnd;
+} ZenVkWin32SurfaceCreateInfo;
+
+bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void *allocator, uint64_t *out_surface)
+{
+    ZenVkWin32SurfaceCreateInfo info = {
+        .sType = ZEN_VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+        .hinstance = g.instance,
+        .hwnd = b->hwnd,
+    };
+    return vulkan_call_create_surface(instance, "vkCreateWin32SurfaceKHR", &info, allocator, out_surface);
 }
 
 void backend_swap(BackendWindow *b)
