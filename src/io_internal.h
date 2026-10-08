@@ -26,6 +26,7 @@ struct IoStream
             const uint8_t *base;
             size_t size;
             size_t pos;
+            void (*release)(void *mem);
         } mem;
     } u;
 };

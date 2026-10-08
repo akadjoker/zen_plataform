@@ -984,6 +984,9 @@ extern "C"
     PLATFORM_API IoStream *io_open_file(const char *path, const char *mode);
     PLATFORM_API IoStream *io_open_asset(const char *path);
     PLATFORM_API IoStream *io_open_memory(const void *mem, size_t size);
+    /* As io_open_memory, but the stream owns mem: io_close hands it to release
+       (fs_free when release is NULL). If the call fails, mem is still the caller's. */
+    PLATFORM_API IoStream *io_open_memory_owned(void *mem, size_t size, void (*release)(void *mem));
     PLATFORM_API size_t io_read(IoStream *s, void *dst, size_t n);
     PLATFORM_API size_t io_write(IoStream *s, const void *src, size_t n);
     PLATFORM_API int64_t io_seek(IoStream *s, int64_t offset, IoWhence whence);

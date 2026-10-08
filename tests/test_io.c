@@ -58,6 +58,60 @@ static void test_memory(void)
     io_close(s);
 }
 
+static int released_count;
+static void *released_mem;
+
+static void count_release(void *mem)
+{
+    released_count++;
+    released_mem = mem;
+    free(mem);
+}
+
+static void test_memory_owned(void)
+{
+    char buf[16];
+    char *mem = malloc(10);
+    memcpy(mem, "0123456789", 10);
+    released_count = 0;
+    released_mem = NULL;
+    IoStream *s = io_open_memory_owned(mem, 10, count_release);
+    CHECK(s != NULL);
+    CHECK(io_size(s) == 10);
+    CHECK(io_seek(s, 6, IO_SEEK_SET) == 6);
+    CHECK(io_read(s, buf, 8) == 4 && memcmp(buf, "6789", 4) == 0);
+    CHECK(io_eof(s));
+    CHECK(io_write(s, "x", 1) == 0);
+    CHECK(released_count == 0);
+    CHECK(io_close(s));
+    CHECK(released_count == 1 && released_mem == mem);
+
+    mem = malloc(4);
+    memcpy(mem, "abcd", 4);
+    s = io_open_memory_owned(mem, 4, NULL);
+    CHECK(s != NULL);
+    CHECK(io_read(s, buf, 4) == 4 && memcmp(buf, "abcd", 4) == 0);
+    CHECK(io_close(s));
+
+    size_t n = 0;
+    mem = malloc(6);
+    memcpy(mem, "owned!", 6);
+    released_count = 0;
+    char *all = io_load(io_open_memory_owned(mem, 6, count_release), &n, true);
+    CHECK(all && n == 6 && strcmp(all, "owned!") == 0);
+    CHECK(released_count == 1);
+    fs_free(all);
+
+    released_count = 0;
+    CHECK(io_open_memory_owned(NULL, 4, count_release) == NULL);
+    CHECK(released_count == 0);
+
+    s = io_open_memory_owned(NULL, 0, count_release);
+    CHECK(s && io_size(s) == 0);
+    CHECK(io_close(s));
+    CHECK(released_count == 1 && released_mem == NULL);
+}
+
 static void test_file_modes(void)
 {
     char buf[32];
@@ -174,6 +228,7 @@ int main(void)
     dir_make(ROOT);
 
     test_memory();
+    test_memory_owned();
     test_file_modes();
     test_open_errors();
     test_load_save();

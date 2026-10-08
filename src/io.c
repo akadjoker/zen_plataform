@@ -105,7 +105,8 @@ static bool mem_flush(IoStream *s)
 
 static bool mem_close(IoStream *s)
 {
-    (void)s;
+    if (s->u.mem.release)
+        s->u.mem.release((void *)s->u.mem.base);
     return true;
 }
 
@@ -123,6 +124,22 @@ IoStream *io_open_memory(const void *mem, size_t size)
         return NULL;
     s->u.mem.base = mem;
     s->u.mem.size = size;
+    return s;
+}
+
+IoStream *io_open_memory_owned(void *mem, size_t size, void (*release)(void *mem))
+{
+    if (!mem && size)
+    {
+        error_set("invalid argument");
+        return NULL;
+    }
+    IoStream *s = io_stream_alloc(&k_mem_vt);
+    if (!s)
+        return NULL;
+    s->u.mem.base = mem;
+    s->u.mem.size = size;
+    s->u.mem.release = release ? release : fs_free;
     return s;
 }
 
