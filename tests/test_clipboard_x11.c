@@ -351,6 +351,62 @@ static void test_foreign_owner(void)
     waitpid(pid, NULL, 0);
 }
 
+/* An owner that never answers (hung, or gone without letting go of the selection)
+   costs one timeout: the calls after it fail at once, so a paste or a refresh does
+   not freeze the loop for a second per call. */
+static pid_t spawn_dead_owner(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        close(fds[0]);
+        Display *d = XOpenDisplay(NULL);
+        if (!d)
+            _exit(1);
+        Window w = XCreateSimpleWindow(d, DefaultRootWindow(d), 0, 0, 1, 1, 0, 0, 0);
+        XSetSelectionOwner(d, XInternAtom(d, "CLIPBOARD", False), w, CurrentTime);
+        XSync(d, False);
+        (void)!write(fds[1], "r", 1);
+        for (;;)
+            pause(); /* never reads its events, so never answers */
+    }
+    close(fds[1]);
+    char c;
+    ssize_t got = read(fds[0], &c, 1);
+    close(fds[0]);
+    return got == 1 ? pid : -1;
+}
+
+static void test_dead_owner(void)
+{
+    pid_t pid = spawn_dead_owner();
+    CHECK(pid > 0);
+    if (pid <= 0)
+        return;
+
+    double t0 = now_s();
+    CHECK(!clipboard_has_data(CLIPBOARD_TEXT));
+    double first = now_s() - t0;
+    CHECK(first < 3.0);
+
+    t0 = now_s();
+    CHECK(!clipboard_has_data(CLIPBOARD_PNG));
+    CHECK(!clipboard_has_data(CLIPBOARD_URIS));
+    CHECK(clipboard_get()[0] == '\0');
+    size_t n = 0;
+    CHECK(clipboard_get_data(CLIPBOARD_PNG, &n) == NULL);
+    double rest = now_s() - t0;
+    if (rest >= 0.2)
+        printf("  the calls after the first took %.2fs\n", rest);
+    CHECK(rest < 0.2);
+
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+}
+
 /* A desktop clipboard manager may take the selection from us as soon as we set it
    (so the content outlives the app). We then free our data, as we should, and the
    paste is served by the manager, which keeps only some types. That is not a
@@ -425,6 +481,7 @@ int main(void)
         return 77;
     }
     test_foreign_owner();
+    test_dead_owner();
     test_we_own();
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);

@@ -70,6 +70,7 @@ typedef int (*glXSwapIntervalSGIProc)(int);
 #define CLIP_INCR_MAX 4
 #define CLIP_CHUNK_MAX 262144       /* above this a paste goes by INCR */
 #define CLIP_TIMEOUT_MS 1000        /* wait for another client, per step */
+#define CLIP_DEAD_MS 10000          /* how long an owner that did not answer is not asked again */
 #define CLIP_READ_LIMIT (512u << 20) /* refuse pastes larger than this */
 
 typedef struct
@@ -119,6 +120,8 @@ static struct
     int (*xi_select)(Display *, Window, void *mask, int count); /* XISelectEvents */
     ClipEntry clip[CLIP_MAX]; /* what we offer while we own the selection */
     int clip_count;
+    Window clip_dead_owner; /* an owner that did not answer, failed at once until clip_dead_until */
+    long clip_dead_until;   /* monotonic ms */
     IncrOut incr[CLIP_INCR_MAX]; /* large pastes being sent in chunks */
 } g;
 
@@ -2361,7 +2364,17 @@ static bool clip_read_property(Atom *type, int *format, uint8_t **out, size_t *s
     return *out != NULL;
 }
 
-/* Ask the owner for `target` and collect the answer, following INCR. */
+static long clip_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Ask the owner for `target` and collect the answer, following INCR. An owner that
+   does not answer at all (hung, or gone without letting go of the selection) costs
+   one timeout; for CLIP_DEAD_MS after that it fails at once, so a paste, a "has
+   data" per format and a refresh on focus do not each freeze the loop for a second. */
 static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
 {
     XEvent ev;
@@ -2371,10 +2384,19 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
     while (XCheckTypedWindowEvent(g.dpy, g.helper, PropertyNotify, &ev))
     {
     }
+    Window owner = XGetSelectionOwner(g.dpy, g.CLIPBOARD);
+    if (owner != None && owner == g.clip_dead_owner && clip_now_ms() < g.clip_dead_until)
+        return false;
     XDeleteProperty(g.dpy, g.helper, g.XSEL_DATA);
     XConvertSelection(g.dpy, g.CLIPBOARD, target, g.XSEL_DATA, g.helper, CurrentTime);
 
-    if (!clip_wait_event(SelectionNotify, &ev) || ev.xselection.property == None)
+    if (!clip_wait_event(SelectionNotify, &ev))
+    {
+        g.clip_dead_owner = owner;
+        g.clip_dead_until = clip_now_ms() + CLIP_DEAD_MS;
+        return false;
+    }
+    if (ev.xselection.property == None)
         return false;
 
     int format;
