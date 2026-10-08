@@ -136,6 +136,11 @@ struct BackendWindow
     bool text_input;              /* window_text_input_start/stop */
     XIMCallback cb_start, cb_done, cb_draw, cb_caret;
     Core *core; /* set at the start of each pump so handlers can reach the core */
+    /* keys this window believes are down, by X keycode: lets a lost release be found
+       by comparing with the server's keymap (sync_stuck_keys) */
+    bool kc_down[256];
+    int kc_key[256];
+    double kc_gone[256]; /* when the server was first seen not holding the key, 0 while it does */
     struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
     int pending_n, pending_cap;
 
@@ -1014,6 +1019,12 @@ static void handle_key(BackendWindow *b, XEvent *ev, bool down)
     Event e = {.type = EVENT_KEY};
     int key = translate_keysym(ks);
     e.data.key.key = key;
+    if (ev->xkey.keycode < 256)
+    {
+        b->kc_down[ev->xkey.keycode] = down;
+        b->kc_gone[ev->xkey.keycode] = 0;
+        b->kc_key[ev->xkey.keycode] = key;
+    }
     e.data.key.scancode = (int)ev->xkey.keycode;
     e.data.key.down = down;
     e.data.key.repeat = down && key > 0 && key < KEY_MAX && b->core->in.key_down[key];
@@ -1328,6 +1339,8 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case FocusOut:
     {
         b->focused = ev->type == FocusIn;
+        if (!b->focused)
+            memset(b->kc_down, 0, sizeof b->kc_down); /* the core drops every key on focus loss too */
         if (b->xic)
             (b->focused && b->text_input ? XSetICFocus : XUnsetICFocus)(b->xic);
         Event e = {.type = EVENT_WINDOW_FOCUS};
@@ -1576,6 +1589,58 @@ static void handle_xi_touch(BackendWindow *b, const XIDeviceEvent *de)
 }
 #endif
 
+/* A key release can go missing (an input method that eats it, a grab that ended
+   without a FocusIn, a compositor that drops it) and the key then stays down for
+   good. The server knows which keys are really held, so compare: a key we think is
+   down that the server says is up gets its release. Only when nothing is waiting in
+   the queue, so a release that is merely on its way is never anticipated, and only
+   after the server has said so for STUCK_KEY_GRACE: an input method re-sends key
+   events itself, and a synthetic event (XSendEvent) the server never held at all. */
+#define STUCK_KEY_GRACE 0.3
+
+static void sync_stuck_keys(BackendWindow *b)
+{
+    if (!b->focused)
+        return;
+    bool any = false;
+    for (int kc = 0; kc < 256 && !any; kc++)
+        any = b->kc_down[kc];
+    if (!any || XPending(g.dpy))
+        return;
+
+    char keymap[32];
+    XQueryKeymap(g.dpy, keymap);
+    if (XPending(g.dpy)) /* something came in during the round trip: look again next frame */
+        return;
+
+    unsigned mods = 0;
+    XkbStateRec st;
+    if (XkbGetState(g.dpy, XkbUseCoreKbd, &st) == Success)
+        mods = st.mods;
+    double now = time_seconds();
+    for (int kc = 0; kc < 256; kc++)
+    {
+        if (!b->kc_down[kc])
+            continue;
+        if (keymap[kc / 8] & (1 << (kc % 8)))
+        {
+            b->kc_gone[kc] = 0;
+            continue;
+        }
+        if (b->kc_gone[kc] == 0)
+            b->kc_gone[kc] = now;
+        if (now - b->kc_gone[kc] < STUCK_KEY_GRACE)
+            continue;
+        b->kc_down[kc] = false;
+        Event e = {.type = EVENT_KEY};
+        e.data.key.key = b->kc_key[kc];
+        e.data.key.scancode = kc;
+        e.data.key.down = false;
+        e.data.key.mods = translate_mods(mods);
+        push(b, &e);
+    }
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
@@ -1630,6 +1695,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         /* anything else (the clipboard helper, a window already destroyed) is dropped */
     }
     flush_preedit(b); /* the input method may have changed the composition while filtering */
+    sync_stuck_keys(b);
 }
 
 

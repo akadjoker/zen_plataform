@@ -97,6 +97,13 @@ if(PLATFORM_BACKEND_X11)
 
     add_executable(test_input_x11 test_input_x11.c)
     target_link_libraries(test_input_x11 PRIVATE platform)
+    # Real key events through XTest, when the development files are there.
+    find_library(XTEST_LIB Xtst)
+    find_path(XTEST_INCLUDE X11/extensions/XTest.h)
+    if(XTEST_LIB AND XTEST_INCLUDE)
+        target_compile_definitions(test_input_x11 PRIVATE HAVE_XTEST=1)
+        target_link_libraries(test_input_x11 PRIVATE ${XTEST_LIB})
+    endif()
     add_test(NAME test_input_x11 COMMAND test_input_x11)
     set_tests_properties(test_input_x11 PROPERTIES SKIP_RETURN_CODE 77)
 endif()

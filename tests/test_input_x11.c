@@ -2,7 +2,11 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
 #include <X11/keysym.h>
+#ifdef HAVE_XTEST
+#include <X11/extensions/XTest.h>
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -68,11 +72,11 @@ static void send_key(KeyCode code, bool press, unsigned state)
     XSync(g_dpy, False);
 }
 
-static void send_focus_out(void)
+static void send_focus(bool in)
 {
     XEvent ev;
     memset(&ev, 0, sizeof ev);
-    ev.xfocus.type = FocusOut;
+    ev.xfocus.type = in ? FocusIn : FocusOut;
     ev.xfocus.display = g_dpy;
     ev.xfocus.window = g_win;
     ev.xfocus.mode = NotifyNormal;
@@ -257,13 +261,86 @@ static void test_focus_loss(PlatformWindow *w)
     CHECK(wait_pressed(w, KEY_A));
     CHECK(held_mods(w) == KEYMOD_ALT);
 
-    send_focus_out();
+    send_focus(false);
     CHECK(wait_released(w, KEY_LEFT_ALT));
     CHECK(!key_down(w, KEY_A));
     CHECK(!key_down(w, KEY_LEFT_ALT));
     CHECK(held_mods(w) == 0);
     CHECK(!window_is_focused(w));
+
+    send_focus(true); /* the real focus never left */
+    for (int i = 0; i < 50 && !window_is_focused(w); i++)
+    {
+        window_begin_frame(w);
+        time_sleep(2);
+    }
+    CHECK(window_is_focused(w));
 }
+
+/* A key the server never held (sent with XSendEvent) looks to the sync against the
+   server's keymap like a release that went missing: it must let go by itself. */
+static void test_lost_release_heals(PlatformWindow *w)
+{
+    KeyCode z = XKeysymToKeycode(g_dpy, XK_z);
+    send_key(z, true, 0);
+    CHECK(wait_pressed(w, KEY_Z));
+    CHECK(key_down(w, KEY_Z));
+    CHECK(wait_released(w, KEY_Z)); /* no release was ever sent */
+    CHECK(!key_down(w, KEY_Z));
+}
+
+#ifdef HAVE_XTEST
+static void fake_key(Display *d, KeyCode code, bool press)
+{
+    XTestFakeKeyEvent(d, code, press, 0);
+    XSync(d, False);
+}
+
+/* Keys the server really holds, delivered the way a keyboard does it. Needs the window
+   focused (whatever has focus gets the keys), so it is skipped when it is not. */
+static void test_real_keys(PlatformWindow *w)
+{
+    for (int i = 0; i < 50; i++)
+    {
+        window_begin_frame(w);
+        time_sleep(2);
+    }
+    int xt_event, xt_error, xt_major, xt_minor;
+    if (!window_is_focused(w) || !XTestQueryExtension(g_dpy, &xt_event, &xt_error, &xt_major, &xt_minor))
+    {
+        printf("SKIP real keys: window not focused or no XTEST\n");
+        return;
+    }
+    KeyCode shift = XKeysymToKeycode(g_dpy, XK_Shift_L);
+
+    fake_key(g_dpy, shift, true);
+    CHECK(wait_pressed(w, KEY_LEFT_SHIFT));
+    CHECK(key_mods(w) == KEYMOD_SHIFT);
+    time_sleep(400); /* held longer than the grace of the lost-release check: it must stay down */
+    window_begin_frame(w);
+    window_begin_frame(w);
+    CHECK(key_down(w, KEY_LEFT_SHIFT));
+    fake_key(g_dpy, shift, false);
+    CHECK(wait_released(w, KEY_LEFT_SHIFT));
+    CHECK(key_mods(w) == 0);
+
+    /* Lose the release: the window stops listening for it while the key goes up. */
+    Display *wd = window_native_handle(w, NATIVE_DISPLAY);
+    XWindowAttributes attr;
+    XGetWindowAttributes(wd, g_win, &attr);
+    fake_key(g_dpy, shift, true);
+    CHECK(wait_pressed(w, KEY_LEFT_SHIFT));
+    XSelectInput(wd, g_win, attr.your_event_mask & ~KeyReleaseMask);
+    XSync(wd, False);
+    fake_key(g_dpy, shift, false);
+    XSync(wd, False);
+    XSelectInput(wd, g_win, attr.your_event_mask);
+    XSync(wd, False);
+    CHECK(wait_released(w, KEY_LEFT_SHIFT)); /* found stuck by the sync, not by an event */
+    CHECK(!key_down(w, KEY_LEFT_SHIFT));
+    CHECK(key_mods(w) == 0);
+}
+#endif
 
 static void test_cursors(PlatformWindow *w)
 {
@@ -320,6 +397,10 @@ int main(void)
         test_modifiers(w);
         test_repeat(w);
         test_focus_loss(w);
+        test_lost_release_heals(w);
+#ifdef HAVE_XTEST
+        test_real_keys(w);
+#endif
         test_cursors(w);
     }
 
