@@ -75,6 +75,11 @@ if(PLATFORM_BACKEND_WAYLAND)
     target_link_libraries(test_gl_wayland PRIVATE platform)
     add_test(NAME test_gl_wayland COMMAND test_gl_wayland)
     set_tests_properties(test_gl_wayland PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(test_wayland_window test_wayland_window.c)
+    target_link_libraries(test_wayland_window PRIVATE platform)
+    add_test(NAME test_wayland_window COMMAND test_wayland_window)
+    set_tests_properties(test_wayland_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
 
 if(PLATFORM_BACKEND_X11)

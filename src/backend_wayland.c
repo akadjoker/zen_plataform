@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---- global connection ---- */
 
@@ -49,9 +50,22 @@ struct BackendWindow
 
     RenderMode render;
     int width, height; /* screen coordinates */
-    int pending_w, pending_h; /* from the last toplevel.configure; 0 leaves the choice to the client */
+    int restore_w, restore_h; /* the size before maximize or fullscreen took it */
+    char *title;
+    int min_w, min_h, max_w, max_h; /* 0 is no limit */
+
+    /* what the last toplevel.configure said, applied when its xdg_surface.configure arrives */
+    int pending_w, pending_h; /* 0 leaves the choice to the client */
+    bool pending_focused, pending_maximized, pending_fullscreen;
     bool configured;
-    bool focused, maximized, fullscreen; /* from the last toplevel.configure */
+
+    bool focused, maximized, fullscreen; /* as applied */
+    bool want_maximized;                 /* asked for; also what a hidden window comes back as */
+    bool visible;                        /* false between hide and show: the shell objects are gone */
+    WindowMode mode;                     /* as asked for: fullscreen and borderless are the same here */
+
+    bool vsync;
+    struct wl_callback *frame_cb; /* the frame callback of the last swap, until the compositor answers */
 
     /* events the listeners raised, handed to the core by the window's own pump:
        the connection is shared, so any window's pump may dispatch for another */
@@ -229,20 +243,20 @@ static void toplevel_configure(void *data, struct xdg_toplevel *t, int32_t w, in
     b->pending_w = w;
     b->pending_h = h;
 
-    b->focused = b->maximized = b->fullscreen = false;
+    b->pending_focused = b->pending_maximized = b->pending_fullscreen = false;
     uint32_t *s;
     wl_array_for_each(s, states)
     {
         switch (*s)
         {
         case XDG_TOPLEVEL_STATE_ACTIVATED:
-            b->focused = true;
+            b->pending_focused = true;
             break;
         case XDG_TOPLEVEL_STATE_MAXIMIZED:
-            b->maximized = true;
+            b->pending_maximized = true;
             break;
         case XDG_TOPLEVEL_STATE_FULLSCREEN:
-            b->fullscreen = true;
+            b->pending_fullscreen = true;
             break;
         }
     }
@@ -281,9 +295,55 @@ static void surface_configure(void *data, struct xdg_surface *s, uint32_t serial
 {
     BackendWindow *b = data;
     xdg_surface_ack_configure(s, serial);
-    /* A zero size says the client picks; the size it had stays. */
-    if (b->pending_w > 0 && b->pending_h > 0)
-        apply_size(b, b->pending_w, b->pending_h);
+
+    bool was_tiled = b->maximized || b->fullscreen;
+    bool now_tiled = b->pending_maximized || b->pending_fullscreen;
+    if (!was_tiled && now_tiled)
+    {
+        b->restore_w = b->width;
+        b->restore_h = b->height;
+    }
+
+    /* A zero size says the client picks. Leaving maximized or fullscreen that is
+       the size it had before; otherwise the one it has. */
+    int w = b->pending_w, h = b->pending_h;
+    if (w <= 0 || h <= 0)
+    {
+        if (was_tiled && !now_tiled && b->restore_w > 0)
+        {
+            w = b->restore_w;
+            h = b->restore_h;
+        }
+        else
+        {
+            w = b->width;
+            h = b->height;
+        }
+    }
+    apply_size(b, w, h);
+
+    if (b->pending_maximized != b->maximized)
+    {
+        b->maximized = b->pending_maximized;
+        Event e = {.type = b->maximized ? EVENT_WINDOW_MAXIMIZE : EVENT_WINDOW_RESTORE};
+        push(b, &e);
+    }
+    if (b->pending_fullscreen != b->fullscreen)
+    {
+        /* Someone else took the window in or out of fullscreen. */
+        if (!b->pending_fullscreen)
+            b->mode = WINDOW_WINDOWED;
+        else if (b->mode == WINDOW_WINDOWED)
+            b->mode = WINDOW_FULLSCREEN;
+    }
+    b->fullscreen = b->pending_fullscreen;
+    if (b->pending_focused != b->focused)
+    {
+        b->focused = b->pending_focused;
+        Event e = {.type = EVENT_WINDOW_FOCUS};
+        e.data.focus.gained = b->focused;
+        push(b, &e);
+    }
     b->configured = true;
 }
 
@@ -376,6 +436,53 @@ static EGLContext create_context(EGLConfig config, const GLConfig *gl, GLProfile
 /*  create / destroy                                                          */
 /* ========================================================================== */
 
+static void apply_limits(BackendWindow *b)
+{
+    if (!b->toplevel)
+        return;
+    xdg_toplevel_set_min_size(b->toplevel, b->min_w, b->min_h);
+    xdg_toplevel_set_max_size(b->toplevel, b->max_w, b->max_h);
+}
+
+/* The xdg role of the window: made at creation and again by show after hide.
+   Returns once the compositor has sent the first configure, since nothing may be
+   attached before that one is acknowledged. */
+static bool create_shell(BackendWindow *b)
+{
+    b->xdg_surface = xdg_wm_base_get_xdg_surface(g.wm_base, b->surface);
+    xdg_surface_add_listener(b->xdg_surface, &surface_listener, b);
+    b->toplevel = xdg_surface_get_toplevel(b->xdg_surface);
+    xdg_toplevel_add_listener(b->toplevel, &toplevel_listener, b);
+
+    xdg_toplevel_set_title(b->toplevel, b->title);
+    xdg_toplevel_set_app_id(b->toplevel, program_invocation_short_name);
+    apply_limits(b);
+    if (b->want_maximized)
+        xdg_toplevel_set_maximized(b->toplevel);
+    if (b->mode != WINDOW_WINDOWED)
+        xdg_toplevel_set_fullscreen(b->toplevel, NULL);
+    set_opaque_region(b);
+
+    b->configured = false;
+    wl_surface_commit(b->surface);
+    while (!b->configured)
+    {
+        if (wl_display_dispatch(g.display) < 0)
+            return false;
+    }
+    return true;
+}
+
+static void destroy_shell(BackendWindow *b)
+{
+    if (b->toplevel)
+        xdg_toplevel_destroy(b->toplevel);
+    if (b->xdg_surface)
+        xdg_surface_destroy(b->xdg_surface);
+    b->toplevel = NULL;
+    b->xdg_surface = NULL;
+}
+
 BackendWindow *backend_create(const WindowConfig *cfg)
 {
     if (cfg->render != RENDER_GL)
@@ -410,35 +517,23 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
     b->context = context;
     b->render = cfg->render;
+    b->mode = cfg->mode;
+    b->visible = true;
     b->width = cfg->width > 0 ? cfg->width : 640;
     b->height = cfg->height > 0 ? cfg->height : 480;
-
-    b->surface = wl_compositor_create_surface(g.compositor);
-    b->xdg_surface = xdg_wm_base_get_xdg_surface(g.wm_base, b->surface);
-    xdg_surface_add_listener(b->xdg_surface, &surface_listener, b);
-    b->toplevel = xdg_surface_get_toplevel(b->xdg_surface);
-    xdg_toplevel_add_listener(b->toplevel, &toplevel_listener, b);
-
-    xdg_toplevel_set_title(b->toplevel, cfg->title ? cfg->title : "");
-    xdg_toplevel_set_app_id(b->toplevel, program_invocation_short_name);
+    b->title = strdup(cfg->title ? cfg->title : "");
     if (!cfg->resizable)
     {
-        xdg_toplevel_set_min_size(b->toplevel, b->width, b->height);
-        xdg_toplevel_set_max_size(b->toplevel, b->width, b->height);
+        b->min_w = b->max_w = b->width;
+        b->min_h = b->max_h = b->height;
     }
-    set_opaque_region(b);
 
-    /* The window gets its size and state in the first configure; nothing may be
-       attached before it is acknowledged. */
-    wl_surface_commit(b->surface);
-    while (!b->configured)
+    b->surface = wl_compositor_create_surface(g.compositor);
+    if (!b->title || !create_shell(b))
     {
-        if (wl_display_dispatch(g.display) < 0)
-        {
-            error_set("the Wayland connection broke while the window was being created");
-            backend_destroy(b);
-            return NULL;
-        }
+        error_set("the Wayland connection broke while the window was being created");
+        backend_destroy(b);
+        return NULL;
     }
 
     b->egl_window = wl_egl_window_create(b->surface, b->width, b->height);
@@ -450,8 +545,9 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         backend_destroy(b);
         return NULL;
     }
-    /* EGL's own default is 1, and a swap with interval 1 waits for the compositor. */
-    eglSwapInterval(g.egl, cfg->vsync ? 1 : 0);
+    /* EGL's own default is 1; the pacing is backend_swap's (see there). */
+    eglSwapInterval(g.egl, 0);
+    b->vsync = cfg->vsync;
     return b;
 }
 
@@ -469,12 +565,12 @@ void backend_destroy(BackendWindow *b)
         eglDestroyContext(g.egl, b->context);
     if (b->egl_window)
         wl_egl_window_destroy(b->egl_window);
-    if (b->toplevel)
-        xdg_toplevel_destroy(b->toplevel);
-    if (b->xdg_surface)
-        xdg_surface_destroy(b->xdg_surface);
+    destroy_shell(b);
+    if (b->frame_cb)
+        wl_callback_destroy(b->frame_cb);
     if (b->surface)
         wl_surface_destroy(b->surface);
+    free(b->title);
     free(b->queue);
     free(b);
 }
@@ -483,8 +579,8 @@ void backend_destroy(BackendWindow *b)
 /*  event pump                                                                */
 /* ========================================================================== */
 
-/* Read what the compositor sent without waiting for it. */
-static void dispatch(void)
+/* Read what the compositor sent, waiting up to timeout_ms for it. */
+static void dispatch(int timeout_ms)
 {
     while (wl_display_prepare_read(g.display) != 0)
         wl_display_dispatch_pending(g.display);
@@ -495,7 +591,7 @@ static void dispatch(void)
         return;
     }
     struct pollfd pfd = {.fd = wl_display_get_fd(g.display), .events = POLLIN};
-    if (poll(&pfd, 1, 0) > 0)
+    if (poll(&pfd, 1, timeout_ms) > 0)
         wl_display_read_events(g.display);
     else
         wl_display_cancel_read(g.display);
@@ -504,7 +600,7 @@ static void dispatch(void)
 
 void backend_pump_events(BackendWindow *b, Core *core)
 {
-    dispatch();
+    dispatch(0);
 
     if (!g.lost && wl_display_get_error(g.display) != 0)
     {
@@ -527,10 +623,49 @@ void backend_pump_events(BackendWindow *b, Core *core)
 /*  GL context glue                                                           */
 /* ========================================================================== */
 
+static double now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
+{
+    BackendWindow *b = data;
+    (void)time;
+    wl_callback_destroy(cb);
+    b->frame_cb = NULL;
+}
+
+static const struct wl_callback_listener frame_listener = {
+    .done = frame_done,
+};
+
+/* The swap interval is done here, not by EGL: Mesa's swap with an interval waits
+   for the compositor's frame callback without a limit, and a minimized or covered
+   window never gets one, so the loop would stop inside the swap and the pings go
+   unanswered. Waiting here keeps the connection served, and gives up after a
+   moment: such a window then runs slowly instead of not at all. */
+#define FRAME_WAIT_MS 50
+
 void backend_swap(BackendWindow *b)
 {
-    if (b->render == RENDER_GL)
-        eglSwapBuffers(g.egl, b->egl_surface);
+    if (b->render != RENDER_GL || !b->visible)
+        return;
+
+    if (b->vsync)
+    {
+        double deadline = now_ms() + FRAME_WAIT_MS;
+        for (double left = FRAME_WAIT_MS; b->frame_cb && left > 0; left = deadline - now_ms())
+            dispatch((int)left + 1);
+        if (!b->frame_cb)
+        {
+            b->frame_cb = wl_surface_frame(b->surface);
+            wl_callback_add_listener(b->frame_cb, &frame_listener, b);
+        }
+    }
+    eglSwapBuffers(g.egl, b->egl_surface);
 }
 
 void backend_make_current(BackendWindow *b)
@@ -545,19 +680,9 @@ void backend_make_current_on(BackendWindow *target, BackendWindow *context)
         eglMakeCurrent(g.egl, target->egl_surface, target->egl_surface, context->context);
 }
 
-/* EGL sets the interval on the surface that is current, so the window is made
-   current for the call and whatever was current comes back. */
 void backend_set_vsync(BackendWindow *b, bool on)
 {
-    EGLContext ctx = eglGetCurrentContext();
-    EGLSurface draw = eglGetCurrentSurface(EGL_DRAW);
-    EGLSurface read = eglGetCurrentSurface(EGL_READ);
-    bool switched = draw != b->egl_surface;
-    if (switched)
-        eglMakeCurrent(g.egl, b->egl_surface, b->egl_surface, b->context);
-    eglSwapInterval(g.egl, on ? 1 : 0);
-    if (switched)
-        eglMakeCurrent(g.egl, draw, read, ctx);
+    b->vsync = on;
 }
 
 void *backend_gl_proc_address(const char *name)
@@ -581,7 +706,7 @@ void backend_get_size(BackendWindow *b, int *w, int *h)
    the resize reaches the compositor with the next swap. */
 void backend_set_size(BackendWindow *b, int w, int h)
 {
-    if (w > 0 && h > 0)
+    if (w > 0 && h > 0 && !b->maximized && !b->fullscreen)
         apply_size(b, w, h);
 }
 
@@ -618,7 +743,106 @@ float backend_content_scale(BackendWindow *b)
 
 void backend_set_title(BackendWindow *b, const char *title)
 {
-    xdg_toplevel_set_title(b->toplevel, title ? title : "");
+    char *copy = strdup(title ? title : "");
+    if (!copy)
+        return;
+    free(b->title);
+    b->title = copy;
+    if (b->toplevel)
+        xdg_toplevel_set_title(b->toplevel, b->title);
+}
+
+void backend_set_size_limits(BackendWindow *b, int minw, int minh, int maxw, int maxh)
+{
+    b->min_w = minw > 0 ? minw : 0;
+    b->min_h = minh > 0 ? minh : 0;
+    b->max_w = maxw > 0 ? maxw : 0;
+    b->max_h = maxh > 0 ? maxh : 0;
+    if (!b->toplevel)
+        return;
+    apply_limits(b);
+    wl_surface_commit(b->surface); /* the limits are double-buffered state */
+}
+
+/* ========================================================================== */
+/*  window state                                                              */
+/* ========================================================================== */
+
+/* The compositor never says a window is minimized, so there is no event and no
+   flag for it; the request is all a client can make, and there is no way back
+   from a client either (activation needs a token, see request_attention). */
+void backend_minimize(BackendWindow *b)
+{
+    if (b->toplevel)
+        xdg_toplevel_set_minimized(b->toplevel);
+}
+
+void backend_maximize(BackendWindow *b)
+{
+    b->want_maximized = true;
+    if (b->toplevel)
+        xdg_toplevel_set_maximized(b->toplevel);
+}
+
+void backend_restore(BackendWindow *b)
+{
+    b->want_maximized = false;
+    if (b->toplevel)
+        xdg_toplevel_unset_maximized(b->toplevel);
+}
+
+/* A toplevel has no mapped state of its own: hiding it takes its shell objects
+   away and attaches nothing, showing it makes them again and waits for the
+   compositor to configure the window anew. */
+void backend_hide(BackendWindow *b)
+{
+    if (!b->visible)
+        return;
+    destroy_shell(b);
+    if (b->frame_cb)
+    {
+        wl_callback_destroy(b->frame_cb);
+        b->frame_cb = NULL;
+    }
+    wl_surface_attach(b->surface, NULL, 0, 0);
+    wl_surface_commit(b->surface);
+    b->visible = false;
+    if (b->focused)
+    {
+        b->focused = false;
+        Event e = {.type = EVENT_WINDOW_FOCUS};
+        push(b, &e);
+    }
+}
+
+void backend_show(BackendWindow *b)
+{
+    if (b->visible)
+        return;
+    if (!create_shell(b))
+    {
+        destroy_shell(b);
+        log_error("Wayland: cannot show the window again");
+        return;
+    }
+    b->visible = true;
+}
+
+void backend_set_mode(BackendWindow *b, WindowMode mode, int monitor)
+{
+    (void)monitor; /* the compositor picks the output until the monitors are known */
+    b->mode = mode;
+    if (!b->toplevel)
+        return;
+    if (mode != WINDOW_WINDOWED)
+        xdg_toplevel_set_fullscreen(b->toplevel, NULL);
+    else
+        xdg_toplevel_unset_fullscreen(b->toplevel);
+}
+
+WindowMode backend_get_mode(BackendWindow *b)
+{
+    return b->mode;
 }
 
 bool backend_get_flag(BackendWindow *b, int flag)
@@ -630,37 +854,17 @@ bool backend_get_flag(BackendWindow *b, int flag)
     case WIN_FLAG_MAXIMIZED:
         return b->maximized;
     case WIN_FLAG_VISIBLE:
-        return true;
+        return b->visible;
     }
     return false;
-}
-
-WindowMode backend_get_mode(BackendWindow *b)
-{
-    return b->fullscreen ? WINDOW_FULLSCREEN : WINDOW_WINDOWED;
 }
 
 /* ========================================================================== */
 /*  not there yet                                                             */
 /* ========================================================================== */
 
-void backend_set_size_limits(BackendWindow *b, int minw, int minh, int maxw, int maxh)
-{
-    (void)b; (void)minw; (void)minh; (void)maxw; (void)maxh;
-}
-
-void backend_minimize(BackendWindow *b) { (void)b; }
-void backend_maximize(BackendWindow *b) { (void)b; }
-void backend_restore(BackendWindow *b) { (void)b; }
-void backend_show(BackendWindow *b) { (void)b; }
-void backend_hide(BackendWindow *b) { (void)b; }
 void backend_focus(BackendWindow *b) { (void)b; }
 void backend_request_attention(BackendWindow *b) { (void)b; }
-
-void backend_set_mode(BackendWindow *b, WindowMode mode, int monitor)
-{
-    (void)b; (void)mode; (void)monitor;
-}
 
 void backend_set_icon(BackendWindow *b, int w, int h, const uint8_t *rgba)
 {
