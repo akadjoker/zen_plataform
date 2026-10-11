@@ -195,17 +195,21 @@ static bool next_resize(PlatformWindow *w, EventType type, int *rw, int *rh)
 /* The client chooses the size of a floating window: the new buffer has to be
    there, and the application hears about the size in both spaces. The driver
    takes the new size at the frame boundary, so the frames run as an application
-   runs them: the events are read right after the swap, before any drawing. */
+   runs them: the events are read right after the swap, before any drawing.
+   The window settles first: the compositor sends a configure with the old size
+   when it maps and focuses the window, and a size asked for before that arrives
+   is only a request that configure can undo. */
 static void test_resize(void)
 {
     PlatformWindow *w = make((GLConfig){0});
     CHECK(w != NULL);
     if (!w)
         return;
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 30; i++)
     {
         window_begin_frame(w);
         window_swap(w);
+        time_sleep(10);
     }
 
     int cw = 0, ch = 0;

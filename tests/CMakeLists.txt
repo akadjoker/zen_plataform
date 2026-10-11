@@ -80,6 +80,18 @@ if(PLATFORM_BACKEND_WAYLAND)
     target_link_libraries(test_wayland_window PRIVATE platform)
     add_test(NAME test_wayland_window COMMAND test_wayland_window)
     set_tests_properties(test_wayland_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+    # Input against a compositor of its own, which needs no display. The test uses
+    # the library's protocol tables, so a shared library is left out.
+    pkg_check_modules(WAYLAND_SERVER IMPORTED_TARGET wayland-server)
+    if(WAYLAND_SERVER_FOUND AND NOT BUILD_SHARED_LIBS)
+        add_executable(test_input_wayland test_input_wayland.c)
+        add_dependencies(test_input_wayland wayland_server_headers)
+        target_include_directories(test_input_wayland PRIVATE ${WAYLAND_GEN_DIR})
+        target_link_libraries(test_input_wayland PRIVATE platform PkgConfig::WAYLAND_SERVER)
+        add_test(NAME test_input_wayland COMMAND test_input_wayland)
+        set_tests_properties(test_input_wayland PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endif()
 endif()
 
 if(PLATFORM_BACKEND_X11)
