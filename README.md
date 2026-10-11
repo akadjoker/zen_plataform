@@ -65,7 +65,7 @@ version in `release_version`; the release is created on the chosen commit.
 | Platform | Backend | Notes |
 |---|---|---|
 | Linux / X11 | `backend_x11.c` | requires X11 + Xrandr + GL/GLX dev packages; Vulkan loaded at run time |
-| Linux / Wayland | `backend_wayland.c` | in progress: windows, window state, keyboard, pointer and the GL context (EGL) so far; needs wayland-client, wayland-egl, EGL, xkbcommon and wayland-protocols |
+| Linux / Wayland | `backend_wayland.c` | in progress: windows, window state, keyboard, pointer, cursors and the GL context (EGL) so far; needs wayland-client, wayland-cursor, wayland-egl, EGL, xkbcommon and wayland-protocols |
 | Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |

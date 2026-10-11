@@ -13,12 +13,17 @@
 #include "error_internal.h"
 
 #include <wayland-client.h>
+#include <wayland-cursor.h>
 #include <wayland-egl.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-compose.h>
 #include "xdg-shell-client-protocol.h"
+#ifdef ZEN_WL_POINTER_LOCK
+#include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "relative-pointer-unstable-v1-client-protocol.h"
+#endif
 
 #include <errno.h>
 #include <poll.h>
@@ -56,6 +61,15 @@ static struct
     struct wl_pointer *pointer;
     BackendWindow *keyboard_focus, *pointer_focus;
     uint32_t serial; /* of the last key or button, which clipboard and move requests quote */
+    uint32_t enter_serial; /* of the pointer's last enter, which a cursor request quotes */
+
+    struct wl_shm *shm;
+    struct wl_cursor_theme *theme; /* loaded on first use */
+    struct wl_surface *cursor_surface;
+#ifdef ZEN_WL_POINTER_LOCK
+    struct zwp_pointer_constraints_v1 *constraints;
+    struct zwp_relative_pointer_manager_v1 *relative_manager;
+#endif
 
     struct xkb_context *xkb;
     struct xkb_keymap *keymap;
@@ -75,6 +89,7 @@ static struct
 } g;
 
 static const struct wl_seat_listener seat_listener;
+static void apply_cursor(BackendWindow *b);
 
 struct BackendWindow
 {
@@ -106,6 +121,17 @@ struct BackendWindow
 
     bool hovered;
     BackendWindow *next; /* g.windows */
+
+    int cursor_idx;                /* the CURSOR_* shape */
+    struct PlatformCursor *cursor_image;
+    int mouse_mode;                /* MOUSE_MODE_* */
+#ifdef ZEN_WL_POINTER_LOCK
+    struct zwp_locked_pointer_v1 *locked_pointer;
+    struct zwp_relative_pointer_v1 *relative_pointer;
+#endif
+    bool locked;                   /* the compositor holds the pointer still */
+    double virt_x, virt_y;         /* where the pointer would be: moved by the raw deltas while locked */
+    int lock_x, lock_y;            /* where it was when the lock began */
 
     /* events the listeners raised, handed to the core by the window's own pump:
        the connection is shared, so any window's pump may dispatch for another */
@@ -169,6 +195,14 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name, 
         g.compositor = wl_registry_bind(reg, name, &wl_compositor_interface, version < 4 ? version : 4);
     else if (strcmp(iface, xdg_wm_base_interface.name) == 0)
         g.wm_base = wl_registry_bind(reg, name, &xdg_wm_base_interface, version < 5 ? version : 5);
+    else if (strcmp(iface, wl_shm_interface.name) == 0)
+        g.shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
+#ifdef ZEN_WL_POINTER_LOCK
+    else if (strcmp(iface, zwp_pointer_constraints_v1_interface.name) == 0)
+        g.constraints = wl_registry_bind(reg, name, &zwp_pointer_constraints_v1_interface, 1);
+    else if (strcmp(iface, zwp_relative_pointer_manager_v1_interface.name) == 0)
+        g.relative_manager = wl_registry_bind(reg, name, &zwp_relative_pointer_manager_v1_interface, 1);
+#endif
     else if (strcmp(iface, wl_seat_interface.name) == 0 && !g.seat)
     {
         g.seat = wl_registry_bind(reg, name, &wl_seat_interface, version < 8 ? version : 8);
@@ -276,6 +310,18 @@ void backend_shutdown(void)
 {
     if (g.egl)
         eglTerminate(g.egl);
+    if (g.theme)
+        wl_cursor_theme_destroy(g.theme);
+    if (g.cursor_surface)
+        wl_surface_destroy(g.cursor_surface);
+#ifdef ZEN_WL_POINTER_LOCK
+    if (g.relative_manager)
+        zwp_relative_pointer_manager_v1_destroy(g.relative_manager);
+    if (g.constraints)
+        zwp_pointer_constraints_v1_destroy(g.constraints);
+#endif
+    if (g.shm)
+        wl_shm_destroy(g.shm);
     if (g.keyboard)
         wl_keyboard_release(g.keyboard);
     if (g.pointer)
@@ -838,6 +884,7 @@ static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, str
     (void)data;
     (void)p;
     g.serial = serial;
+    g.enter_serial = serial;
     BackendWindow *b = window_for_surface(surface);
     g.pointer_focus = b;
     if (!b)
@@ -845,6 +892,7 @@ static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, str
     g.pointer_x = wl_fixed_to_int(sx);
     g.pointer_y = wl_fixed_to_int(sy);
     b->hovered = true;
+    apply_cursor(b);
 
     Event in = {.type = EVENT_WINDOW_ENTER};
     in.data.enter.entered = true;
@@ -877,7 +925,7 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     (void)p;
     (void)time;
     BackendWindow *b = g.pointer_focus;
-    if (!b)
+    if (!b || b->locked)
         return;
     g.pointer_x = wl_fixed_to_int(sx);
     g.pointer_y = wl_fixed_to_int(sy);
@@ -1080,6 +1128,300 @@ static const struct wl_seat_listener seat_listener = {
     .capabilities = seat_capabilities,
     .name = seat_name,
 };
+
+/* ========================================================================== */
+/*  cursor and pointer lock                                                   */
+/* ========================================================================== */
+
+struct PlatformCursor
+{
+    struct wl_buffer *buffer;
+    int w, h, hot_x, hot_y;
+};
+
+/* The names a shape goes by in the themes, the traditional X ones first. */
+static const char *const cursor_names[CURSOR_COUNT][6] = {
+    [CURSOR_DEFAULT] = {"left_ptr", "default", "arrow"},
+    [CURSOR_ARROW] = {"left_ptr", "default", "arrow"},
+    [CURSOR_IBEAM] = {"xterm", "text", "ibeam"},
+    [CURSOR_CROSSHAIR] = {"crosshair", "cross"},
+    [CURSOR_HAND] = {"hand2", "pointer", "hand1", "pointing_hand"},
+    [CURSOR_RESIZE_EW] = {"sb_h_double_arrow", "ew-resize", "h_double_arrow", "col-resize", "size_hor"},
+    [CURSOR_RESIZE_NS] = {"sb_v_double_arrow", "ns-resize", "v_double_arrow", "row-resize", "size_ver"},
+    [CURSOR_NOT_ALLOWED] = {"crossed_circle", "not-allowed", "forbidden", "circle", "X_cursor"},
+    [CURSOR_RESIZE_NWSE] = {"nwse-resize", "size_fdiag", "bd_double_arrow", "top_left_corner"},
+    [CURSOR_RESIZE_NESW] = {"nesw-resize", "size_bdiag", "fd_double_arrow", "top_right_corner"},
+    [CURSOR_RESIZE_ALL] = {"fleur", "all-scroll", "move", "size_all"},
+};
+
+static struct wl_cursor *theme_cursor(int shape)
+{
+    if (!g.theme)
+    {
+        const char *size = getenv("XCURSOR_SIZE");
+        g.theme = wl_cursor_theme_load(getenv("XCURSOR_THEME"), size && atoi(size) > 0 ? atoi(size) : 24, g.shm);
+        if (!g.theme)
+            return NULL;
+    }
+    for (int i = 0; i < 6 && cursor_names[shape][i]; i++)
+    {
+        struct wl_cursor *c = wl_cursor_theme_get_cursor(g.theme, cursor_names[shape][i]);
+        if (c && c->image_count > 0)
+            return c;
+    }
+    return NULL;
+}
+
+/* What the pointer shows over this window: nothing, a cursor from an image, or
+   the shape from the theme. It has to be said again at every enter, quoting the
+   serial of that enter. */
+static void apply_cursor(BackendWindow *b)
+{
+    if (!g.pointer || g.pointer_focus != b)
+        return;
+    if (b->mouse_mode != MOUSE_MODE_NORMAL)
+    {
+        wl_pointer_set_cursor(g.pointer, g.enter_serial, NULL, 0, 0);
+        return;
+    }
+
+    struct wl_buffer *buffer = NULL;
+    int w = 0, h = 0, hot_x = 0, hot_y = 0;
+    if (b->cursor_image)
+    {
+        buffer = b->cursor_image->buffer;
+        w = b->cursor_image->w;
+        h = b->cursor_image->h;
+        hot_x = b->cursor_image->hot_x;
+        hot_y = b->cursor_image->hot_y;
+    }
+    else if (g.shm)
+    {
+        struct wl_cursor *c = theme_cursor(b->cursor_idx);
+        if (c)
+        {
+            struct wl_cursor_image *img = c->images[0];
+            buffer = wl_cursor_image_get_buffer(img);
+            w = (int)img->width;
+            h = (int)img->height;
+            hot_x = (int)img->hotspot_x;
+            hot_y = (int)img->hotspot_y;
+        }
+    }
+    if (!buffer)
+        return;
+
+    if (!g.cursor_surface)
+        g.cursor_surface = wl_compositor_create_surface(g.compositor);
+    wl_surface_attach(g.cursor_surface, buffer, 0, 0);
+    wl_surface_damage(g.cursor_surface, 0, 0, w, h);
+    wl_surface_commit(g.cursor_surface);
+    wl_pointer_set_cursor(g.pointer, g.enter_serial, g.cursor_surface, hot_x, hot_y);
+}
+
+#ifdef ZEN_WL_POINTER_LOCK
+static void locked_pointer_locked(void *data, struct zwp_locked_pointer_v1 *lp)
+{
+    BackendWindow *b = data;
+    (void)lp;
+    b->locked = true;
+    b->lock_x = b->virt_x = g.pointer_x;
+    b->lock_y = b->virt_y = g.pointer_y;
+}
+
+static void locked_pointer_unlocked(void *data, struct zwp_locked_pointer_v1 *lp)
+{
+    BackendWindow *b = data;
+    (void)lp;
+    b->locked = false;
+}
+
+static const struct zwp_locked_pointer_v1_listener locked_pointer_listener = {
+    .locked = locked_pointer_locked,
+    .unlocked = locked_pointer_unlocked,
+};
+
+/* The pointer does not move while it is locked, so the motion the core sees is a
+   position that moves with the raw (unaccelerated) deltas and never stops at an
+   edge: what mouse_delta reads from it is the relative motion. */
+static void relative_pointer_motion(void *data, struct zwp_relative_pointer_v1 *rp, uint32_t hi, uint32_t lo,
+                                    wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t dx_unaccel, wl_fixed_t dy_unaccel)
+{
+    BackendWindow *b = data;
+    (void)rp;
+    (void)hi;
+    (void)lo;
+    (void)dx;
+    (void)dy;
+    if (!b->locked)
+        return;
+    double ux = wl_fixed_to_double(dx_unaccel), uy = wl_fixed_to_double(dy_unaccel);
+    b->virt_x += ux;
+    b->virt_y += uy;
+    g.pointer_x = (int)b->virt_x;
+    g.pointer_y = (int)b->virt_y;
+
+    Event e = {.type = EVENT_MOUSE_MOVE};
+    e.data.mouse.x = g.pointer_x;
+    e.data.mouse.y = g.pointer_y;
+    e.data.mouse.dx = (int)ux;
+    e.data.mouse.dy = (int)uy;
+    push(b, &e);
+}
+
+static const struct zwp_relative_pointer_v1_listener relative_pointer_listener = {
+    .relative_motion = relative_pointer_motion,
+};
+#endif
+
+static void lock_pointer(BackendWindow *b)
+{
+#ifdef ZEN_WL_POINTER_LOCK
+    if (b->locked_pointer || !g.constraints || !g.relative_manager || !g.pointer)
+        return;
+    /* Persistent: the compositor locks again whenever the window gets the pointer back. */
+    b->locked_pointer = zwp_pointer_constraints_v1_lock_pointer(
+        g.constraints, b->surface, g.pointer, NULL, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+    zwp_locked_pointer_v1_add_listener(b->locked_pointer, &locked_pointer_listener, b);
+    b->relative_pointer = zwp_relative_pointer_manager_v1_get_relative_pointer(g.relative_manager, g.pointer);
+    zwp_relative_pointer_v1_add_listener(b->relative_pointer, &relative_pointer_listener, b);
+#else
+    (void)b;
+#endif
+}
+
+static void unlock_pointer(BackendWindow *b)
+{
+#ifdef ZEN_WL_POINTER_LOCK
+    if (!b->locked_pointer)
+        return;
+    /* The cursor comes back where it was when the lock began. */
+    if (b->locked)
+    {
+        zwp_locked_pointer_v1_set_cursor_position_hint(b->locked_pointer, wl_fixed_from_int(b->lock_x),
+                                                       wl_fixed_from_int(b->lock_y));
+        wl_surface_commit(b->surface);
+    }
+    zwp_locked_pointer_v1_destroy(b->locked_pointer);
+    zwp_relative_pointer_v1_destroy(b->relative_pointer);
+    b->locked_pointer = NULL;
+    b->relative_pointer = NULL;
+    b->locked = false;
+#else
+    (void)b;
+#endif
+}
+
+PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y)
+{
+    if (!g.shm)
+    {
+        error_set("the compositor has no wl_shm, which a cursor from an image needs");
+        return NULL;
+    }
+    size_t size = (size_t)w * (size_t)h * 4;
+    int fd = memfd_create("zen-cursor", MFD_CLOEXEC);
+    uint32_t *px = NULL;
+    if (fd >= 0 && ftruncate(fd, (off_t)size) == 0)
+        px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (!px || px == MAP_FAILED)
+    {
+        if (fd >= 0)
+            close(fd);
+        error_set("cannot create the cursor");
+        return NULL;
+    }
+    for (int i = 0; i < w * h; i++) /* wl_shm wants premultiplied alpha */
+    {
+        uint32_t p = argb[i], a = p >> 24;
+        uint32_t r = ((p >> 16) & 0xFF) * a / 255, gr = ((p >> 8) & 0xFF) * a / 255, bl = (p & 0xFF) * a / 255;
+        px[i] = (a << 24) | (r << 16) | (gr << 8) | bl;
+    }
+    munmap(px, size);
+
+    PlatformCursor *c = calloc(1, sizeof *c);
+    struct wl_shm_pool *pool = c ? wl_shm_create_pool(g.shm, fd, (int32_t)size) : NULL;
+    if (pool)
+    {
+        c->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
+        wl_shm_pool_destroy(pool);
+    }
+    close(fd);
+    if (!c || !c->buffer)
+    {
+        free(c);
+        error_set("cannot create the cursor");
+        return NULL;
+    }
+    c->w = w;
+    c->h = h;
+    c->hot_x = hot_x;
+    c->hot_y = hot_y;
+    return c;
+}
+
+void backend_cursor_destroy(PlatformCursor *c)
+{
+    if (!c)
+        return;
+    wl_buffer_destroy(c->buffer);
+    free(c);
+}
+
+void backend_set_cursor(BackendWindow *b, int cursor)
+{
+    if (cursor < 0 || cursor >= CURSOR_COUNT)
+        cursor = CURSOR_DEFAULT;
+    b->cursor_idx = cursor;
+    b->cursor_image = NULL;
+    apply_cursor(b);
+}
+
+void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
+{
+    b->cursor_image = c;
+    apply_cursor(b);
+}
+
+void backend_set_mouse_mode(BackendWindow *b, int mode)
+{
+    if (mode == b->mouse_mode)
+        return;
+    b->mouse_mode = mode;
+    if (mode == MOUSE_MODE_CAPTURED)
+        lock_pointer(b);
+    else
+        unlock_pointer(b);
+    apply_cursor(b);
+}
+
+/* A client cannot move the pointer; the one place it can say where it is is a
+   lock, and that only for where the cursor appears after it. */
+void backend_set_mouse_pos(BackendWindow *b, int x, int y)
+{
+#ifdef ZEN_WL_POINTER_LOCK
+    if (b->locked)
+    {
+        b->virt_x = b->lock_x = x;
+        b->virt_y = b->lock_y = y;
+        g.pointer_x = x;
+        g.pointer_y = y;
+    }
+#else
+    (void)b;
+    (void)x;
+    (void)y;
+#endif
+}
+
+/* While a button is held the compositor already sends the pointer to the window
+   that took the press, outside it too, which is the case this is for. */
+bool backend_mouse_capture(BackendWindow *b, bool on)
+{
+    (void)b;
+    (void)on;
+    return true;
+}
 
 /* ========================================================================== */
 /*  EGL context                                                               */
@@ -1312,6 +1654,7 @@ void backend_destroy(BackendWindow *b)
     }
     if (g.pointer_focus == b)
         g.pointer_focus = NULL;
+    unlock_pointer(b);
     destroy_shell(b);
     if (b->frame_cb)
         wl_callback_destroy(b->frame_cb);
@@ -1684,24 +2027,6 @@ void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
 {
     (void)b; (void)x; (void)y; (void)w; (void)h;
 }
-
-bool backend_mouse_capture(BackendWindow *b, bool on)
-{
-    (void)b; (void)on;
-    return false;
-}
-
-PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y)
-{
-    (void)argb; (void)w; (void)h; (void)hot_x; (void)hot_y;
-    return NULL;
-}
-
-void backend_cursor_destroy(PlatformCursor *c) { (void)c; }
-void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c) { (void)b; (void)c; }
-void backend_set_mouse_pos(BackendWindow *b, int x, int y) { (void)b; (void)x; (void)y; }
-void backend_set_cursor(BackendWindow *b, int cursor) { (void)b; (void)cursor; }
-void backend_set_mouse_mode(BackendWindow *b, int mode) { (void)b; (void)mode; }
 
 bool backend_clipboard_set(const ClipboardItem *items, int count)
 {

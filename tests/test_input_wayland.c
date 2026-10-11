@@ -8,6 +8,10 @@
 #define _GNU_SOURCE
 #include "platform.h"
 #include "xdg-shell-server-protocol.h"
+#ifdef ZEN_WL_POINTER_LOCK
+#include "pointer-constraints-unstable-v1-server-protocol.h"
+#include "relative-pointer-unstable-v1-server-protocol.h"
+#endif
 
 #include <wayland-server.h>
 #include <xkbcommon/xkbcommon.h>
@@ -45,6 +49,9 @@ typedef struct
     int frame_n;
     struct wl_resource *buffer;
     bool configured;
+    bool shown; /* a buffer was committed */
+    int shown_w, shown_h;
+    uint32_t shown_pixel;
 } Surface;
 
 static struct
@@ -59,6 +66,22 @@ static struct
     struct xkb_context *xkb;
     struct xkb_keymap *keymap;
     struct xkb_state *state;
+
+    /* the last wl_pointer.set_cursor, and what the cursor surface showed with it */
+    int cursor_requests;
+    uint32_t cursor_serial;
+    bool cursor_has_surface;
+    int cursor_hot_x, cursor_hot_y, cursor_w, cursor_h;
+    uint32_t cursor_pixel; /* the first pixel of the buffer, as stored */
+    struct wl_resource *cursor_surface;
+
+    uint32_t enter_serial;
+#ifdef ZEN_WL_POINTER_LOCK
+    struct wl_resource *locked, *relative;
+    int lock_requests;
+    bool lock_destroyed;
+    int hint_x, hint_y;
+#endif
 } S;
 
 static const struct
@@ -80,6 +103,9 @@ enum
     CMD_PTR_V120,
     CMD_PTR_FRAME,
     CMD_CONFIGURE,
+    CMD_LOCK,
+    CMD_UNLOCK,
+    CMD_REL_MOTION,
     CMD_QUIT
 };
 
@@ -147,6 +173,16 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r)
     }
     if (s->buffer)
     {
+        struct wl_shm_buffer *shm = wl_shm_buffer_get(s->buffer);
+        if (shm)
+        {
+            s->shown = true;
+            s->shown_w = wl_shm_buffer_get_width(shm);
+            s->shown_h = wl_shm_buffer_get_height(shm);
+            wl_shm_buffer_begin_access(shm);
+            s->shown_pixel = *(uint32_t *)wl_shm_buffer_get_data(shm);
+            wl_shm_buffer_end_access(shm);
+        }
         wl_buffer_send_release(s->buffer);
         s->buffer = NULL;
     }
@@ -290,7 +326,32 @@ static void release_req(struct wl_client *c, struct wl_resource *r)
 }
 
 static const struct wl_keyboard_interface keyboard_impl = {.release = release_req};
-static const struct wl_pointer_interface pointer_impl = {.set_cursor = (void *)unused_request,
+static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r, uint32_t serial,
+                               struct wl_resource *surface, int32_t hot_x, int32_t hot_y)
+{
+    (void)c;
+    (void)r;
+    S.cursor_requests++;
+    S.cursor_serial = serial;
+    S.cursor_has_surface = surface != NULL;
+    S.cursor_hot_x = hot_x;
+    S.cursor_hot_y = hot_y;
+    S.cursor_surface = surface;
+    S.cursor_w = S.cursor_h = 0;
+    S.cursor_pixel = 0;
+    if (surface)
+    {
+        Surface *s = wl_resource_get_user_data(surface);
+        if (s->shown)
+        {
+            S.cursor_w = s->shown_w;
+            S.cursor_h = s->shown_h;
+            S.cursor_pixel = s->shown_pixel;
+        }
+    }
+}
+
+static const struct wl_pointer_interface pointer_impl = {.set_cursor = pointer_set_cursor,
                                                          .release = release_req};
 
 static void keyboard_gone(struct wl_resource *r)
@@ -375,6 +436,84 @@ static void seat_bind(struct wl_client *c, void *data, uint32_t version, uint32_
     wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
 }
 
+#ifdef ZEN_WL_POINTER_LOCK
+static void locked_destroy(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    S.lock_destroyed = true;
+    S.locked = NULL;
+    wl_resource_destroy(r);
+}
+
+static void locked_set_hint(struct wl_client *c, struct wl_resource *r, wl_fixed_t x, wl_fixed_t y)
+{
+    (void)c;
+    (void)r;
+    S.hint_x = wl_fixed_to_int(x);
+    S.hint_y = wl_fixed_to_int(y);
+}
+
+static const struct zwp_locked_pointer_v1_interface locked_impl = {
+    .destroy = locked_destroy,
+    .set_cursor_position_hint = locked_set_hint,
+    .set_region = (void *)unused_request,
+};
+
+static void constraints_lock_pointer(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                     struct wl_resource *surface, struct wl_resource *pointer,
+                                     struct wl_resource *region, uint32_t lifetime)
+{
+    (void)surface;
+    (void)pointer;
+    (void)region;
+    (void)lifetime;
+    S.lock_requests++;
+    S.lock_destroyed = false;
+    S.locked = wl_resource_create(c, &zwp_locked_pointer_v1_interface, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(S.locked, &locked_impl, NULL, NULL);
+}
+
+static const struct zwp_pointer_constraints_v1_interface constraints_impl = {
+    .destroy = release_req,
+    .lock_pointer = constraints_lock_pointer,
+    .confine_pointer = (void *)unused_request,
+};
+
+static void constraints_bind(struct wl_client *c, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(c, &zwp_pointer_constraints_v1_interface, (int)version, id);
+    wl_resource_set_implementation(r, &constraints_impl, NULL, NULL);
+}
+
+static void relative_gone(struct wl_resource *r)
+{
+    if (S.relative == r)
+        S.relative = NULL;
+}
+
+static const struct zwp_relative_pointer_v1_interface relative_impl = {.destroy = release_req};
+
+static void manager_get_relative(struct wl_client *c, struct wl_resource *r, uint32_t id, struct wl_resource *pointer)
+{
+    (void)pointer;
+    S.relative = wl_resource_create(c, &zwp_relative_pointer_v1_interface, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(S.relative, &relative_impl, NULL, relative_gone);
+}
+
+static const struct zwp_relative_pointer_manager_v1_interface manager_impl = {
+    .destroy = release_req,
+    .get_relative_pointer = manager_get_relative,
+};
+
+static void manager_bind(struct wl_client *c, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(c, &zwp_relative_pointer_manager_v1_interface, (int)version, id);
+    wl_resource_set_implementation(r, &manager_impl, NULL, NULL);
+}
+#endif
+
 /* ---- the script ---- */
 
 static void run_cmd(const Cmd *c)
@@ -409,8 +548,11 @@ static void run_cmd(const Cmd *c)
         break;
     case CMD_PTR_ENTER:
         if (S.pointer && S.surface)
-            wl_pointer_send_enter(S.pointer, ++S.serial, S.surface->res, wl_fixed_from_int(c->a),
+        {
+            S.enter_serial = ++S.serial;
+            wl_pointer_send_enter(S.pointer, S.enter_serial, S.surface->res, wl_fixed_from_int(c->a),
                                   wl_fixed_from_int(c->b));
+        }
         break;
     case CMD_PTR_LEAVE:
         if (S.pointer && S.surface)
@@ -441,6 +583,22 @@ static void run_cmd(const Cmd *c)
         if (S.surface && S.surface->configured)
             send_configure(S.surface, c->a, c->b, (uint32_t)c->c);
         break;
+#ifdef ZEN_WL_POINTER_LOCK
+    case CMD_LOCK:
+        if (S.locked)
+            zwp_locked_pointer_v1_send_locked(S.locked);
+        break;
+    case CMD_UNLOCK:
+        if (S.locked)
+            zwp_locked_pointer_v1_send_unlocked(S.locked);
+        break;
+    case CMD_REL_MOTION:
+        if (S.relative)
+            zwp_relative_pointer_v1_send_relative_motion(S.relative, 0, 0, wl_fixed_from_int(c->a * 2),
+                                                         wl_fixed_from_int(c->b * 2), wl_fixed_from_int(c->a),
+                                                         wl_fixed_from_int(c->b));
+        break;
+#endif
     case CMD_QUIT:
         wl_display_terminate(S.display);
         break;
@@ -493,6 +651,10 @@ static bool start_compositor(void)
     wl_global_create(S.display, &wl_compositor_interface, 4, NULL, compositor_bind);
     wl_global_create(S.display, &xdg_wm_base_interface, 5, NULL, wm_base_bind);
     wl_global_create(S.display, &wl_seat_interface, 8, NULL, seat_bind);
+#ifdef ZEN_WL_POINTER_LOCK
+    wl_global_create(S.display, &zwp_pointer_constraints_v1_interface, 1, NULL, constraints_bind);
+    wl_global_create(S.display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, manager_bind);
+#endif
 
     if (pipe2(S.cmd, O_NONBLOCK | O_CLOEXEC) != 0)
         return false;
@@ -586,9 +748,9 @@ static void pump(PlatformWindow *w, int ms)
     }
 }
 
-/* Everything sent before is heard once a configure of a size nobody else uses
-   comes back: the connection keeps the order. */
-static bool settle(PlatformWindow *w)
+/* One round: everything sent before is heard once a configure of a size nobody
+   else uses comes back, since the connection keeps the order. */
+static bool round_trip(PlatformWindow *w)
 {
     int size = ++marker;
     cmd(CMD_CONFIGURE, size, size - 100, 4, 0);
@@ -603,6 +765,13 @@ static bool settle(PlatformWindow *w)
         usleep(2000);
     }
     return false;
+}
+
+/* Two rounds: what the client sent in answer to the first (a cursor request) has
+   been read by the compositor thread once the second comes back. */
+static bool settle(PlatformWindow *w)
+{
+    return round_trip(w) && round_trip(w);
 }
 
 static void reset(void)
@@ -942,6 +1111,122 @@ static void test_wheel(PlatformWindow *w)
     CHECK(settle(w));
 }
 
+/* What the client says about the cursor is read from the compositor's side once
+   everything before it has been delivered. The server threads write these, so a
+   settled client is the point at which they are read. */
+static void test_cursor(PlatformWindow *w)
+{
+    /* entering the window sets a cursor, quoting that enter */
+    cmd(CMD_PTR_LEAVE, 0, 0, 0, 0);
+    CHECK(settle(w));
+    int before = S.cursor_requests;
+    mouse_set_cursor(w, CURSOR_DEFAULT);
+    cmd(CMD_PTR_ENTER, 5, 5, 0, 0);
+    CHECK(settle(w));
+    CHECK(S.cursor_requests > before);
+    CHECK(S.cursor_serial == S.enter_serial);
+    /* the theme may be missing on the machine; when it is there the cursor is a surface */
+    bool theme = S.cursor_has_surface;
+    if (theme)
+        CHECK(S.cursor_w > 0 && S.cursor_h > 0);
+
+    /* a cursor from an image: its size, hot spot and premultiplied pixels */
+    uint32_t px[4 * 3];
+    for (int i = 0; i < 12; i++)
+        px[i] = 0x80FF0000u; /* half-transparent red, not premultiplied */
+    PlatformCursor *c = cursor_create(px, 4, 3, 1, 2);
+    CHECK(c != NULL);
+    if (c)
+    {
+        mouse_set_cursor_image(w, c);
+        CHECK(settle(w));
+        CHECK(S.cursor_has_surface);
+        CHECK(S.cursor_hot_x == 1 && S.cursor_hot_y == 2);
+        CHECK(S.cursor_w == 4 && S.cursor_h == 3);
+        CHECK(S.cursor_pixel == 0x80800000u);
+        CHECK(S.cursor_serial == S.enter_serial);
+
+        /* a shape takes the place of the image, and the image can be asked back */
+        mouse_set_cursor(w, CURSOR_IBEAM);
+        CHECK(settle(w));
+        if (theme)
+            CHECK(!(S.cursor_w == 4 && S.cursor_h == 3));
+        mouse_set_cursor_image(w, c);
+        CHECK(settle(w));
+        CHECK(S.cursor_w == 4 && S.cursor_h == 3);
+        mouse_set_cursor_image(w, NULL);
+        CHECK(settle(w));
+        cursor_destroy(c);
+    }
+
+    /* hidden: the pointer is given no surface */
+    mouse_set_mode(w, MOUSE_MODE_HIDDEN);
+    CHECK(settle(w));
+    CHECK(!S.cursor_has_surface);
+    mouse_set_mode(w, MOUSE_MODE_NORMAL);
+    CHECK(settle(w));
+    if (theme)
+        CHECK(S.cursor_has_surface);
+
+    /* a new enter asks again */
+    cmd(CMD_PTR_LEAVE, 0, 0, 0, 0);
+    cmd(CMD_PTR_ENTER, 6, 6, 0, 0);
+    before = S.cursor_requests;
+    CHECK(settle(w));
+    CHECK(S.cursor_requests > before);
+    CHECK(S.cursor_serial == S.enter_serial);
+    cmd(CMD_PTR_LEAVE, 0, 0, 0, 0);
+    CHECK(settle(w));
+}
+
+#ifdef ZEN_WL_POINTER_LOCK
+/* Captured: hidden and locked, and the motion comes as raw deltas on a position
+   that does not stop at an edge. */
+static void test_captured(PlatformWindow *w)
+{
+    cmd(CMD_PTR_ENTER, 100, 80, 0, 0);
+    CHECK(settle(w));
+
+    int before = S.lock_requests;
+    mouse_set_mode(w, MOUSE_MODE_CAPTURED);
+    CHECK(settle(w));
+    CHECK(S.lock_requests == before + 1);
+    CHECK(S.locked != NULL && S.relative != NULL);
+    CHECK(!S.cursor_has_surface); /* hidden */
+
+    /* motion before the compositor says locked is still absolute */
+    cmd(CMD_LOCK, 0, 0, 0, 0);
+    CHECK(settle(w));
+
+    reset();
+    cmd(CMD_REL_MOTION, 7, -3, 0, 0);
+    cmd(CMD_REL_MOTION, 5, 2, 0, 0);
+    CHECK(settle(w));
+    CHECK(count(EVENT_MOUSE_MOVE) == 2);
+    const Rec *m0 = nth(EVENT_MOUSE_MOVE, 0);
+    const Rec *m1 = nth(EVENT_MOUSE_MOVE, 1);
+    CHECK(m0 && m0->x == 107 && m0->y == 77);
+    CHECK(m1 && m1->x == 112 && m1->y == 79);
+    CHECK(mouse_x(w) == 112 && mouse_y(w) == 79);
+
+    /* far past the window: there is no edge to stop it */
+    reset();
+    for (int i = 0; i < 30; i++)
+        cmd(CMD_REL_MOTION, 50, 50, 0, 0);
+    CHECK(settle(w));
+    CHECK(mouse_x(w) == 112 + 1500 && mouse_y(w) == 79 + 1500);
+
+    /* leaving the mode gives the pointer back, at the place the lock began */
+    mouse_set_mode(w, MOUSE_MODE_NORMAL);
+    CHECK(settle(w));
+    CHECK(S.lock_destroyed);
+    CHECK(S.hint_x == 100 && S.hint_y == 80);
+
+    cmd(CMD_PTR_LEAVE, 0, 0, 0, 0);
+    CHECK(settle(w));
+}
+#endif
+
 enum
 {
     ST_MAXIMIZED = 1,
@@ -1035,6 +1320,10 @@ int main(void)
     test_locks(w);
     test_pointer(w);
     test_wheel(w);
+    test_cursor(w);
+#ifdef ZEN_WL_POINTER_LOCK
+    test_captured(w);
+#endif
     test_configure(w);
 
     window_destroy(w);

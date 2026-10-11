@@ -1,7 +1,7 @@
 # Wayland backend: the client libraries through pkg-config, and the C side of the
 # protocols, generated at build time by wayland-scanner from wayland-protocols.
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-egl egl xkbcommon)
+pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-cursor wayland-egl egl xkbcommon)
 pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 
@@ -43,4 +43,15 @@ function(wayland_protocol xml name)
 endfunction()
 
 wayland_protocol(${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml xdg-shell)
+
+# Locking the pointer, for MOUSE_MODE_CAPTURED. Without the two protocols files the
+# mode falls back to a hidden cursor.
+set(WAYLAND_POINTER_LOCK OFF)
+set(POINTER_CONSTRAINTS_XML ${WAYLAND_PROTOCOLS_DIR}/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml)
+set(RELATIVE_POINTER_XML ${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml)
+if(EXISTS ${POINTER_CONSTRAINTS_XML} AND EXISTS ${RELATIVE_POINTER_XML})
+    set(WAYLAND_POINTER_LOCK ON)
+    wayland_protocol(${POINTER_CONSTRAINTS_XML} pointer-constraints-unstable-v1)
+    wayland_protocol(${RELATIVE_POINTER_XML} relative-pointer-unstable-v1)
+endif()
 add_custom_target(wayland_server_headers DEPENDS ${WAYLAND_SERVER_HEADERS})
