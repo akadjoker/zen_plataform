@@ -190,6 +190,33 @@ static void test_hide_show(void)
     window_destroy(w);
 }
 
+/* A window shown again right after it was hidden meets the compositor still
+   playing its closing. GNOME Shell 46 died of that (SIGSEGV, and the whole session
+   with it) while show reused the surface of the window that went away, so the
+   waits run from none to past the animation. */
+static void test_hide_show_cycles(void)
+{
+    static const int wait_ms[] = {0, 10, 40, 100, 170, 300};
+    PlatformWindow *w = make(true, true);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Seen s = {0};
+    frames(w, &s, 50);
+    for (int i = 0; i < 30; i++)
+    {
+        window_hide(w);
+        frames(w, &s, wait_ms[i % 6]);
+        window_show(w);
+        CHECK(window_is_visible(w));
+        frames(w, &s, wait_ms[(i * 5 + 2) % 6]);
+    }
+    int cw, ch;
+    window_get_size(w, &cw, &ch);
+    CHECK(cw == 300 && ch == 200);
+    window_destroy(w);
+}
+
 /* The compositor sends no frame callbacks to a minimized window; a swap that
    waited for one without a limit would stop the loop here. */
 static void test_minimized_vsync(void)
@@ -247,6 +274,7 @@ int main(void)
     test_fullscreen();
     test_created_fullscreen();
     test_hide_show();
+    test_hide_show_cycles();
     test_minimized_vsync();
     test_limits_and_title();
 

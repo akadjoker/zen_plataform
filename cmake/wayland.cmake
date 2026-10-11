@@ -44,6 +44,15 @@ endfunction()
 
 wayland_protocol(${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml xdg-shell)
 
+# Server-side decorations where the compositor offers them (KDE, wlroots). Without
+# this the backend draws its own title bar and border on every compositor.
+set(WAYLAND_XDG_DECORATION OFF)
+set(XDG_DECORATION_XML ${WAYLAND_PROTOCOLS_DIR}/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml)
+if(EXISTS ${XDG_DECORATION_XML})
+    set(WAYLAND_XDG_DECORATION ON)
+    wayland_protocol(${XDG_DECORATION_XML} xdg-decoration-unstable-v1)
+endif()
+
 # Locking the pointer, for MOUSE_MODE_CAPTURED. Without the two protocols files the
 # mode falls back to a hidden cursor.
 set(WAYLAND_POINTER_LOCK OFF)

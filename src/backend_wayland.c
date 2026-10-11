@@ -24,6 +24,9 @@
 #include "pointer-constraints-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #endif
+#ifdef ZEN_WL_XDG_DECORATION
+#include "xdg-decoration-unstable-v1-client-protocol.h"
+#endif
 
 #include <errno.h>
 #include <poll.h>
@@ -42,6 +45,24 @@
 #define BTN_EXTRA 0x114
 
 /* ---- global connection ---- */
+
+enum
+{
+    DECOR_TOP,
+    DECOR_LEFT,
+    DECOR_RIGHT,
+    DECOR_BOTTOM,
+    DECOR_COUNT
+};
+
+typedef struct DecorPart
+{
+    struct wl_surface *surface;
+    struct wl_subsurface *sub;
+    struct wl_buffer *buffer; /* the one on the surface, until the compositor lets go */
+    BackendWindow *owner;
+    int part;
+} DecorPart;
 
 static struct
 {
@@ -62,6 +83,14 @@ static struct
     BackendWindow *keyboard_focus, *pointer_focus;
     uint32_t serial; /* of the last key or button, which clipboard and move requests quote */
     uint32_t enter_serial; /* of the pointer's last enter, which a cursor request quotes */
+
+    struct wl_subcompositor *subcompositor;
+#ifdef ZEN_WL_XDG_DECORATION
+    struct zxdg_decoration_manager_v1 *deco_manager;
+#endif
+    DecorPart *pointer_decor; /* the part of a frame the pointer is on, if any */
+    int decor_x, decor_y;     /* where, in that part */
+    int decor_shape;          /* the cursor it shows: asked for only when it changes */
 
     struct wl_shm *shm;
     struct wl_cursor_theme *theme; /* loaded on first use */
@@ -90,6 +119,16 @@ static struct
 
 static const struct wl_seat_listener seat_listener;
 static void apply_cursor(BackendWindow *b);
+static void set_pointer_cursor(int shape, struct PlatformCursor *image, bool hidden);
+static void apply_limits(BackendWindow *b);
+static DecorPart *decor_for_surface(struct wl_surface *surface);
+static void decor_enter(DecorPart *d, int x, int y);
+static void decor_motion(DecorPart *d, int x, int y);
+static void decor_leave(DecorPart *d);
+static void decor_button(DecorPart *d, uint32_t serial, uint32_t button, bool down);
+static void decor_extents(const BackendWindow *b, bool maximized, bool fullscreen, int *l, int *t, int *r, int *bt);
+static void start_move_resize(BackendWindow *b, HitTestResult r, uint32_t serial);
+static int hit_cursor_for(HitTestResult r);
 
 struct BackendWindow
 {
@@ -99,6 +138,7 @@ struct BackendWindow
     struct wl_egl_window *egl_window;
     EGLSurface egl_surface;
     EGLContext context;
+    EGLConfig config; /* what a new surface is made with when the window is shown again */
 
     RenderMode render;
     int width, height; /* screen coordinates */
@@ -128,6 +168,22 @@ struct BackendWindow
 #ifdef ZEN_WL_POINTER_LOCK
     struct zwp_locked_pointer_v1 *locked_pointer;
     struct zwp_relative_pointer_v1 *relative_pointer;
+#endif
+    DecorPart decor[DECOR_COUNT];
+    bool decorated;     /* asked for */
+    bool server_side;   /* the compositor said it draws the frame */
+    bool csd;           /* decorated, and drawn here */
+    bool decor_dirty;
+    int decor_ext[4];   /* the frame as last sent: left, top, right, bottom */
+    int hover_button, press_button;
+    double title_click_ms;
+    HitTestFunc hit_cb; /* a title bar and edges of the application's own */
+    PlatformWindow *hit_w;
+    void *hit_user;
+    bool hit_press;
+    int hit_cursor;     /* the resize cursor the hit test asks for, or -1 */
+#ifdef ZEN_WL_XDG_DECORATION
+    struct zxdg_toplevel_decoration_v1 *xdg_deco;
 #endif
     bool locked;                   /* the compositor holds the pointer still */
     double virt_x, virt_y;         /* where the pointer would be: moved by the raw deltas while locked */
@@ -197,6 +253,12 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name, 
         g.wm_base = wl_registry_bind(reg, name, &xdg_wm_base_interface, version < 5 ? version : 5);
     else if (strcmp(iface, wl_shm_interface.name) == 0)
         g.shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
+    else if (strcmp(iface, wl_subcompositor_interface.name) == 0)
+        g.subcompositor = wl_registry_bind(reg, name, &wl_subcompositor_interface, 1);
+#ifdef ZEN_WL_XDG_DECORATION
+    else if (strcmp(iface, zxdg_decoration_manager_v1_interface.name) == 0)
+        g.deco_manager = wl_registry_bind(reg, name, &zxdg_decoration_manager_v1_interface, 1);
+#endif
 #ifdef ZEN_WL_POINTER_LOCK
     else if (strcmp(iface, zwp_pointer_constraints_v1_interface.name) == 0)
         g.constraints = wl_registry_bind(reg, name, &zwp_pointer_constraints_v1_interface, 1);
@@ -466,7 +528,20 @@ static void surface_configure(void *data, struct xdg_surface *s, uint32_t serial
             h = b->height;
         }
     }
+    else
+    {
+        /* the size the compositor gives is the window's, frame included */
+        int l, t, r, bt;
+        decor_extents(b, b->pending_maximized, b->pending_fullscreen, &l, &t, &r, &bt);
+        w -= l + r;
+        h -= t + bt;
+        if (w < 1)
+            w = 1;
+        if (h < 1)
+            h = 1;
+    }
     apply_size(b, w, h);
+    b->decor_dirty = true;
 
     if (b->pending_maximized != b->maximized)
     {
@@ -885,6 +960,13 @@ static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, str
     (void)p;
     g.serial = serial;
     g.enter_serial = serial;
+    DecorPart *d = decor_for_surface(surface);
+    if (d)
+    {
+        g.pointer_focus = NULL;
+        decor_enter(d, wl_fixed_to_int(sx), wl_fixed_to_int(sy));
+        return;
+    }
     BackendWindow *b = window_for_surface(surface);
     g.pointer_focus = b;
     if (!b)
@@ -909,6 +991,11 @@ static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, str
     (void)p;
     (void)surface;
     g.serial = serial;
+    if (g.pointer_decor)
+    {
+        decor_leave(g.pointer_decor);
+        return;
+    }
     BackendWindow *b = g.pointer_focus;
     g.pointer_focus = NULL;
     if (!b)
@@ -924,6 +1011,11 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     (void)data;
     (void)p;
     (void)time;
+    if (g.pointer_decor)
+    {
+        decor_motion(g.pointer_decor, wl_fixed_to_int(sx), wl_fixed_to_int(sy));
+        return;
+    }
     BackendWindow *b = g.pointer_focus;
     if (!b || b->locked)
         return;
@@ -933,6 +1025,17 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     e.data.mouse.x = g.pointer_x;
     e.data.mouse.y = g.pointer_y;
     push(b, &e);
+
+    /* The pointer over a resize edge of the application's own shows its cursor. */
+    if (b->hit_cb && b->mouse_mode == MOUSE_MODE_NORMAL)
+    {
+        int want = hit_cursor_for(b->hit_cb(b->hit_w, g.pointer_x, g.pointer_y, b->hit_user));
+        if (want != b->hit_cursor)
+        {
+            b->hit_cursor = want;
+            apply_cursor(b);
+        }
+    }
 }
 
 static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, uint32_t time, uint32_t button,
@@ -942,9 +1045,35 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     (void)p;
     (void)time;
     g.serial = serial;
+    if (g.pointer_decor)
+    {
+        decor_button(g.pointer_decor, serial, button, state == WL_POINTER_BUTTON_STATE_PRESSED);
+        return;
+    }
     BackendWindow *b = g.pointer_focus;
     if (!b)
         return;
+
+    /* A press on a title bar or edge of the application's own is the window
+       manager's, and the release that goes with it is nobody's. */
+    if (b->hit_cb && button == BTN_LEFT)
+    {
+        if (state == WL_POINTER_BUTTON_STATE_PRESSED)
+        {
+            HitTestResult r = b->hit_cb(b->hit_w, g.pointer_x, g.pointer_y, b->hit_user);
+            if (r != HIT_NORMAL)
+            {
+                b->hit_press = true;
+                start_move_resize(b, r, serial);
+                return;
+            }
+        }
+        else if (b->hit_press)
+        {
+            b->hit_press = false;
+            return;
+        }
+    }
 
     int mb;
     switch (button)
@@ -1130,6 +1259,484 @@ static const struct wl_seat_listener seat_listener = {
 };
 
 /* ========================================================================== */
+/*  decorations                                                               */
+/* ========================================================================== */
+
+/* GNOME draws no frame for a client: a title bar and a border are four wl_shm
+   surfaces around the content, subsurfaces of it, and the window geometry says
+   the frame is part of the window. Where the compositor draws the frame itself
+   (xdg-decoration answers server-side) none of this exists. The border is mostly
+   empty: it is there to be grabbed. */
+#define TITLE_H 32
+#define BORDER 6
+#define BUTTON_W 40
+
+enum
+{
+    TB_NONE = -1,
+    TB_MINIMIZE,
+    TB_MAXIMIZE,
+    TB_CLOSE
+};
+
+static const uint32_t bar_color[2] = {0xFF232323, 0xFF2B2B2B}; /* unfocused, focused */
+static const uint32_t line_color = 0xFF111111;
+static const uint32_t icon_color[2] = {0xFF8A8A8A, 0xFFE6E6E6};
+static const uint32_t hover_color = 0xFF3D3D3D;
+static const uint32_t close_hover_color = 0xFFC42B1C;
+
+static void buffer_release(void *data, struct wl_buffer *buffer)
+{
+    DecorPart *p = data;
+    if (p && p->buffer == buffer)
+        p->buffer = NULL;
+    wl_buffer_destroy(buffer);
+}
+
+static const struct wl_buffer_listener buffer_listener = {
+    .release = buffer_release,
+};
+
+/* A buffer that holds its own copy of the pixels: the pool and the file are gone
+   as soon as it exists. With a part, it is destroyed when the compositor lets go
+   of it. */
+static struct wl_buffer *shm_buffer(const uint32_t *px, int w, int h, DecorPart *part)
+{
+    size_t size = (size_t)w * (size_t)h * 4;
+    int fd = memfd_create("zen-buffer", MFD_CLOEXEC);
+    if (fd < 0)
+        return NULL;
+    if (write(fd, px, size) != (ssize_t)size)
+    {
+        close(fd);
+        return NULL;
+    }
+    struct wl_shm_pool *pool = wl_shm_create_pool(g.shm, fd, (int32_t)size);
+    close(fd);
+    if (!pool)
+        return NULL;
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    if (buffer && part)
+        wl_buffer_add_listener(buffer, &buffer_listener, part);
+    return buffer;
+}
+
+static void paint_rect(uint32_t *px, int stride, int x, int y, int w, int h, uint32_t c)
+{
+    for (int j = y; j < y + h; j++)
+    {
+        for (int i = x; i < x + w; i++)
+            px[j * stride + i] = c;
+    }
+}
+
+static void paint_outline(uint32_t *px, int stride, int x, int y, int w, int h, uint32_t c)
+{
+    paint_rect(px, stride, x, y, w, 1, c);
+    paint_rect(px, stride, x, y + h - 1, w, 1, c);
+    paint_rect(px, stride, x, y, 1, h, c);
+    paint_rect(px, stride, x + w - 1, y, 1, h, c);
+}
+
+static void paint_icon(uint32_t *px, int stride, int cx, int cy, int which, bool maximized, uint32_t c)
+{
+    switch (which)
+    {
+    case TB_MINIMIZE:
+        paint_rect(px, stride, cx - 5, cy + 2, 10, 1, c);
+        break;
+    case TB_MAXIMIZE:
+        if (maximized)
+        {
+            paint_outline(px, stride, cx - 5, cy - 2, 8, 8, c);
+            paint_outline(px, stride, cx - 3, cy - 4, 8, 8, c);
+        }
+        else
+        {
+            paint_outline(px, stride, cx - 5, cy - 5, 10, 10, c);
+        }
+        break;
+    case TB_CLOSE:
+        for (int i = 0; i < 10; i++)
+        {
+            px[(cy - 5 + i) * stride + cx - 5 + i] = c;
+            px[(cy - 5 + i) * stride + cx + 4 - i] = c;
+        }
+        break;
+    }
+}
+
+static void decor_extents(const BackendWindow *b, bool maximized, bool fullscreen, int *l, int *t, int *r, int *bt)
+{
+    int side = 0, top = 0;
+    if (b->csd && !fullscreen)
+    {
+        top = TITLE_H;
+        side = maximized ? 0 : BORDER;
+    }
+    *l = *r = *bt = side;
+    *t = top;
+}
+
+/* The frame is drawn here when it is asked for, the compositor does not draw it,
+   and there are subsurfaces and shared memory to draw it with. */
+static bool wants_own_frame(const BackendWindow *b)
+{
+    return b->decorated && !b->server_side && g.subcompositor && g.shm;
+}
+
+static bool decor_resizable(const BackendWindow *b)
+{
+    return !(b->min_w > 0 && b->min_w == b->max_w && b->min_h == b->max_h);
+}
+
+/* What the pointer is over, in the coordinates of one of the four surfaces: an
+   edge or corner to resize by, HIT_DRAG on the title bar, or HIT_NORMAL with the
+   button it is on. */
+static HitTestResult decor_hit(BackendWindow *b, int part, int x, int y, int *button)
+{
+    int l, t, r, bt;
+    decor_extents(b, b->maximized, b->fullscreen, &l, &t, &r, &bt);
+    int width = b->width + l + r;
+    int corner = 2 * BORDER;
+    bool resize = decor_resizable(b) && !b->maximized && !b->fullscreen;
+    *button = TB_NONE;
+
+    switch (part)
+    {
+    case DECOR_TOP:
+        if (resize)
+        {
+            if (y < BORDER)
+                return x < corner ? HIT_RESIZE_TOPLEFT : x >= width - corner ? HIT_RESIZE_TOPRIGHT : HIT_RESIZE_TOP;
+            if (x < BORDER)
+                return y < corner ? HIT_RESIZE_TOPLEFT : HIT_RESIZE_LEFT;
+            if (x >= width - BORDER)
+                return y < corner ? HIT_RESIZE_TOPRIGHT : HIT_RESIZE_RIGHT;
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            int x0 = width - r - (3 - i) * BUTTON_W;
+            if (x >= x0 && x < x0 + BUTTON_W)
+            {
+                *button = i;
+                return HIT_NORMAL;
+            }
+        }
+        return HIT_DRAG;
+    case DECOR_LEFT:
+        if (!resize)
+            return HIT_NORMAL;
+        return y >= b->height - corner ? HIT_RESIZE_BOTTOMLEFT : HIT_RESIZE_LEFT;
+    case DECOR_RIGHT:
+        if (!resize)
+            return HIT_NORMAL;
+        return y >= b->height - corner ? HIT_RESIZE_BOTTOMRIGHT : HIT_RESIZE_RIGHT;
+    case DECOR_BOTTOM:
+        if (!resize)
+            return HIT_NORMAL;
+        return x < corner ? HIT_RESIZE_BOTTOMLEFT : x >= width - corner ? HIT_RESIZE_BOTTOMRIGHT : HIT_RESIZE_BOTTOM;
+    }
+    return HIT_NORMAL;
+}
+
+static int hit_cursor_for(HitTestResult r)
+{
+    switch (r)
+    {
+    case HIT_RESIZE_TOPLEFT:
+    case HIT_RESIZE_BOTTOMRIGHT:
+        return CURSOR_RESIZE_NWSE;
+    case HIT_RESIZE_TOPRIGHT:
+    case HIT_RESIZE_BOTTOMLEFT:
+        return CURSOR_RESIZE_NESW;
+    case HIT_RESIZE_TOP:
+    case HIT_RESIZE_BOTTOM:
+        return CURSOR_RESIZE_NS;
+    case HIT_RESIZE_LEFT:
+    case HIT_RESIZE_RIGHT:
+        return CURSOR_RESIZE_EW;
+    default:
+        return -1;
+    }
+}
+
+static uint32_t resize_edge(HitTestResult r)
+{
+    switch (r)
+    {
+    case HIT_RESIZE_TOPLEFT:
+        return XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT;
+    case HIT_RESIZE_TOP:
+        return XDG_TOPLEVEL_RESIZE_EDGE_TOP;
+    case HIT_RESIZE_TOPRIGHT:
+        return XDG_TOPLEVEL_RESIZE_EDGE_TOP_RIGHT;
+    case HIT_RESIZE_RIGHT:
+        return XDG_TOPLEVEL_RESIZE_EDGE_RIGHT;
+    case HIT_RESIZE_BOTTOMRIGHT:
+        return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT;
+    case HIT_RESIZE_BOTTOM:
+        return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM;
+    case HIT_RESIZE_BOTTOMLEFT:
+        return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_LEFT;
+    default:
+        return XDG_TOPLEVEL_RESIZE_EDGE_LEFT;
+    }
+}
+
+/* The window manager takes over the pointer from here: a move or a resize. */
+static void start_move_resize(BackendWindow *b, HitTestResult r, uint32_t serial)
+{
+    if (!b->toplevel || !g.seat)
+        return;
+    if (r == HIT_DRAG)
+        xdg_toplevel_move(b->toplevel, g.seat, serial);
+    else
+        xdg_toplevel_resize(b->toplevel, g.seat, serial, resize_edge(r));
+}
+
+static void paint_part(BackendWindow *b, int part, uint32_t *px, int w, int h, int l, int r)
+{
+    bool f = b->focused;
+    memset(px, 0, (size_t)w * (size_t)h * 4);
+    switch (part)
+    {
+    case DECOR_TOP:
+    {
+        int x0 = l, bar_w = w - l - r;
+        paint_rect(px, w, x0, 0, bar_w, h, bar_color[f]);
+        paint_rect(px, w, x0, h - 1, bar_w, 1, line_color);
+        paint_rect(px, w, x0, 0, bar_w, 1, line_color);
+        if (l)
+        {
+            paint_rect(px, w, l - 1, 0, 1, h, line_color);
+            paint_rect(px, w, w - r, 0, 1, h, line_color);
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            int bx = w - r - (3 - i) * BUTTON_W;
+            if (bx < l || (i == TB_MAXIMIZE && !decor_resizable(b)))
+                continue; /* does not fit, or not for a window of one size */
+            if (i == b->hover_button)
+                paint_rect(px, w, bx, 1, BUTTON_W, h - 2, i == TB_CLOSE ? close_hover_color : hover_color);
+            paint_icon(px, w, bx + BUTTON_W / 2, h / 2, i, b->maximized, icon_color[f]);
+        }
+        break;
+    }
+    case DECOR_LEFT:
+        paint_rect(px, w, w - 1, 0, 1, h, line_color);
+        break;
+    case DECOR_RIGHT:
+        paint_rect(px, w, 0, 0, 1, h, line_color);
+        break;
+    case DECOR_BOTTOM:
+        paint_rect(px, w, l - 1 < 0 ? 0 : l - 1, 0, w - (l ? 2 * (l - 1) : 0), 1, line_color);
+        break;
+    }
+}
+
+/* Say the frame to the compositor, in the commit the swap is about to make: the
+   window geometry, the four surfaces and their pixels all arrive together with
+   the content, so a resize never shows one at the old size. */
+static void decor_flush(BackendWindow *b)
+{
+    if (!b->decor_dirty || !b->xdg_surface || !g.shm || !g.subcompositor)
+        return;
+    b->decor_dirty = false;
+
+    int l, t, r, bt;
+    decor_extents(b, b->maximized, b->fullscreen, &l, &t, &r, &bt);
+    int cw = b->width, ch = b->height;
+    int ext[4] = {l, t, r, bt};
+    if (memcmp(ext, b->decor_ext, sizeof ext) != 0)
+    {
+        memcpy(b->decor_ext, ext, sizeof ext);
+        apply_limits(b); /* the limits are of the whole window */
+    }
+    xdg_surface_set_window_geometry(b->xdg_surface, -l, -t, cw + l + r, ch + t + bt);
+
+    const int rect[DECOR_COUNT][4] = {
+        {-l, -t, cw + l + r, t}, /* x, y, w, h: top, left, right, bottom */
+        {-l, 0, l, ch},
+        {cw, 0, r, ch},
+        {-l, ch, cw + l + r, bt},
+    };
+    for (int i = 0; i < DECOR_COUNT; i++)
+    {
+        DecorPart *p = &b->decor[i];
+        int w = rect[i][2], h = rect[i][3];
+        if (w <= 0 || h <= 0)
+        {
+            if (p->surface)
+            {
+                wl_surface_attach(p->surface, NULL, 0, 0);
+                wl_surface_commit(p->surface);
+            }
+            continue;
+        }
+        if (!p->surface)
+        {
+            p->owner = b;
+            p->part = i;
+            p->surface = wl_compositor_create_surface(g.compositor);
+            p->sub = wl_subcompositor_get_subsurface(g.subcompositor, p->surface, b->surface);
+        }
+        wl_subsurface_set_position(p->sub, rect[i][0], rect[i][1]);
+
+        uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+        if (!px)
+            continue;
+        paint_part(b, i, px, w, h, l, r);
+        struct wl_buffer *buffer = shm_buffer(px, w, h, p);
+        free(px);
+        if (!buffer)
+            continue;
+        if (p->buffer)
+            wl_buffer_set_user_data(p->buffer, NULL); /* destroyed when it is released, whoever is left */
+        p->buffer = buffer;
+        wl_surface_attach(p->surface, buffer, 0, 0);
+        wl_surface_damage(p->surface, 0, 0, w, h);
+        wl_surface_commit(p->surface);
+    }
+}
+
+/* A change that does not wait for the next swap: a button lighting up. */
+static void decor_flush_now(BackendWindow *b)
+{
+    b->decor_dirty = true;
+    decor_flush(b);
+    wl_surface_commit(b->surface);
+}
+
+static DecorPart *decor_for_surface(struct wl_surface *surface)
+{
+    /* An enter can name a surface that is already gone; the parts that have none
+       yet must not answer to it. */
+    if (!surface)
+        return NULL;
+    for (BackendWindow *w = g.windows; w; w = w->next)
+    {
+        for (int i = 0; i < DECOR_COUNT; i++)
+        {
+            if (w->decor[i].surface == surface)
+                return &w->decor[i];
+        }
+    }
+    return NULL;
+}
+
+static void decor_motion(DecorPart *d, int x, int y)
+{
+    BackendWindow *b = d->owner;
+    int button;
+    HitTestResult e = decor_hit(b, d->part, x, y, &button);
+    g.decor_x = x;
+    g.decor_y = y;
+
+    int shape = hit_cursor_for(e);
+    if (shape < 0)
+        shape = CURSOR_DEFAULT;
+    if (shape != g.decor_shape)
+    {
+        g.decor_shape = shape;
+        set_pointer_cursor(shape, NULL, false);
+    }
+    if (button != b->hover_button)
+    {
+        b->hover_button = button;
+        decor_flush_now(b);
+    }
+}
+
+static void decor_enter(DecorPart *d, int x, int y)
+{
+    g.pointer_decor = d;
+    g.decor_shape = -1;
+    decor_motion(d, x, y);
+}
+
+static void decor_leave(DecorPart *d)
+{
+    BackendWindow *b = d->owner;
+    g.pointer_decor = NULL;
+    if (b->hover_button != TB_NONE)
+    {
+        b->hover_button = TB_NONE;
+        decor_flush_now(b);
+    }
+}
+
+static void decor_button(DecorPart *d, uint32_t serial, uint32_t button, bool down)
+{
+    BackendWindow *b = d->owner;
+    int pressed;
+    HitTestResult e = decor_hit(b, d->part, g.decor_x, g.decor_y, &pressed);
+
+    if (button == BTN_LEFT)
+    {
+        if (down)
+        {
+            if (pressed != TB_NONE)
+            {
+                b->press_button = pressed;
+            }
+            else if (e == HIT_DRAG)
+            {
+                double now = now_ms();
+                if (now - b->title_click_ms < 400.0 && decor_resizable(b))
+                {
+                    b->title_click_ms = 0.0;
+                    if (b->maximized)
+                        backend_restore(b);
+                    else
+                        backend_maximize(b);
+                }
+                else
+                {
+                    b->title_click_ms = now;
+                    start_move_resize(b, HIT_DRAG, serial);
+                }
+            }
+            else if (e != HIT_NORMAL)
+            {
+                start_move_resize(b, e, serial);
+            }
+        }
+        else if (b->press_button != TB_NONE)
+        {
+            int which = b->press_button;
+            b->press_button = TB_NONE;
+            if (which == pressed)
+            {
+                if (which == TB_CLOSE)
+                {
+                    Event close = {.type = EVENT_WINDOW_CLOSE};
+                    push(b, &close);
+                }
+                else if (which == TB_MAXIMIZE && decor_resizable(b))
+                {
+                    if (b->maximized)
+                        backend_restore(b);
+                    else
+                        backend_maximize(b);
+                }
+                else if (which == TB_MINIMIZE)
+                {
+                    backend_minimize(b);
+                }
+            }
+        }
+    }
+    else if (button == BTN_RIGHT && down && e == HIT_DRAG && b->toplevel && g.seat)
+    {
+        int l, t, r, bt;
+        decor_extents(b, b->maximized, b->fullscreen, &l, &t, &r, &bt);
+        xdg_toplevel_show_window_menu(b->toplevel, g.seat, serial, g.decor_x - l, g.decor_y - t);
+    }
+}
+
+/* ========================================================================== */
 /*  cursor and pointer lock                                                   */
 /* ========================================================================== */
 
@@ -1175,11 +1782,11 @@ static struct wl_cursor *theme_cursor(int shape)
 /* What the pointer shows over this window: nothing, a cursor from an image, or
    the shape from the theme. It has to be said again at every enter, quoting the
    serial of that enter. */
-static void apply_cursor(BackendWindow *b)
+static void set_pointer_cursor(int shape, struct PlatformCursor *image, bool hidden)
 {
-    if (!g.pointer || g.pointer_focus != b)
+    if (!g.pointer)
         return;
-    if (b->mouse_mode != MOUSE_MODE_NORMAL)
+    if (hidden)
     {
         wl_pointer_set_cursor(g.pointer, g.enter_serial, NULL, 0, 0);
         return;
@@ -1187,17 +1794,17 @@ static void apply_cursor(BackendWindow *b)
 
     struct wl_buffer *buffer = NULL;
     int w = 0, h = 0, hot_x = 0, hot_y = 0;
-    if (b->cursor_image)
+    if (image)
     {
-        buffer = b->cursor_image->buffer;
-        w = b->cursor_image->w;
-        h = b->cursor_image->h;
-        hot_x = b->cursor_image->hot_x;
-        hot_y = b->cursor_image->hot_y;
+        buffer = image->buffer;
+        w = image->w;
+        h = image->h;
+        hot_x = image->hot_x;
+        hot_y = image->hot_y;
     }
     else if (g.shm)
     {
-        struct wl_cursor *c = theme_cursor(b->cursor_idx);
+        struct wl_cursor *c = theme_cursor(shape);
         if (c)
         {
             struct wl_cursor_image *img = c->images[0];
@@ -1217,6 +1824,20 @@ static void apply_cursor(BackendWindow *b)
     wl_surface_damage(g.cursor_surface, 0, 0, w, h);
     wl_surface_commit(g.cursor_surface);
     wl_pointer_set_cursor(g.pointer, g.enter_serial, g.cursor_surface, hot_x, hot_y);
+}
+
+/* What the pointer shows over this window: nothing, a cursor from an image, a
+   resize cursor the hit test wants, or the shape from the theme. It has to be
+   said again at every enter, quoting the serial of that enter. */
+static void apply_cursor(BackendWindow *b)
+{
+    if (!g.pointer || g.pointer_focus != b)
+        return;
+    bool normal = b->mouse_mode == MOUSE_MODE_NORMAL;
+    if (normal && b->hit_cursor >= 0)
+        set_pointer_cursor(b->hit_cursor, NULL, false);
+    else
+        set_pointer_cursor(b->cursor_idx, normal ? b->cursor_image : NULL, !normal);
 }
 
 #ifdef ZEN_WL_POINTER_LOCK
@@ -1319,34 +1940,19 @@ PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int ho
         error_set("the compositor has no wl_shm, which a cursor from an image needs");
         return NULL;
     }
-    size_t size = (size_t)w * (size_t)h * 4;
-    int fd = memfd_create("zen-cursor", MFD_CLOEXEC);
-    uint32_t *px = NULL;
-    if (fd >= 0 && ftruncate(fd, (off_t)size) == 0)
-        px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (!px || px == MAP_FAILED)
-    {
-        if (fd >= 0)
-            close(fd);
-        error_set("cannot create the cursor");
+    uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+    if (!px)
         return NULL;
-    }
     for (int i = 0; i < w * h; i++) /* wl_shm wants premultiplied alpha */
     {
         uint32_t p = argb[i], a = p >> 24;
         uint32_t r = ((p >> 16) & 0xFF) * a / 255, gr = ((p >> 8) & 0xFF) * a / 255, bl = (p & 0xFF) * a / 255;
         px[i] = (a << 24) | (r << 16) | (gr << 8) | bl;
     }
-    munmap(px, size);
-
     PlatformCursor *c = calloc(1, sizeof *c);
-    struct wl_shm_pool *pool = c ? wl_shm_create_pool(g.shm, fd, (int32_t)size) : NULL;
-    if (pool)
-    {
-        c->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
-        wl_shm_pool_destroy(pool);
-    }
-    close(fd);
+    if (c)
+        c->buffer = shm_buffer(px, w, h, NULL);
+    free(px);
     if (!c || !c->buffer)
     {
         free(c);
@@ -1512,9 +2118,33 @@ static void apply_limits(BackendWindow *b)
 {
     if (!b->toplevel)
         return;
-    xdg_toplevel_set_min_size(b->toplevel, b->min_w, b->min_h);
-    xdg_toplevel_set_max_size(b->toplevel, b->max_w, b->max_h);
+    int l, t, r, bt;
+    decor_extents(b, b->maximized, b->fullscreen, &l, &t, &r, &bt);
+    int min_w = b->min_w ? b->min_w + l + r : 0, min_h = b->min_h ? b->min_h + t + bt : 0;
+    int max_w = b->max_w ? b->max_w + l + r : 0, max_h = b->max_h ? b->max_h + t + bt : 0;
+    /* room for the three buttons, unless the window cannot be that wide */
+    if (b->csd && min_w < 3 * BUTTON_W + 2 * BORDER)
+        min_w = 3 * BUTTON_W + 2 * BORDER;
+    if (max_w && min_w > max_w)
+        min_w = max_w;
+    xdg_toplevel_set_min_size(b->toplevel, min_w, min_h);
+    xdg_toplevel_set_max_size(b->toplevel, max_w, max_h);
 }
+
+#ifdef ZEN_WL_XDG_DECORATION
+static void deco_configure(void *data, struct zxdg_toplevel_decoration_v1 *deco, uint32_t mode)
+{
+    BackendWindow *b = data;
+    (void)deco;
+    b->server_side = mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+    b->csd = wants_own_frame(b);
+    b->decor_dirty = true;
+}
+
+static const struct zxdg_toplevel_decoration_v1_listener deco_listener = {
+    .configure = deco_configure,
+};
+#endif
 
 /* The xdg role of the window: made at creation and again by show after hide.
    Returns once the compositor has sent the first configure, since nothing may be
@@ -1528,6 +2158,16 @@ static bool create_shell(BackendWindow *b)
 
     xdg_toplevel_set_title(b->toplevel, b->title);
     xdg_toplevel_set_app_id(b->toplevel, program_invocation_short_name);
+#ifdef ZEN_WL_XDG_DECORATION
+    if (g.deco_manager)
+    {
+        b->xdg_deco = zxdg_decoration_manager_v1_get_toplevel_decoration(g.deco_manager, b->toplevel);
+        zxdg_toplevel_decoration_v1_add_listener(b->xdg_deco, &deco_listener, b);
+        zxdg_toplevel_decoration_v1_set_mode(b->xdg_deco, b->decorated
+                                                             ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+                                                             : ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+    }
+#endif
     apply_limits(b);
     if (b->want_maximized)
         xdg_toplevel_set_maximized(b->toplevel);
@@ -1547,12 +2187,37 @@ static bool create_shell(BackendWindow *b)
 
 static void destroy_shell(BackendWindow *b)
 {
+#ifdef ZEN_WL_XDG_DECORATION
+    if (b->xdg_deco)
+        zxdg_toplevel_decoration_v1_destroy(b->xdg_deco);
+    b->xdg_deco = NULL;
+#endif
     if (b->toplevel)
         xdg_toplevel_destroy(b->toplevel);
     if (b->xdg_surface)
         xdg_surface_destroy(b->xdg_surface);
     b->toplevel = NULL;
     b->xdg_surface = NULL;
+}
+
+/* The four surfaces of the frame and the buffers on them. They are subsurfaces of
+   the window's, so they go before it does and are made again by the next swap. */
+static void decor_destroy(BackendWindow *b)
+{
+    for (int i = 0; i < DECOR_COUNT; i++)
+    {
+        DecorPart *d = &b->decor[i];
+        if (g.pointer_decor == d)
+            g.pointer_decor = NULL;
+        if (d->buffer)
+            wl_buffer_destroy(d->buffer);
+        if (d->sub)
+            wl_subsurface_destroy(d->sub);
+        if (d->surface)
+            wl_surface_destroy(d->surface);
+        memset(d, 0, sizeof *d);
+    }
+    b->decor_dirty = true;
 }
 
 BackendWindow *backend_create(const WindowConfig *cfg)
@@ -1588,12 +2253,18 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         return NULL;
     }
     b->context = context;
+    b->config = config;
     b->render = cfg->render;
     b->mode = cfg->mode;
     b->visible = true;
     b->width = cfg->width > 0 ? cfg->width : 640;
     b->height = cfg->height > 0 ? cfg->height : 480;
     b->title = strdup(cfg->title ? cfg->title : "");
+    b->hover_button = b->press_button = TB_NONE;
+    b->hit_cursor = -1;
+    b->decorated = !cfg->undecorated && cfg->kind != WINDOW_KIND_POPUP && cfg->kind != WINDOW_KIND_TOOLTIP;
+    b->csd = wants_own_frame(b); /* until the compositor says it draws the frame */
+    b->decor_dirty = true;
     if (!cfg->resizable)
     {
         b->min_w = b->max_w = b->width;
@@ -1654,6 +2325,7 @@ void backend_destroy(BackendWindow *b)
     }
     if (g.pointer_focus == b)
         g.pointer_focus = NULL;
+    decor_destroy(b);
     unlock_pointer(b);
     destroy_shell(b);
     if (b->frame_cb)
@@ -1753,6 +2425,7 @@ void backend_swap(BackendWindow *b)
             wl_callback_add_listener(b->frame_cb, &frame_listener, b);
         }
     }
+    decor_flush(b);
     eglSwapBuffers(g.egl, b->egl_surface);
 }
 
@@ -1903,17 +2576,82 @@ void backend_hide(BackendWindow *b)
     }
 }
 
+/* A window comes back on a wl_surface of its own, with a new wl_egl_window and EGL
+   surface. A new role on the surface the old one had gives the compositor the same
+   surface to show twice while it is still playing the closing of the first: GNOME
+   Shell 46 asserts in clutter_actor_insert_child_at_index and then dies with
+   SIGSEGV in its destroy animation (reproduced with test_hide_show), and with it
+   the whole session. Nothing the compositor holds has been told about this one.
+   The window stays hidden, on its old objects, when any step fails. */
+static bool show_on_new_surface(BackendWindow *b)
+{
+    struct wl_surface *surface = wl_compositor_create_surface(g.compositor);
+    if (!surface)
+        return false;
+
+    unlock_pointer(b); /* it is bound to the surface that goes away */
+    decor_destroy(b);
+    b->hover_button = b->press_button = TB_NONE;
+
+    struct wl_surface *old_surface = b->surface;
+    struct wl_egl_window *old_window = b->egl_window;
+    EGLSurface old_egl = b->egl_surface;
+    b->surface = surface;
+    b->egl_window = NULL; /* the configure that comes is the new one's */
+    b->egl_surface = EGL_NO_SURFACE;
+
+    EGLSurface egl = EGL_NO_SURFACE;
+    if (create_shell(b))
+    {
+        b->egl_window = wl_egl_window_create(surface, b->width, b->height);
+        if (b->egl_window)
+            egl = eglCreateWindowSurface(g.egl, b->config, (EGLNativeWindowType)b->egl_window, NULL);
+    }
+    if (egl == EGL_NO_SURFACE)
+    {
+        if (b->egl_window)
+            wl_egl_window_destroy(b->egl_window);
+        destroy_shell(b);
+        wl_surface_destroy(surface);
+        b->surface = old_surface;
+        b->egl_window = old_window;
+        b->egl_surface = old_egl;
+        return false;
+    }
+    b->egl_surface = egl;
+
+    /* What the context draws to moves along; the swap interval is the surface's own. */
+    EGLContext cur = eglGetCurrentContext();
+    EGLSurface draw = eglGetCurrentSurface(EGL_DRAW);
+    EGLSurface read = eglGetCurrentSurface(EGL_READ);
+    if (eglMakeCurrent(g.egl, egl, egl, b->context))
+        eglSwapInterval(g.egl, 0);
+    if (cur != EGL_NO_CONTEXT)
+        eglMakeCurrent(g.egl, draw == old_egl ? egl : draw, read == old_egl ? egl : read, cur);
+    else
+        eglMakeCurrent(g.egl, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
+    eglDestroySurface(g.egl, old_egl);
+    if (old_window)
+        wl_egl_window_destroy(old_window);
+    wl_surface_destroy(old_surface);
+
+    if (b->mouse_mode == MOUSE_MODE_CAPTURED)
+        lock_pointer(b);
+    return true;
+}
+
 void backend_show(BackendWindow *b)
 {
     if (b->visible)
         return;
-    if (!create_shell(b))
+    if (!show_on_new_surface(b))
     {
-        destroy_shell(b);
         log_error("Wayland: cannot show the window again");
         return;
     }
     b->visible = true;
+    b->decor_dirty = true; /* the geometry went with the old shell */
 }
 
 void backend_set_mode(BackendWindow *b, WindowMode mode, int monitor)
@@ -1963,11 +2701,30 @@ void backend_set_icon(BackendWindow *b, int w, int h, const uint8_t *rgba)
 
 void backend_set_opacity(BackendWindow *b, float a) { (void)b; (void)a; }
 void backend_set_always_on_top(BackendWindow *b, bool on) { (void)b; (void)on; }
-void backend_set_decorated(BackendWindow *b, bool on) { (void)b; (void)on; }
+void backend_set_decorated(BackendWindow *b, bool on)
+{
+    b->decorated = on;
+#ifdef ZEN_WL_XDG_DECORATION
+    if (b->xdg_deco)
+        zxdg_toplevel_decoration_v1_set_mode(b->xdg_deco, on ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+                                                             : ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+#endif
+    b->csd = wants_own_frame(b);
+    b->decor_dirty = true;
+    if (b->visible && b->xdg_surface)
+        decor_flush_now(b);
+}
 
 void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, void *user)
 {
-    (void)b; (void)w; (void)fn; (void)user;
+    b->hit_cb = fn;
+    b->hit_w = w;
+    b->hit_user = user;
+    if (!fn && b->hit_cursor >= 0)
+    {
+        b->hit_cursor = -1;
+        apply_cursor(b);
+    }
 }
 
 void *backend_native_handle(BackendWindow *b, NativeHandleType type)
