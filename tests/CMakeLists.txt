@@ -108,6 +108,11 @@ if(PLATFORM_BACKEND_X11)
     add_test(NAME test_clipboard_x11 COMMAND test_clipboard_x11)
     set_tests_properties(test_clipboard_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 
+    add_executable(test_drop_x11 test_drop_x11.c)
+    target_link_libraries(test_drop_x11 PRIVATE platform)
+    add_test(NAME test_drop_x11 COMMAND test_drop_x11)
+    set_tests_properties(test_drop_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     add_executable(test_multiwindow_x11 test_multiwindow_x11.c)
     target_link_libraries(test_multiwindow_x11 PRIVATE platform)
     add_test(NAME test_multiwindow_x11 COMMAND test_multiwindow_x11)

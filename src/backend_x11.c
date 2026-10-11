@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/select.h>
 #include <time.h>
 
@@ -105,6 +106,8 @@ static struct
         NET_WM_STATE_DEMANDS_ATTENTION, NET_ACTIVE_WINDOW, NET_WM_ICON,
         NET_WM_WINDOW_OPACITY, MOTIF_WM_HINTS;
     Atom CLIPBOARD, TARGETS, XSEL_DATA, INCR, TEXT_PLAIN, TEXT_PLAIN_UTF8, TEXT;
+    Atom XdndAware, XdndEnter, XdndPosition, XdndStatus, XdndLeave, XdndDrop, XdndFinished,
+        XdndSelection, XdndTypeList, XdndActionCopy, XDND_DATA, TEXT_URI_LIST;
 
     glXCreateContextAttribsARBProc create_context;
     bool has_es_profile;
@@ -126,6 +129,9 @@ static struct
 } g;
 
 static void clip_free_entries(void);
+static void xdnd_free_drop(BackendWindow *b);
+
+#define XDND_VERSION 5 /* the newest XDND version this file speaks */
 
 struct BackendWindow
 {
@@ -146,6 +152,14 @@ struct BackendWindow
     double kc_gone[256]; /* when the server was first seen not holding the key, 0 while it does */
     struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
     int pending_n, pending_cap;
+
+    /* files dragged in from another application (XDND) */
+    Window xdnd_src;      /* source of the drag in progress, None when there is none */
+    bool xdnd_uri;        /* the source offers text/uri-list */
+    bool xdnd_converting; /* a drop waits for its selection */
+    long xdnd_since;      /* monotonic ms the drop started waiting; it gives up after XDND_CONVERT_MS */
+    char **drop_paths;    /* the last drop's paths: kept until the next drop, poll_event reads them later */
+    int drop_n;
 
     WindowMode mode;
     int width, height;
@@ -533,6 +547,18 @@ bool backend_init(void)
     g.TEXT_PLAIN = XInternAtom(g.dpy, "text/plain", False);
     g.TEXT_PLAIN_UTF8 = XInternAtom(g.dpy, "text/plain;charset=utf-8", False);
     g.TEXT = XInternAtom(g.dpy, "TEXT", False);
+    g.XdndAware = XInternAtom(g.dpy, "XdndAware", False);
+    g.XdndEnter = XInternAtom(g.dpy, "XdndEnter", False);
+    g.XdndPosition = XInternAtom(g.dpy, "XdndPosition", False);
+    g.XdndStatus = XInternAtom(g.dpy, "XdndStatus", False);
+    g.XdndLeave = XInternAtom(g.dpy, "XdndLeave", False);
+    g.XdndDrop = XInternAtom(g.dpy, "XdndDrop", False);
+    g.XdndFinished = XInternAtom(g.dpy, "XdndFinished", False);
+    g.XdndSelection = XInternAtom(g.dpy, "XdndSelection", False);
+    g.XdndTypeList = XInternAtom(g.dpy, "XdndTypeList", False);
+    g.XdndActionCopy = XInternAtom(g.dpy, "XdndActionCopy", False);
+    g.XDND_DATA = XInternAtom(g.dpy, "PLATFORM_XDND", False);
+    g.TEXT_URI_LIST = XInternAtom(g.dpy, "text/uri-list", False);
 
     /* A 1x1 unmapped window owns the CLIPBOARD selection and answers conversion
        requests, so clipboard ownership outlives any single visible window. */
@@ -868,6 +894,10 @@ BackendWindow *backend_create(const WindowConfig *cfg)
 
     XSaveContext(g.dpy, b->win, g.ctx, (XPointer)b);
     XSetWMProtocols(g.dpy, b->win, &g.WM_DELETE_WINDOW, 1);
+    {
+        long xdnd_version = XDND_VERSION;
+        XChangeProperty(g.dpy, b->win, g.XdndAware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&xdnd_version, 1);
+    }
     set_title(b, cfg->title);
 
     XClassHint *cls = XAllocClassHint();
@@ -1000,6 +1030,7 @@ void backend_destroy(BackendWindow *b)
     }
     XDeleteContext(g.dpy, b->win, g.ctx);
     free(b->pending);
+    xdnd_free_drop(b);
     if (b->hidden_cursor)
         XFreeCursor(g.dpy, b->hidden_cursor);
     XDestroyWindow(g.dpy, b->win);
@@ -1238,16 +1269,313 @@ void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, v
     }
 }
 
+/* ---- drag and drop of files into the window (XDND, the protocol file managers use) ---- */
+
+#define XDND_MAX_PATHS 4096
+#define XDND_MAX_BYTES (1024 * 1024)
+#define XDND_CONVERT_MS 5000 /* a source that never answers the selection cannot block later drags for longer */
+
+static long xdnd_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+/* A source that closed its window while dragging makes the server refuse what we
+   send it; that is its loss, not a reason for the default X handler to end the app. */
+static int xdnd_swallow_error(Display *d, XErrorEvent *e)
+{
+    (void)d;
+    (void)e;
+    return 0;
+}
+
+static void xdnd_send(Window to, Atom type, long l0, long l1, long l2, long l3, long l4)
+{
+    XEvent m;
+    memset(&m, 0, sizeof m);
+    m.xclient.type = ClientMessage;
+    m.xclient.window = to;
+    m.xclient.message_type = type;
+    m.xclient.format = 32;
+    m.xclient.data.l[0] = l0;
+    m.xclient.data.l[1] = l1;
+    m.xclient.data.l[2] = l2;
+    m.xclient.data.l[3] = l3;
+    m.xclient.data.l[4] = l4;
+    XErrorHandler previous = XSetErrorHandler(xdnd_swallow_error);
+    XSendEvent(g.dpy, to, False, NoEventMask, &m);
+    XSync(g.dpy, False); /* the error of a dead window comes back with the reply */
+    XSetErrorHandler(previous);
+}
+
+/* Whether the source offers text/uri-list. Up to three types come in the message;
+   more than three are listed in the source's XdndTypeList property. */
+static bool xdnd_offers_uri(Window src, const long *types, bool more)
+{
+    for (int i = 0; i < 3; i++)
+        if ((Atom)types[i] == g.TEXT_URI_LIST)
+            return true;
+    if (!more)
+        return false;
+
+    Atom type;
+    int format;
+    unsigned long n, after;
+    unsigned char *data = NULL;
+    bool found = false;
+    if (XGetWindowProperty(g.dpy, src, g.XdndTypeList, 0, 4096, False, XA_ATOM, &type, &format, &n, &after,
+                           &data) == Success &&
+        type == XA_ATOM && format == 32 && data)
+    {
+        const Atom *list = (const Atom *)data;
+        for (unsigned long i = 0; i < n && !found; i++)
+            found = list[i] == g.TEXT_URI_LIST;
+    }
+    if (data)
+        XFree(data);
+    return found;
+}
+
+/* The whole of a property of format 8, read in pieces. NULL when it is missing or
+   too large; the result is NUL-terminated. */
+static char *xdnd_read_text(Window w, Atom prop)
+{
+    size_t cap = 0, n = 0;
+    char *buf = NULL;
+    long offset = 0; /* in 32-bit units */
+    for (;;)
+    {
+        Atom type;
+        int format;
+        unsigned long got, after;
+        unsigned char *chunk = NULL;
+        if (XGetWindowProperty(g.dpy, w, prop, offset, 16384, False, AnyPropertyType, &type, &format, &got, &after,
+                               &chunk) != Success ||
+            type == None || format != 8 || !chunk)
+        {
+            if (chunk)
+                XFree(chunk);
+            free(buf);
+            return NULL;
+        }
+        if (n + got + 1 > cap)
+        {
+            size_t want = cap ? cap : 4096;
+            while (want < n + got + 1)
+                want *= 2;
+            char *grown = realloc(buf, want);
+            if (!grown)
+            {
+                XFree(chunk);
+                free(buf);
+                return NULL;
+            }
+            buf = grown;
+            cap = want;
+        }
+        memcpy(buf + n, chunk, got);
+        n += got;
+        XFree(chunk);
+        if (!after || n >= XDND_MAX_BYTES)
+            break;
+        offset += (long)(got / 4);
+    }
+    if (!buf)
+        return NULL;
+    buf[n] = 0;
+    XDeleteProperty(g.dpy, w, prop);
+    return buf;
+}
+
+static int xdnd_hex(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/* A URI path with its %XX escapes decoded; NULL when out of memory. */
+static char *xdnd_unescape(const char *s)
+{
+    size_t len = strlen(s);
+    char *out = malloc(len + 1);
+    if (!out)
+        return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        int hi, lo;
+        if (s[i] == '%' && i + 2 < len && (hi = xdnd_hex(s[i + 1])) >= 0 && (lo = xdnd_hex(s[i + 2])) >= 0)
+        {
+            out[o++] = (char)(hi * 16 + lo);
+            i += 2;
+        }
+        else
+            out[o++] = s[i];
+    }
+    out[o] = 0;
+    return out;
+}
+
+/* text/uri-list: one URI per line, '#' starts a comment. Only local file: URIs are
+   kept. Returns how many paths were stored in out; the strings are the caller's. */
+static int xdnd_parse_uris(char *text, char **out, int max)
+{
+    int n = 0;
+    char *line = text;
+    while (*line && n < max)
+    {
+        char *end = line + strcspn(line, "\r\n");
+        char *next = end + strspn(end, "\r\n");
+        *end = 0;
+        char *p = line;
+        line = next;
+
+        if (!*p || *p == '#' || strncasecmp(p, "file:", 5) != 0)
+            continue;
+        p += 5;
+        if (strncmp(p, "//", 2) == 0)
+        {
+            /* file://host/path: the host has to be this machine */
+            p += 2;
+            char *slash = strchr(p, '/');
+            if (!slash)
+                continue;
+            size_t host = (size_t)(slash - p);
+            if (host != 0 && !(host == 9 && strncasecmp(p, "localhost", 9) == 0))
+                continue;
+            p = slash;
+        }
+        if (*p != '/')
+            continue;
+        char *path = xdnd_unescape(p);
+        if (path)
+            out[n++] = path;
+    }
+    return n;
+}
+
+static void xdnd_free_drop(BackendWindow *b)
+{
+    for (int i = 0; i < b->drop_n; i++)
+        free(b->drop_paths[i]);
+    free(b->drop_paths);
+    b->drop_paths = NULL;
+    b->drop_n = 0;
+}
+
+/* The selection of a drop arrived: read the paths, tell the core, and answer the source. */
+static void xdnd_finish_drop(BackendWindow *b, Atom prop)
+{
+    Window src = b->xdnd_src;
+    b->xdnd_src = None;
+    b->xdnd_uri = false;
+    b->xdnd_converting = false;
+
+    char *paths[XDND_MAX_PATHS];
+    int n = 0;
+    char *text = prop != None ? xdnd_read_text(b->win, prop) : NULL;
+    if (text)
+    {
+        n = xdnd_parse_uris(text, paths, XDND_MAX_PATHS);
+        free(text);
+    }
+
+    xdnd_free_drop(b);
+    if (n)
+    {
+        b->drop_paths = malloc((size_t)n * sizeof *b->drop_paths);
+        if (b->drop_paths)
+        {
+            memcpy(b->drop_paths, paths, (size_t)n * sizeof *paths);
+            b->drop_n = n;
+        }
+        else
+            for (int i = 0; i < n; i++)
+                free(paths[i]);
+    }
+
+    if (b->drop_n && b->core)
+    {
+        Event e = {.type = EVENT_WINDOW_DROP};
+        e.data.drop.count = b->drop_n;
+        e.data.drop.paths = (const char **)b->drop_paths;
+        push(b, &e);
+    }
+    if (src != None)
+        xdnd_send(src, g.XdndFinished, (long)b->win, b->drop_n ? 1 : 0,
+                  b->drop_n ? (long)g.XdndActionCopy : (long)None, 0, 0);
+}
+
+/* Returns false when the message is not an XDND one. */
+static bool xdnd_client_message(BackendWindow *b, XClientMessageEvent *m)
+{
+    Atom t = m->message_type;
+    const long *l = m->data.l;
+    Window src = (Window)l[0];
+
+    if (t == g.XdndEnter)
+    {
+        if (b->xdnd_converting)
+            return true;
+        b->xdnd_src = src;
+        b->xdnd_uri = xdnd_offers_uri(src, l + 2, (l[1] & 1) != 0);
+        return true;
+    }
+    if (t == g.XdndPosition)
+    {
+        if (b->xdnd_converting || src != b->xdnd_src)
+            return true;
+        /* the drop is copy only: the source gets what it asked for when we take it */
+        xdnd_send(src, g.XdndStatus, (long)b->win, b->xdnd_uri ? 1 : 0, 0, 0,
+                  b->xdnd_uri ? (long)g.XdndActionCopy : (long)None);
+        return true;
+    }
+    if (t == g.XdndLeave)
+    {
+        if (!b->xdnd_converting && src == b->xdnd_src)
+        {
+            b->xdnd_src = None;
+            b->xdnd_uri = false;
+        }
+        return true;
+    }
+    if (t == g.XdndDrop)
+    {
+        if (b->xdnd_converting || !b->xdnd_uri || src != b->xdnd_src)
+            return true;
+        b->xdnd_converting = true;
+        b->xdnd_since = xdnd_now_ms();
+        XConvertSelection(g.dpy, g.XdndSelection, g.TEXT_URI_LIST, g.XDND_DATA, b->win, (Time)l[2]);
+        XFlush(g.dpy);
+        return true;
+    }
+    return false;
+}
+
 static void process_event(BackendWindow *b, XEvent *ev)
 {
     switch (ev->type)
     {
     case ClientMessage:
+        if (xdnd_client_message(b, &ev->xclient))
+            break;
         if ((Atom)ev->xclient.data.l[0] == g.WM_DELETE_WINDOW)
         {
             Event e = {.type = EVENT_WINDOW_CLOSE};
             push(b, &e);
         }
+        break;
+
+    case SelectionNotify:
+        if (ev->xselection.selection == g.XdndSelection && b->xdnd_converting)
+            xdnd_finish_drop(b, ev->xselection.property);
         break;
 
     case ConfigureNotify:
@@ -1647,6 +1975,8 @@ static void sync_stuck_keys(BackendWindow *b)
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
+    if (b->xdnd_converting && xdnd_now_ms() - b->xdnd_since > XDND_CONVERT_MS)
+        xdnd_finish_drop(b, None); /* the source never sent the files: answer it as refused */
 
     /* Older than anything still in the queue, so first. */
     for (int i = 0; i < b->pending_n; i++)
