@@ -70,6 +70,13 @@ if(PLATFORM_BACKEND_X11 OR (WIN32 AND NOT PLATFORM_USE_FAKE))
     set_tests_properties(test_vulkan PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
+if(PLATFORM_BACKEND_WAYLAND)
+    add_executable(test_gl_wayland test_gl_wayland.c)
+    target_link_libraries(test_gl_wayland PRIVATE platform)
+    add_test(NAME test_gl_wayland COMMAND test_gl_wayland)
+    set_tests_properties(test_gl_wayland PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 if(PLATFORM_BACKEND_X11)
     add_executable(test_gl_x11 test_gl_x11.c)
     target_link_libraries(test_gl_x11 PRIVATE platform)

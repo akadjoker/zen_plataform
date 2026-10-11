@@ -57,6 +57,7 @@ version in `release_version`; the release is created on the chosen commit.
 | `-DPLATFORM_BUILD_TESTS=ON` | ON | Build unit tests |
 | `-DPLATFORM_BUILD_EXAMPLES=ON` | ON | Build examples |
 | `-DPLATFORM_USE_FAKE=ON` | OFF | Use fake/headless backend |
+| `-DPLATFORM_LINUX_BACKEND=wayland` | x11 | Window system on Linux: `x11` or `wayland` |
 | `-DPLATFORM_SANITIZE=ON` | OFF | Enable ASan + UBSan |
 
 ### Platforms
@@ -64,6 +65,7 @@ version in `release_version`; the release is created on the chosen commit.
 | Platform | Backend | Notes |
 |---|---|---|
 | Linux / X11 | `backend_x11.c` | requires X11 + Xrandr + GL/GLX dev packages; Vulkan loaded at run time |
+| Linux / Wayland | `backend_wayland.c` | in progress: window, GL context (EGL) and size so far; needs wayland-client, wayland-egl, EGL and wayland-protocols |
 | Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |

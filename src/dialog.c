@@ -508,7 +508,12 @@ static Tool pick_tool(char *path, size_t cap)
 /* The window id a dialog should attach to: X11 only (elsewhere the handle is not an XID). */
 static unsigned long parent_xid(PlatformWindow *parent)
 {
+#ifdef ZEN_BACKEND_WAYLAND
+    (void)parent;
+    return 0;
+#else
     return parent ? (unsigned long)(uintptr_t)window_native_handle(parent, NATIVE_WINDOW) : 0;
+#endif
 }
 
 static void add_attach(Args *a, Tool t, PlatformWindow *parent)

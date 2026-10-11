@@ -479,6 +479,7 @@ extern "C"
 
                           NATIVE_DISPLAY       NATIVE_WINDOW      NATIVE_GL_CONTEXT
          X11              Display*             Window             GLXContext
+         Wayland          wl_display*          wl_surface*        EGLContext
          Win32            HINSTANCE            HWND               HGLRC
          Android          EGLDisplay           ANativeWindow*     EGLContext
          Web, fake        NULL                 NULL               NULL
