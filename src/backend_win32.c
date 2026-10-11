@@ -1688,8 +1688,11 @@ BackendWindow *backend_create(const WindowConfig *cfg)
 
     RegisterTouchWindow(b->hwnd, 0); /* WM_TOUCH instead of the mouse-from-touch conversion */
     DragAcceptFiles(b->hwnd, TRUE);
-    ShowWindow(b->hwnd, cfg->kind == WINDOW_KIND_TOOLTIP ? SW_SHOWNOACTIVATE : SW_SHOW);
-    UpdateWindow(b->hwnd);
+    if (!cfg->hidden)
+    {
+        ShowWindow(b->hwnd, cfg->kind == WINDOW_KIND_TOOLTIP ? SW_SHOWNOACTIVATE : SW_SHOW);
+        UpdateWindow(b->hwnd);
+    }
     b->focused = GetFocus() == b->hwnd;
 
     if (cfg->mode != WINDOW_WINDOWED)

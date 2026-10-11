@@ -960,7 +960,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
 #endif
 
-    XMapWindow(g.dpy, b->win);
+    if (!cfg->hidden)
+        XMapWindow(g.dpy, b->win);
 
     /* Honour cfg->monitor when centering or going fullscreen.
        monitor < 0 means MONITOR_CURRENT – resolve to whichever monitor

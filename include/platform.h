@@ -97,6 +97,8 @@ extern "C"
         bool resizable;
         bool vsync;
         bool undecorated;      /* no title bar or border: draw your own (see window_set_hit_test) */
+        bool hidden;           /* create without showing; window_show maps it later. Ignored where a
+                                  window only appears with its first frame (Wayland, web, Android) */
         WindowKind kind;       /* WINDOW_KIND_NORMAL by default */
         PlatformWindow *parent; /* the window a dialog, utility, popup or tooltip belongs to, or NULL */
     } WindowConfig;
