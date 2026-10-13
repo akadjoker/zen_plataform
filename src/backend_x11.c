@@ -137,6 +137,8 @@ struct BackendWindow
 {
     Window win;
     GLXContext glc;
+    GLXFBConfig fb;  /* kept with the settings for contexts that share with glc */
+    GLConfig gl_cfg;
     Colormap colormap;
     XIC xic;
     /* input method: composing text shown by the application (XIM preedit callbacks) */
@@ -441,7 +443,7 @@ static int context_error_handler(Display *dpy, XErrorEvent *ev)
     return 0;
 }
 
-static GLXContext create_context(GLXFBConfig fb, const GLConfig *gl)
+static GLXContext create_context(GLXFBConfig fb, const GLConfig *gl, GLXContext share)
 {
     GLProfile profile = gl->profile == GL_PROFILE_DEFAULT ? GL_PROFILE_CORE : gl->profile;
     int major = gl->major;
@@ -492,7 +494,7 @@ static GLXContext create_context(GLXFBConfig fb, const GLConfig *gl)
 
     g_context_failed = false;
     XErrorHandler previous = XSetErrorHandler(context_error_handler);
-    GLXContext c = g.create_context(g.dpy, fb, NULL, True, attribs);
+    GLXContext c = g.create_context(g.dpy, fb, share, True, attribs);
     XSync(g.dpy, False);
     XSetErrorHandler(previous);
 
@@ -937,7 +939,9 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     }
     else if (cfg->render == RENDER_GL)
     {
-        b->glc = create_context(fb, &cfg->gl);
+        b->fb = fb;
+        b->gl_cfg = cfg->gl;
+        b->glc = create_context(fb, &cfg->gl, NULL);
         if (!b->glc)
         {
             backend_destroy(b);
@@ -2113,6 +2117,52 @@ void backend_set_vsync(BackendWindow *b, bool on)
 void *backend_gl_proc_address(const char *name)
 {
     return (void *)glXGetProcAddressARB((const GLubyte *)name);
+}
+
+struct BackendGLWorker
+{
+    GLXContext glc;
+    GLXPbuffer pbuffer; /* a context needs a drawable to be current; nothing is drawn to it */
+};
+
+BackendGLWorker *backend_gl_worker_create(BackendWindow *b)
+{
+    int drawables = 0;
+    if (b->render != RENDER_GL || !b->glc ||
+        glXGetFBConfigAttrib(g.dpy, b->fb, GLX_DRAWABLE_TYPE, &drawables) != Success ||
+        !(drawables & GLX_PBUFFER_BIT))
+        return NULL;
+    BackendGLWorker *worker = calloc(1, sizeof(*worker));
+    if (!worker)
+        return NULL;
+    worker->glc = create_context(b->fb, &b->gl_cfg, b->glc);
+    if (worker->glc)
+    {
+        const int attribs[] = {GLX_PBUFFER_WIDTH, 1, GLX_PBUFFER_HEIGHT, 1, None};
+        worker->pbuffer = glXCreatePbuffer(g.dpy, b->fb, attribs);
+    }
+    if (!worker->glc || !worker->pbuffer)
+    {
+        backend_gl_worker_destroy(worker);
+        return NULL;
+    }
+    return worker;
+}
+
+bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current)
+{
+    if (!current)
+        return glXMakeContextCurrent(g.dpy, None, None, NULL) == True;
+    return glXMakeContextCurrent(g.dpy, worker->pbuffer, worker->pbuffer, worker->glc) == True;
+}
+
+void backend_gl_worker_destroy(BackendGLWorker *worker)
+{
+    if (worker->pbuffer)
+        glXDestroyPbuffer(g.dpy, worker->pbuffer);
+    if (worker->glc)
+        glXDestroyContext(g.dpy, worker->glc);
+    free(worker);
 }
 
 /* ========================================================================== */

@@ -360,6 +360,22 @@ extern "C"
     /* Address of a GL function for a loader, or NULL if unavailable. */
     PLATFORM_API void *gl_proc_address(const char *name);
 
+    /* A second GL context for one worker thread. It shares objects (shaders,
+       programs, buffers, textures) with the context of `w` and has no surface to
+       draw to, so the thread can compile and link while the window's thread keeps
+       drawing. Create and destroy it on the window's thread, before the window is
+       destroyed. NULL where the backend has no shared contexts (only X11 has them
+       so far) or the context cannot be created: the caller then stays on one
+       thread. */
+    typedef struct GLWorker GLWorker;
+    PLATFORM_API GLWorker *gl_worker_create(PlatformWindow *w);
+    /* Call on the worker thread: true binds the context to it, false releases it
+       before the thread ends. The window's thread must not be inside a platform
+       call meanwhile (have it wait for the worker), as the window system
+       connection is not thread-safe. */
+    PLATFORM_API bool gl_worker_make_current(GLWorker *worker, bool current);
+    PLATFORM_API void gl_worker_destroy(GLWorker *worker);
+
     /* ========================================================================== */
     /*  Dialogs and URLs                                                          */
     /* ========================================================================== */

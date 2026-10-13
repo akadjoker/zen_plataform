@@ -268,6 +268,22 @@ void *backend_gl_proc_address(const char *name)
     return NULL;
 }
 
+BackendGLWorker *backend_gl_worker_create(BackendWindow *b)
+{
+    (void)b;
+    return NULL;
+}
+bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current)
+{
+    (void)worker;
+    (void)current;
+    return false;
+}
+void backend_gl_worker_destroy(BackendGLWorker *worker)
+{
+    (void)worker;
+}
+
 bool backend_lock_pixels(BackendWindow *b, Framebuffer *out)
 {
     if (b->render != RENDER_PIXELS || !out)

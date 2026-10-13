@@ -59,6 +59,11 @@ void backend_make_current(BackendWindow *b);
 void backend_make_current_on(BackendWindow *target, BackendWindow *context);
 void backend_set_vsync(BackendWindow *b, bool on);
 void *backend_gl_proc_address(const char *name);
+/* shared context for a worker thread; create returns NULL when unsupported */
+typedef struct BackendGLWorker BackendGLWorker;
+BackendGLWorker *backend_gl_worker_create(BackendWindow *b);
+bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current);
+void backend_gl_worker_destroy(BackendGLWorker *worker);
 
 /* native handles (NativeHandleType); NULL when there is no such object */
 void *backend_native_handle(BackendWindow *b, NativeHandleType type);

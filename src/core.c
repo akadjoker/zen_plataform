@@ -595,6 +595,19 @@ void *gl_proc_address(const char *name)
 {
     return backend_gl_proc_address(name);
 }
+GLWorker *gl_worker_create(PlatformWindow *w)
+{
+    return (GLWorker *)backend_gl_worker_create(w->b);
+}
+bool gl_worker_make_current(GLWorker *worker, bool current)
+{
+    return worker && backend_gl_worker_make_current((BackendGLWorker *)worker, current);
+}
+void gl_worker_destroy(GLWorker *worker)
+{
+    if (worker)
+        backend_gl_worker_destroy((BackendGLWorker *)worker);
+}
 
 bool window_lock_pixels(PlatformWindow *w, Framebuffer *out)
 {

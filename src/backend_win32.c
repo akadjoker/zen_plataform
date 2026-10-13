@@ -1553,6 +1553,22 @@ void *backend_gl_proc_address(const char *name)
     return p;
 }
 
+BackendGLWorker *backend_gl_worker_create(BackendWindow *b)
+{
+    (void)b;
+    return NULL;
+}
+bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current)
+{
+    (void)worker;
+    (void)current;
+    return false;
+}
+void backend_gl_worker_destroy(BackendGLWorker *worker)
+{
+    (void)worker;
+}
+
 /* ========================================================================== */
 /*  native handles and Vulkan                                                 */
 /* ========================================================================== */
