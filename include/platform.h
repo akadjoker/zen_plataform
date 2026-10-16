@@ -485,6 +485,22 @@ extern "C"
     PLATFORM_API int cpu_count(void); /* logical processors, at least 1 */
 
     /* ========================================================================== */
+    /*  Child processes                                                           */
+    /* ========================================================================== */
+
+    /* Starts path with args (argc strings, not counting the program name) in a new
+       session, without waiting. Returns an id greater than 0, or 0 on failure (see
+       platform_get_error). The id is the OS process id. The last 128 children are
+       remembered, so the exit code can be read after is_running turns false. Safe
+       to call from several threads. */
+    PLATFORM_API int64_t process_spawn(const char *path, const char *const *args, int argc, bool open_console);
+    PLATFORM_API bool process_is_running(int64_t id);
+    /* -1 while the process runs or when the id is unknown. */
+    PLATFORM_API int process_exit_code(int64_t id);
+    /* Ends the process and reaps it. */
+    PLATFORM_API bool process_kill(int64_t id);
+
+    /* ========================================================================== */
     /*  Native handles                                                            */
     /* ========================================================================== */
 
