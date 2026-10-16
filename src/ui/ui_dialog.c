@@ -183,11 +183,17 @@ static void dlg_up(UiDialog *d)
 
 static void dlg_confirm(UiContext *ui, UiDialog *d, const char *name_or_null)
 {
+    int n;
     if (d->kind == ZUI_DIALOG_PICK_FOLDER)
-        snprintf(d->out, sizeof d->out, "%s", d->dir);
+        n = snprintf(d->out, sizeof d->out, "%s", d->dir);
     else
-        snprintf(d->out, sizeof d->out, "%s/%s", d->dir,
-                 name_or_null ? name_or_null : d->filename);
+        n = snprintf(d->out, sizeof d->out, "%s/%s", d->dir,
+                     name_or_null ? name_or_null : d->filename);
+    if (n < 0 || (size_t)n >= sizeof d->out)
+    {
+        d->out[0] = '\0';
+        return;
+    }
     d->result = ZUI_DIALOG_OK;
     d->open = false;
     (void)ui;
@@ -365,8 +371,8 @@ UiDialogState zui_dialog(UiContext *ui, char *out_path, int cap)
         if (chip(ui, zui_rect(bx, by, 90, bh), "Nova pasta", false, true))
         {
             char np[1024];
-            snprintf(np, sizeof np, "%s/Nova Pasta", d->dir);
-            if (dir_make(np)) d->dirty = true;
+            int n = snprintf(np, sizeof np, "%s/Nova Pasta", d->dir);
+            if (n >= 0 && (size_t)n < sizeof np && dir_make(np)) d->dirty = true;
         }
         bx += 96;
 

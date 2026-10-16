@@ -1,5 +1,5 @@
 /*
- * ui_internal.h - private state for zen_ui, shared across the src/ui/*.c units.
+ * ui_internal.h - private state for zen_ui, shared across the ui_*.c units.
  * Not installed; application code only sees zen_ui.h.
  */
 #ifndef ZEN_UI_INTERNAL_H
