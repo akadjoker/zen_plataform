@@ -180,6 +180,8 @@ struct BackendWindow
     Cursor hidden_cursor;
     bool grabbed;  /* MOUSE_MODE_CAPTURED holds the pointer */
     bool captured; /* mouse_capture(true) holds it */
+    int last_x, last_y; /* the pointer where the last MotionNotify left it */
+    int warp_x, warp_y; /* where the pointer was sent back to, or -1: its echo is not motion */
 
     RenderMode render;
     GC gc;         /* pixel mode: blits the XImage to the window */
@@ -857,6 +859,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
             XFree(vi);
         return NULL;
     }
+    b->warp_x = b->warp_y = -1;
     b->render = cfg->render;
 
     b->colormap = XCreateColormap(g.dpy, g.root, vi->visual, AllocNone);
@@ -1564,6 +1567,48 @@ static bool xdnd_client_message(BackendWindow *b, XClientMessageEvent *m)
     return false;
 }
 
+/* MOUSE_MODE_CAPTURED: the pointer is confined to the window and sent back to the
+   centre after every frame, so the motion never stops at an edge; relative motion is
+   the difference between consecutive positions, and the echo of a warp is skipped. */
+static void warp_to_center(BackendWindow *b)
+{
+    b->warp_x = b->width / 2;
+    b->warp_y = b->height / 2;
+    XWarpPointer(g.dpy, None, b->win, 0, 0, 0, 0, b->warp_x, b->warp_y);
+    XFlush(g.dpy);
+}
+
+static void grab_pointer(BackendWindow *b)
+{
+    if (b->grabbed)
+        return;
+    int r = XGrabPointer(g.dpy, b->win, True, ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                         GrabModeAsync, GrabModeAsync, b->win, None, CurrentTime);
+    if (r != GrabSuccess)
+        return;
+    b->grabbed = true;
+    Window root, child;
+    int rx, ry, wx, wy;
+    unsigned mask;
+    if (XQueryPointer(g.dpy, b->win, &root, &child, &rx, &ry, &wx, &wy, &mask))
+    {
+        b->last_x = wx;
+        b->last_y = wy;
+    }
+    warp_to_center(b);
+}
+
+static void release_pointer(BackendWindow *b)
+{
+    if (!b->grabbed)
+        return;
+    if (!b->captured)
+        XUngrabPointer(g.dpy, CurrentTime);
+    b->grabbed = false;
+    b->warp_x = b->warp_y = -1;
+    XFlush(g.dpy);
+}
+
 static void process_event(BackendWindow *b, XEvent *ev)
 {
     switch (ev->type)
@@ -1653,10 +1698,28 @@ static void process_event(BackendWindow *b, XEvent *ev)
 
     case MotionNotify:
     {
-        hit_motion(b, ev->xmotion.x, ev->xmotion.y);
+        const int x = ev->xmotion.x, y = ev->xmotion.y;
+        if (b->cursor_mode == MOUSE_MODE_CAPTURED && b->grabbed)
+        {
+            if (x != b->warp_x || y != b->warp_y)
+            {
+                Event e = {.type = EVENT_MOUSE_MOVE};
+                e.data.mouse.x = b->width / 2;
+                e.data.mouse.y = b->height / 2;
+                e.data.mouse.dx = x - b->last_x;
+                e.data.mouse.dy = y - b->last_y;
+                push(b, &e);
+            }
+            b->last_x = x;
+            b->last_y = y;
+            break;
+        }
+        b->last_x = x;
+        b->last_y = y;
+        hit_motion(b, x, y);
         Event e = {.type = EVENT_MOUSE_MOVE};
-        e.data.mouse.x = ev->xmotion.x;
-        e.data.mouse.y = ev->xmotion.y;
+        e.data.mouse.x = x;
+        e.data.mouse.y = y;
         push(b, &e);
         break;
     }
@@ -1677,6 +1740,13 @@ static void process_event(BackendWindow *b, XEvent *ev)
         b->focused = ev->type == FocusIn;
         if (!b->focused)
             memset(b->kc_down, 0, sizeof b->kc_down); /* the core drops every key on focus loss too */
+        if (b->cursor_mode == MOUSE_MODE_CAPTURED)
+        {
+            if (b->focused)
+                grab_pointer(b);
+            else
+                release_pointer(b);
+        }
         if (b->xic)
             (b->focused && b->text_input ? XSetICFocus : XUnsetICFocus)(b->xic);
         Event e = {.type = EVENT_WINDOW_FOCUS};
@@ -2034,6 +2104,9 @@ void backend_pump_events(BackendWindow *b, Core *core)
     }
     flush_preedit(b); /* the input method may have changed the composition while filtering */
     sync_stuck_keys(b);
+    if (b->cursor_mode == MOUSE_MODE_CAPTURED && b->grabbed &&
+        (b->last_x != b->width / 2 || b->last_y != b->height / 2))
+        warp_to_center(b);
 }
 
 
@@ -2573,24 +2646,19 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     b->cursor_mode = mode;
     if (mode == MOUSE_MODE_NORMAL)
     {
-        if (b->grabbed)
-        {
-            if (!b->captured)
-                XUngrabPointer(g.dpy, CurrentTime);
-            b->grabbed = false;
-        }
+        release_pointer(b);
         XDefineCursor(g.dpy, b->win, b->active_cursor ? b->active_cursor : None);
     }
     else
     {
         XDefineCursor(g.dpy, b->win, make_hidden_cursor(b));
-        if (mode == MOUSE_MODE_CAPTURED && !b->grabbed)
+        if (mode == MOUSE_MODE_CAPTURED)
         {
-            XGrabPointer(g.dpy, b->win, True,
-                         ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                         GrabModeAsync, GrabModeAsync, b->win, None, CurrentTime);
-            b->grabbed = true;
+            if (b->focused)
+                grab_pointer(b);
         }
+        else
+            release_pointer(b);
     }
     XFlush(g.dpy);
 }
