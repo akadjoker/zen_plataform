@@ -1055,6 +1055,33 @@ static void push(BackendWindow *b, Event *e)
     core_push_event(b->core, e);
 }
 
+/* Keys already down when the window gets the focus send no press of their own: they are
+   read from the server's keymap, so a key held across a focus change keeps working. */
+static void press_held_keys(BackendWindow *b)
+{
+    char keymap[32];
+    XQueryKeymap(g.dpy, keymap);
+    unsigned mods = 0;
+    XkbStateRec st;
+    if (XkbGetState(g.dpy, XkbUseCoreKbd, &st) == Success)
+        mods = st.mods;
+    for (int kc = 8; kc < 256; kc++)
+    {
+        if (!(keymap[kc / 8] & (1 << (kc % 8))) || b->kc_down[kc])
+            continue;
+        int key = translate_keysym(XkbKeycodeToKeysym(g.dpy, (KeyCode)kc, 0, 0));
+        b->kc_down[kc] = true;
+        b->kc_gone[kc] = 0;
+        b->kc_key[kc] = key;
+        Event e = {.type = EVENT_KEY};
+        e.data.key.key = key;
+        e.data.key.scancode = kc;
+        e.data.key.down = true;
+        e.data.key.mods = translate_mods(mods);
+        push(b, &e);
+    }
+}
+
 static void handle_key(BackendWindow *b, XEvent *ev, bool down)
 {
     KeySym ks = XLookupKeysym(&ev->xkey, 0);
@@ -1737,6 +1764,12 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case FocusIn:
     case FocusOut:
     {
+        /* another client grabbing the keyboard for a moment (a global shortcut, an input
+           method) moves the focus away and back while the user never left: keys stay held */
+        if (ev->xfocus.mode == NotifyGrab || ev->xfocus.mode == NotifyUngrab)
+            break;
+        if (ev->type == FocusOut && ev->xfocus.detail == NotifyInferior)
+            break;
         b->focused = ev->type == FocusIn;
         if (!b->focused)
             memset(b->kc_down, 0, sizeof b->kc_down); /* the core drops every key on focus loss too */
@@ -1752,6 +1785,8 @@ static void process_event(BackendWindow *b, XEvent *ev)
         Event e = {.type = EVENT_WINDOW_FOCUS};
         e.data.focus.gained = b->focused;
         push(b, &e);
+        if (b->focused)
+            press_held_keys(b);
         break;
     }
 
