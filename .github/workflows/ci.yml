@@ -22,6 +22,7 @@ concurrency:
 jobs:
   linux:
     name: Linux (X11, sanitizers)
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[ci]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +65,7 @@ jobs:
 
   windows-msvc:
     name: Windows (MSVC, static runtime)
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[ci]')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,6 +106,7 @@ jobs:
 
   windows-mingw:
     name: Windows (MinGW cross build)
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[ci]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +146,7 @@ jobs:
 
   web:
     name: Web (Emscripten)
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[ci]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -166,6 +170,7 @@ jobs:
 
   android:
     name: Android (NDK)
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[ci]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
