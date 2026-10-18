@@ -36,6 +36,9 @@ else()
     add_executable(events_demo events_demo.c)
     target_link_libraries(events_demo PRIVATE zen_ui platform ${MATH_LIB})
 
+    add_executable(input_tester input_tester.c)
+    target_link_libraries(input_tester PRIVATE zen_ui platform ${MATH_LIB})
+
     add_executable(wtest  wtest.c)
     target_link_libraries(wtest PRIVATE zen_2d zen_ui platform ${MATH_LIB} OpenGL::GL)
 

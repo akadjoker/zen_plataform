@@ -49,7 +49,7 @@ until [ -S "$XDG_RUNTIME_DIR/$WL" ] && [ -s $T/bus ]; do
 done
 export DBUS_SESSION_BUS_ADDRESS=$(cat $T/bus)
 
-env WAYLAND_DISPLAY=$WL DISPLAY= Xwayland :$N -geometry 1024x768 -noreset -nolisten tcp > $T/xwayland.log 2>&1 &
+env WAYLAND_DISPLAY=$WL DISPLAY= Xwayland :$N -geometry 1600x900 -noreset -nolisten tcp > $T/xwayland.log 2>&1 &
 i=0
 until [ -S /tmp/.X11-unix/X$N ]; do
     i=$((i + 1)); [ $i -gt 100 ] && { echo "Xwayland did not start" >&2; cat $T/xwayland.log >&2; exit 1; }
