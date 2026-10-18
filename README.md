@@ -340,8 +340,9 @@ tests/
   test_events.c           event hook, text and IME events, lock keys, capture, device and touch events (fake backend)
   test_preedit.c          the composition buffer an input method edits
   test_x11_window.c       capture, lock keys, window kinds, hit test, image cursors on a real X server
-  test_input_x11.c        keys on a real X server: a key in the frame the server sends it, held keys
-                          through keyboard grabs, an input method's copies and commits, dead keys
+  test_input_x11.c        keys and mouse on a real X server: every key and button in the frame the
+                          server sends it, keys held together and through keyboard grabs, an input
+                          method's copies and commits, dead keys, wheel, enter/leave, captured motion
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach
   test_dialog.c           zenity/kdialog/xdg-open arguments and answers, with stand-in programs

@@ -556,6 +556,295 @@ static void test_dead_key(PlatformWindow *w)
     drain(w);
 }
 
+/* Every key of a US keyboard, pressed the way a keyboard does it: the right key, in
+   the frame the server sends it, and no other key down. */
+static void test_key_sweep(PlatformWindow *w)
+{
+    static const struct
+    {
+        KeySym sym;
+        int key;
+    } keys[] = {
+        {XK_space, KEY_SPACE}, {XK_apostrophe, KEY_APOSTROPHE}, {XK_comma, KEY_COMMA}, {XK_minus, KEY_MINUS},
+        {XK_period, KEY_PERIOD}, {XK_slash, KEY_SLASH}, {XK_semicolon, KEY_SEMICOLON}, {XK_equal, KEY_EQUAL},
+        {XK_bracketleft, KEY_LEFT_BRACKET}, {XK_backslash, KEY_BACKSLASH}, {XK_bracketright, KEY_RIGHT_BRACKET},
+        {XK_grave, KEY_GRAVE}, {XK_Escape, KEY_ESCAPE}, {XK_Return, KEY_ENTER}, {XK_Tab, KEY_TAB},
+        {XK_BackSpace, KEY_BACKSPACE}, {XK_Insert, KEY_INSERT}, {XK_Delete, KEY_DELETE}, {XK_Right, KEY_RIGHT},
+        {XK_Left, KEY_LEFT}, {XK_Down, KEY_DOWN}, {XK_Up, KEY_UP}, {XK_Prior, KEY_PAGE_UP}, {XK_Next, KEY_PAGE_DOWN},
+        {XK_Home, KEY_HOME}, {XK_End, KEY_END}, {XK_Print, KEY_PRINT_SCREEN}, {XK_Pause, KEY_PAUSE},
+        {XK_KP_Decimal, KEY_KP_DECIMAL}, {XK_KP_Divide, KEY_KP_DIVIDE}, {XK_KP_Multiply, KEY_KP_MULTIPLY},
+        {XK_KP_Subtract, KEY_KP_SUBTRACT}, {XK_KP_Add, KEY_KP_ADD}, {XK_KP_Enter, KEY_KP_ENTER},
+        {XK_Shift_L, KEY_LEFT_SHIFT}, {XK_Control_L, KEY_LEFT_CONTROL}, {XK_Alt_L, KEY_LEFT_ALT},
+        {XK_Super_L, KEY_LEFT_SUPER}, {XK_Shift_R, KEY_RIGHT_SHIFT}, {XK_Control_R, KEY_RIGHT_CONTROL},
+        {XK_Super_R, KEY_RIGHT_SUPER}, {XK_Menu, KEY_MENU},
+    };
+    KeySym all[128];
+    int want[128];
+    int n = 0;
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++, n++)
+    {
+        all[n] = keys[i].sym;
+        want[n] = keys[i].key;
+    }
+    for (int i = 0; i < 26; i++, n++)
+    {
+        all[n] = XK_a + i;
+        want[n] = KEY_A + i;
+    }
+    for (int i = 0; i < 10; i++, n++)
+    {
+        all[n] = XK_0 + i;
+        want[n] = KEY_ZERO + i;
+        all[++n] = XK_KP_0 + i;
+        want[n] = KEY_KP_0 + i;
+    }
+    for (int i = 0; i < 12; i++, n++)
+    {
+        all[n] = XK_F1 + i;
+        want[n] = KEY_F1 + i;
+    }
+    drain(w);
+    int wrong = 0;
+    for (int i = 0; i < n; i++)
+    {
+        KeyCode code = XKeysymToKeycode(g_dpy, all[i]);
+        if (!code)
+            continue;
+        fake_key(g_dpy, code, true);
+        window_begin_frame(w);
+        int others = 0;
+        for (int k = 0; k < KEY_MAX; k++)
+            others += k != want[i] && key_down(w, k);
+        bool ok = key_pressed(w, want[i]) && others == 0;
+        fake_key(g_dpy, code, false);
+        window_begin_frame(w);
+        ok = ok && key_released(w, want[i]);
+        if (!ok)
+        {
+            printf("  %s (keycode %d) is not key %d alone in its frame:", XKeysymToString(all[i]), code, want[i]);
+            for (int k = 0; k < KEY_MAX; k++)
+                if (key_down(w, k))
+                    printf(" %d down", k);
+            printf("\n");
+            wrong++;
+        }
+    }
+    CHECK(wrong == 0);
+}
+
+/* Gas, steering, handbrake and boost held together, let go in another order. */
+static void test_keys_together(PlatformWindow *w)
+{
+    static const KeySym held[] = {XK_w, XK_a, XK_space, XK_Shift_L, XK_Up};
+    static const int key[] = {KEY_W, KEY_A, KEY_SPACE, KEY_LEFT_SHIFT, KEY_UP};
+    const int n = 5;
+    drain(w);
+    for (int i = 0; i < n; i++)
+        fake_key(g_dpy, XKeysymToKeycode(g_dpy, held[i]), true);
+    window_begin_frame(w);
+    int down = 0;
+    for (int i = 0; i < n; i++)
+        down += key_down(w, key[i]);
+    CHECK(down == n);
+    for (int f = 0; f < 10; f++)
+    {
+        time_sleep(10);
+        window_begin_frame(w);
+        for (int i = 0; i < n; i++)
+            CHECK(key_down(w, key[i]));
+    }
+    static const int order[] = {2, 0, 4, 1, 3};
+    for (int i = 0; i < n; i++)
+    {
+        fake_key(g_dpy, XKeysymToKeycode(g_dpy, held[order[i]]), false);
+        window_begin_frame(w);
+        CHECK(key_released(w, key[order[i]]));
+        for (int j = i + 1; j < n; j++)
+            CHECK(key_down(w, key[order[j]]));
+    }
+}
+
+/* ---- mouse ---- */
+
+/* The pointer to a point of the window, as a real mouse moves it. */
+static void pointer_to(int x, int y)
+{
+    int rx, ry;
+    Window child;
+    XTranslateCoordinates(g_dpy, g_win, DefaultRootWindow(g_dpy), x, y, &rx, &ry, &child);
+    XTestFakeMotionEvent(g_dpy, -1, rx, ry, 0);
+    XSync(g_dpy, False);
+}
+
+/* Each button in the frame the server sends it, at the pointer's position. */
+static void test_mouse_buttons(PlatformWindow *w)
+{
+    static const struct
+    {
+        unsigned xbutton;
+        int button;
+    } map[] = {{1, MOUSE_LEFT}, {2, MOUSE_MIDDLE}, {3, MOUSE_RIGHT}, {8, MOUSE_X1}, {9, MOUSE_X2}};
+    pointer_to(10, 20);
+    drain(w);
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+    {
+        XTestFakeButtonEvent(g_dpy, map[i].xbutton, True, 0);
+        XSync(g_dpy, False);
+        window_begin_frame(w);
+        bool pressed = mouse_button_pressed(w, map[i].button);
+        if (!pressed)
+            printf("  X button %u did not arrive as button %d in its frame\n", map[i].xbutton, map[i].button);
+        CHECK(pressed);
+        Event ev;
+        int at = 0;
+        while (poll_event(w, &ev))
+            at += ev.type == EVENT_MOUSE_BUTTON && ev.data.mouse.x == 10 && ev.data.mouse.y == 20;
+        CHECK(at == 1);
+        XTestFakeButtonEvent(g_dpy, map[i].xbutton, False, 0);
+        XSync(g_dpy, False);
+        window_begin_frame(w);
+        CHECK(mouse_button_released(w, map[i].button));
+    }
+}
+
+/* Buttons 4 to 7 are the wheel: one notch each, in their frame, and no button. */
+static void test_mouse_wheel(PlatformWindow *w)
+{
+    static const struct
+    {
+        unsigned xbutton;
+        float x, y;
+    } notch[] = {{4, 0, 1}, {5, 0, -1}, {6, -1, 0}, {7, 1, 0}};
+    drain(w);
+    for (size_t i = 0; i < sizeof notch / sizeof notch[0]; i++)
+    {
+        XTestFakeButtonEvent(g_dpy, notch[i].xbutton, True, 0);
+        XTestFakeButtonEvent(g_dpy, notch[i].xbutton, False, 0);
+        XSync(g_dpy, False);
+        window_begin_frame(w);
+        float x, y;
+        mouse_wheel_v(w, &x, &y);
+        if (x != notch[i].x || y != notch[i].y)
+            printf("  X button %u gave the wheel %g,%g\n", notch[i].xbutton, x, y);
+        CHECK(x == notch[i].x && y == notch[i].y);
+        for (int b = 0; b < MOUSE_BUTTON_MAX; b++)
+            CHECK(!mouse_button_down(w, b));
+        window_begin_frame(w);
+        mouse_wheel_v(w, &x, &y);
+        CHECK(x == 0 && y == 0);
+    }
+}
+
+/* The position in the frame the pointer moved, the delta against the frame before,
+   and leaving and entering the window. */
+static void test_mouse_motion(PlatformWindow *w)
+{
+    pointer_to(5, 6);
+    drain(w);
+    CHECK(mouse_x(w) == 5 && mouse_y(w) == 6);
+    pointer_to(40, 30);
+    window_begin_frame(w);
+    int dx, dy;
+    mouse_delta(w, &dx, &dy);
+    if (mouse_x(w) != 40 || mouse_y(w) != 30 || dx != 35 || dy != 24)
+        printf("  pointer at %d,%d delta %d,%d, expected 40,30 and 35,24\n", mouse_x(w), mouse_y(w), dx, dy);
+    CHECK(mouse_x(w) == 40 && mouse_y(w) == 30);
+    CHECK(dx == 35 && dy == 24);
+    window_begin_frame(w);
+    mouse_delta(w, &dx, &dy);
+    CHECK(dx == 0 && dy == 0);
+
+    Event ev;
+    int left = 0, entered = 0;
+    pointer_to(200, 200); /* the window is 64x64 */
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+        {
+            entered += ev.type == EVENT_WINDOW_ENTER && ev.data.enter.entered;
+            left += ev.type == EVENT_WINDOW_ENTER && !ev.data.enter.entered;
+        }
+        time_sleep(2);
+    }
+    pointer_to(30, 30);
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+        {
+            entered += ev.type == EVENT_WINDOW_ENTER && ev.data.enter.entered;
+            left += ev.type == EVENT_WINDOW_ENTER && !ev.data.enter.entered;
+        }
+        time_sleep(2);
+    }
+    CHECK(left == 1 && entered == 1);
+    CHECK(mouse_x(w) == 30 && mouse_y(w) == 30);
+
+    mouse_set_position(w, 12, 50);
+    drain(w);
+    Window root, child;
+    int rx, ry, wx = -1, wy = -1;
+    unsigned mask;
+    XQueryPointer(g_dpy, g_win, &root, &child, &rx, &ry, &wx, &wy, &mask);
+    CHECK(wx == 12 && wy == 50);
+    CHECK(mouse_x(w) == 12 && mouse_y(w) == 50);
+}
+
+/* MOUSE_MODE_CAPTURED: every movement counts, in mouse_delta and in the events,
+   long past where the window's edge would have stopped the pointer; moving the
+   pointer from the program is no movement of the mouse. */
+static void test_mouse_captured(PlatformWindow *w)
+{
+    pointer_to(20, 20);
+    drain(w);
+    mouse_set_mode(w, MOUSE_MODE_CAPTURED);
+    drain(w);
+    int sum_dx = 0, sum_dy = 0, ev_dx = 0, ev_dy = 0;
+    Event ev;
+    for (int i = 0; i < 60; i++)
+    {
+        if (i < 40)
+        {
+            XTestFakeRelativeMotionEvent(g_dpy, 7, -3, 0);
+            XSync(g_dpy, False);
+        }
+        window_begin_frame(w);
+        int dx, dy;
+        mouse_delta(w, &dx, &dy);
+        sum_dx += dx;
+        sum_dy += dy;
+        while (poll_event(w, &ev))
+        {
+            if (ev.type == EVENT_MOUSE_MOVE)
+            {
+                ev_dx += ev.data.mouse.dx;
+                ev_dy += ev.data.mouse.dy;
+            }
+        }
+        time_sleep(2);
+    }
+    if (sum_dx != 280 || sum_dy != -120 || ev_dx != 280 || ev_dy != -120)
+        printf("  captured: moved 280,-120; mouse_delta summed %d,%d, the events %d,%d\n", sum_dx, sum_dy, ev_dx, ev_dy);
+    CHECK(sum_dx == 280 && sum_dy == -120);
+    CHECK(ev_dx == 280 && ev_dy == -120);
+
+    sum_dx = sum_dy = 0;
+    mouse_set_position(w, 5, 5);
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(w);
+        int dx, dy;
+        mouse_delta(w, &dx, &dy);
+        sum_dx += dx;
+        sum_dy += dy;
+        time_sleep(2);
+    }
+    CHECK(sum_dx == 0 && sum_dy == 0);
+    mouse_set_mode(w, MOUSE_MODE_NORMAL);
+    drain(w);
+}
+
 /* Keys the server really holds, delivered the way a keyboard does it. */
 static void test_real_keys(PlatformWindow *w)
 {
@@ -660,6 +949,12 @@ int main(void)
             test_text_once(w);
             test_dead_key(w);
             test_grab_keeps_keys(w);
+            test_key_sweep(w);
+            test_keys_together(w);
+            test_mouse_buttons(w);
+            test_mouse_wheel(w);
+            test_mouse_motion(w);
+            test_mouse_captured(w);
         }
 #endif
         test_cursors(w);

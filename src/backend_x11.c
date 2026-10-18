@@ -194,6 +194,7 @@ struct BackendWindow
     bool captured; /* mouse_capture(true) holds it */
     int last_x, last_y; /* the pointer where the last MotionNotify left it */
     int warp_x, warp_y; /* where the pointer was sent back to, or -1: its echo is not motion */
+    int virt_x, virt_y; /* MOUSE_MODE_CAPTURED: the position the motion moves, never held at an edge */
 
     RenderMode render;
     GC gc;         /* pixel mode: blits the XImage to the window */
@@ -1683,13 +1684,12 @@ static void process_event(BackendWindow *b, XEvent *ev);
    moment later, by which time the pump has usually emptied the queue: waiting for the
    copy put every key a frame late (ibus, measured), and a method that is slow, drops
    or reorders events changed which keys were down. So the key is reported from the
-   server's event now and the copy only gives the text. While the method is composing,
-   a press is the method's own (Enter picks a candidate); a release is always the key's. */
+   server's event now, as GLFW does, and the copy only gives the text. That holds while
+   the method composes too: ibus can leave a composition open after its commit (a dead
+   key, measured), and keys that waited on it were lost. */
 static void key_early(BackendWindow *b, XEvent *ev)
 {
     if (ev->xkey.keycode == 0 || ev->xkey.keycode >= 256)
-        return;
-    if (ev->type == KeyPress && b->preedit.len > 0)
         return;
     int i = b->im_taken_next;
     b->im_taken_next = (i + 1) % (int)(sizeof b->im_taken / sizeof b->im_taken[0]);
@@ -1804,9 +1804,13 @@ static void process_event(BackendWindow *b, XEvent *ev)
         {
             if (x != b->warp_x || y != b->warp_y)
             {
+                /* the position moves with the motion, as on Win32 and Wayland: mouse_delta
+                   is the difference of positions, and the real pointer stays at the centre */
+                b->virt_x += x - b->last_x;
+                b->virt_y += y - b->last_y;
                 Event e = {.type = EVENT_MOUSE_MOVE};
-                e.data.mouse.x = b->width / 2;
-                e.data.mouse.y = b->height / 2;
+                e.data.mouse.x = b->virt_x;
+                e.data.mouse.y = b->virt_y;
                 e.data.mouse.dx = x - b->last_x;
                 e.data.mouse.dy = y - b->last_y;
                 push(b, &e);
@@ -2633,6 +2637,13 @@ void backend_set_always_on_top(BackendWindow *b, bool on)
 
 void backend_set_mouse_pos(BackendWindow *b, int x, int y)
 {
+    if (b->cursor_mode == MOUSE_MODE_CAPTURED)
+    {
+        /* the real pointer stays at the centre: a warp there would come back as motion */
+        b->virt_x = x;
+        b->virt_y = y;
+        return;
+    }
     XWarpPointer(g.dpy, None, b->win, 0, 0, 0, 0, x, y);
     XFlush(g.dpy);
 }
@@ -2784,6 +2795,17 @@ void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
 
 void backend_set_mouse_mode(BackendWindow *b, int mode)
 {
+    if (mode == MOUSE_MODE_CAPTURED && b->cursor_mode != MOUSE_MODE_CAPTURED)
+    {
+        Window root, child;
+        int rx, ry, wx, wy;
+        unsigned mask;
+        if (XQueryPointer(g.dpy, b->win, &root, &child, &rx, &ry, &wx, &wy, &mask))
+        {
+            b->virt_x = wx;
+            b->virt_y = wy;
+        }
+    }
     b->cursor_mode = mode;
     if (mode == MOUSE_MODE_NORMAL)
     {
