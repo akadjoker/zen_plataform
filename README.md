@@ -340,6 +340,8 @@ tests/
   test_events.c           event hook, text and IME events, lock keys, capture, device and touch events (fake backend)
   test_preedit.c          the composition buffer an input method edits
   test_x11_window.c       capture, lock keys, window kinds, hit test, image cursors on a real X server
+  test_win32_input.c      keys and mouse through SendInput: every key, both shifts, AltGr, Print Screen,
+                          held keys across focus changes, buttons, wheel, drags, captured motion
   test_input_x11.c        keys and mouse on a real X server: every key and button in the frame the
                           server sends it, keys held together and through keyboard grabs, an input
                           method's copies and commits, dead keys, wheel, enter/leave, captured motion

@@ -128,6 +128,9 @@ struct BackendWindow
     HCURSOR cursor;
     int last_x, last_y;
     int virtual_x, virtual_y;
+    bool raw_mouse;
+    bool raw_abs_known;
+    int raw_abs_x, raw_abs_y;
 
     int min_w, min_h, max_w, max_h;
     bool resizable;
@@ -514,20 +517,90 @@ static int current_mods(void)
     return mods;
 }
 
+static bool core_key_down(BackendWindow *b, int key)
+{
+    return b->core && key > 0 && key < KEY_MAX && b->core->in.key_down[key];
+}
+
+static void push_key(BackendWindow *b, int key, int scancode, bool down, bool repeat)
+{
+    Event e = {.type = EVENT_KEY};
+    e.data.key.key = key;
+    e.data.key.scancode = scancode;
+    e.data.key.down = down;
+    e.data.key.repeat = repeat;
+    e.data.key.mods = current_mods();
+    push(b, &e);
+}
+
+static bool altgr_control(WPARAM wparam, LPARAM lparam)
+{
+    if (wparam != VK_CONTROL || ((lparam >> 24) & 1))
+        return false;
+    MSG next;
+    if (!PeekMessageW(&next, NULL, 0, 0, PM_NOREMOVE))
+        return false;
+    if (next.message != WM_KEYDOWN && next.message != WM_SYSKEYDOWN && next.message != WM_KEYUP &&
+        next.message != WM_SYSKEYUP)
+        return false;
+    return next.wParam == VK_MENU && ((next.lParam >> 24) & 1) && next.time == (DWORD)GetMessageTime();
+}
+
 static void handle_key(BackendWindow *b, WPARAM wparam, LPARAM lparam, bool down)
 {
     int scancode = (int)((lparam >> 16) & 0xFF);
     bool extended = ((lparam >> 24) & 1) != 0;
     if (scancode == 0x2A && extended)
         return;
+    if (altgr_control(wparam, lparam))
+        return;
 
-    Event e = {.type = EVENT_KEY};
-    e.data.key.key = translate_key(wparam, lparam);
-    e.data.key.scancode = scancode | (extended ? 0xE000 : 0);
-    e.data.key.down = down;
-    e.data.key.repeat = down && ((lparam >> 30) & 1);
-    e.data.key.mods = current_mods();
-    push(b, &e);
+    int key = translate_key(wparam, lparam);
+    int code = scancode | (extended ? 0xE000 : 0);
+    if (key == KEY_PRINT_SCREEN && !down && !core_key_down(b, key))
+        push_key(b, key, code, true, false);
+    if (wparam == VK_SHIFT && !down)
+    {
+        if (core_key_down(b, KEY_LEFT_SHIFT) && key != KEY_LEFT_SHIFT)
+            push_key(b, KEY_LEFT_SHIFT, 0x2A, false, false);
+        if (core_key_down(b, KEY_RIGHT_SHIFT) && key != KEY_RIGHT_SHIFT)
+            push_key(b, KEY_RIGHT_SHIFT, 0x36, false, false);
+    }
+    push_key(b, key, code, down, down && ((lparam >> 30) & 1));
+}
+
+static void release_stuck_keys(BackendWindow *b)
+{
+    static const struct
+    {
+        int vk, key, scancode;
+    } keys[] = {{VK_LSHIFT, KEY_LEFT_SHIFT, 0x2A},
+                {VK_RSHIFT, KEY_RIGHT_SHIFT, 0x36},
+                {VK_LWIN, KEY_LEFT_SUPER, 0xE05B},
+                {VK_RWIN, KEY_RIGHT_SUPER, 0xE05C}};
+    if (!b->focused)
+        return;
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+    {
+        if (core_key_down(b, keys[i].key) && !(GetKeyState(keys[i].vk) & 0x8000))
+            push_key(b, keys[i].key, keys[i].scancode, false, false);
+    }
+}
+
+static void press_held_keys(BackendWindow *b)
+{
+    for (int vk = 0x08; vk < 0xFF; vk++)
+    {
+        if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || !(GetAsyncKeyState(vk) & 0x8000))
+            continue;
+        UINT sc = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC_EX);
+        if (!sc)
+            continue;
+        LPARAM lparam = (LPARAM)((sc & 0xFF) << 16) | (((sc >> 8) == 0xE0) ? (LPARAM)1 << 24 : 0);
+        int key = translate_key((WPARAM)vk, lparam);
+        if (key != KEY_NULL && !core_key_down(b, key))
+            push_key(b, key, (int)((sc & 0xFF) | ((sc >> 8) == 0xE0 ? 0xE000 : 0)), true, false);
+    }
 }
 
 /* ========================================================================== */
@@ -581,6 +654,16 @@ static void apply_clip(BackendWindow *b)
     {
         ClipCursor(NULL);
     }
+}
+
+static void set_raw_mouse(BackendWindow *b, bool on)
+{
+    if (b->raw_mouse == on)
+        return;
+    RAWINPUTDEVICE rid = {0x01, 0x02, on ? 0 : RIDEV_REMOVE, on ? b->hwnd : NULL};
+    if (RegisterRawInputDevices(&rid, 1, sizeof rid) || !on)
+        b->raw_mouse = on;
+    b->raw_abs_known = false;
 }
 
 static void warp_to_center(BackendWindow *b)
@@ -703,11 +786,13 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     {
         b->virtual_x = b->last_x;
         b->virtual_y = b->last_y;
+        set_raw_mouse(b, true);
         apply_clip(b);
         warp_to_center(b);
     }
     else if (mode != MOUSE_MODE_CAPTURED)
     {
+        set_raw_mouse(b, false);
         ClipCursor(NULL);
     }
     SetCursor(mode == MOUSE_MODE_NORMAL ? b->cursor : NULL);
@@ -750,6 +835,12 @@ bool backend_mouse_capture(BackendWindow *b, bool on)
 
 void backend_set_mouse_pos(BackendWindow *b, int x, int y)
 {
+    if (b->cursor_mode == MOUSE_MODE_CAPTURED)
+    {
+        b->virtual_x = x;
+        b->virtual_y = y;
+        return;
+    }
     POINT p = {x, y};
     ClientToScreen(b->hwnd, &p);
     SetCursorPos(p.x, p.y);
@@ -803,6 +894,10 @@ static void handle_mouse_move(BackendWindow *b, LPARAM lparam)
     {
         int w, h;
         client_size(b, &w, &h);
+        if (x != w / 2 || y != h / 2)
+            warp_to_center(b);
+        if (b->raw_mouse)
+            return;
         int cx = w / 2;
         int cy = h / 2;
         if (x == cx && y == cy)
@@ -811,7 +906,6 @@ static void handle_mouse_move(BackendWindow *b, LPARAM lparam)
         b->virtual_y += y - cy;
         x = b->virtual_x;
         y = b->virtual_y;
-        warp_to_center(b);
     }
     else
     {
@@ -824,6 +918,44 @@ static void handle_mouse_move(BackendWindow *b, LPARAM lparam)
     Event e = {.type = EVENT_MOUSE_MOVE};
     e.data.mouse.x = x;
     e.data.mouse.y = y;
+    push(b, &e);
+}
+
+static void handle_raw_input(BackendWindow *b, LPARAM lparam)
+{
+    RAWINPUT raw;
+    UINT size = sizeof raw;
+    if (GetRawInputData((HRAWINPUT)lparam, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) == (UINT)-1 ||
+        raw.header.dwType != RIM_TYPEMOUSE || b->cursor_mode != MOUSE_MODE_CAPTURED || !b->focused)
+        return;
+    int dx, dy;
+    if (raw.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)
+    {
+        bool virt = (raw.data.mouse.usFlags & MOUSE_VIRTUAL_DESKTOP) != 0;
+        int w = GetSystemMetrics(virt ? SM_CXVIRTUALSCREEN : SM_CXSCREEN);
+        int h = GetSystemMetrics(virt ? SM_CYVIRTUALSCREEN : SM_CYSCREEN);
+        int x = (int)((float)raw.data.mouse.lLastX / 65535.0f * (float)w);
+        int y = (int)((float)raw.data.mouse.lLastY / 65535.0f * (float)h);
+        dx = b->raw_abs_known ? x - b->raw_abs_x : 0;
+        dy = b->raw_abs_known ? y - b->raw_abs_y : 0;
+        b->raw_abs_x = x;
+        b->raw_abs_y = y;
+        b->raw_abs_known = true;
+    }
+    else
+    {
+        dx = raw.data.mouse.lLastX;
+        dy = raw.data.mouse.lLastY;
+    }
+    if (!dx && !dy)
+        return;
+    b->virtual_x += dx;
+    b->virtual_y += dy;
+    Event e = {.type = EVENT_MOUSE_MOVE};
+    e.data.mouse.x = b->virtual_x;
+    e.data.mouse.y = b->virtual_y;
+    e.data.mouse.dx = dx;
+    e.data.mouse.dy = dy;
     push(b, &e);
 }
 
@@ -1214,12 +1346,20 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
     case WM_KILLFOCUS:
     {
         b->focused = msg == WM_SETFOCUS;
+        b->raw_abs_known = false;
         Event e = {.type = EVENT_WINDOW_FOCUS};
         e.data.focus.gained = b->focused;
         push(b, &e);
         apply_clip(b);
+        if (b->focused && b->cursor_mode == MOUSE_MODE_CAPTURED)
+            warp_to_center(b);
+        if (b->focused)
+            press_held_keys(b);
         return 0;
     }
+    case WM_INPUT:
+        handle_raw_input(b, lparam);
+        break;
     case WM_MOUSEMOVE:
         handle_mouse_move(b, lparam);
         return 0;
@@ -1722,6 +1862,7 @@ void backend_destroy(BackendWindow *b)
         return;
     if (b->cursor_mode == MOUSE_MODE_CAPTURED)
         ClipCursor(NULL);
+    set_raw_mouse(b, false);
     if (b->glrc)
     {
         /* Leave another window's context current, unless it draws to this window. */
@@ -1773,6 +1914,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    release_stuck_keys(b);
     b->pumping = false;
 }
 
