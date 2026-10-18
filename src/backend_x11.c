@@ -152,8 +152,6 @@ struct BackendWindow
     bool kc_down[256];
     int kc_key[256];
     double kc_gone[256]; /* when the server was first seen not holding the key, 0 while it does */
-    /* key events the input method took and that were reported from the server's event;
-       its copy, handed back later, then only gives the text (see key_taken_by_im) */
     struct
     {
         int type;
@@ -162,8 +160,8 @@ struct BackendWindow
         Time time;
     } im_taken[64];
     int im_taken_next;
-    unsigned long kc_serial[256]; /* serial of the newest key event handled, by keycode */
-    bool key_early; /* the key event being processed is one the input method took */
+    unsigned long kc_serial[256];
+    bool key_early;
     struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
     int pending_n, pending_cap;
 
@@ -194,7 +192,8 @@ struct BackendWindow
     bool captured; /* mouse_capture(true) holds it */
     int last_x, last_y; /* the pointer where the last MotionNotify left it */
     int warp_x, warp_y; /* where the pointer was sent back to, or -1: its echo is not motion */
-    int virt_x, virt_y; /* MOUSE_MODE_CAPTURED: the position the motion moves, never held at an edge */
+    int virt_x, virt_y;
+    bool reanchor;
 
     RenderMode render;
     GC gc;         /* pixel mode: blits the XImage to the window */
@@ -611,8 +610,6 @@ bool backend_init(void)
     if (XSupportsLocale())
         XSetLocaleModifiers("");
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
-    /* XMODIFIERS names a method that is not there (ibus-x11 not started yet): Xlib's
-       own still gives text and the locale's compose sequences, where none gave no text */
     if (!g.xim && XSupportsLocale() && XSetLocaleModifiers("@im=none"))
         g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
 
@@ -1659,11 +1656,6 @@ static void release_pointer(BackendWindow *b)
     XFlush(g.dpy);
 }
 
-/* The input method's copy of a key event already reported when the method took it:
-   same type, keycode, serial and server time (the match is forgotten). A method that
-   fell behind hands its copies back after newer events of the same key, which the
-   list may no longer hold: events off the connection come in serial order, so a key
-   event older than one already handled can only be a copy put back in the queue. */
 static bool im_copy(BackendWindow *b, const XEvent *ev)
 {
     for (int i = 0; i < (int)(sizeof b->im_taken / sizeof b->im_taken[0]); i++)
@@ -1680,13 +1672,6 @@ static bool im_copy(BackendWindow *b, const XEvent *ev)
 
 static void process_event(BackendWindow *b, XEvent *ev);
 
-/* An input method (XIM: ibus, fcitx) takes every key event and hands a copy back a
-   moment later, by which time the pump has usually emptied the queue: waiting for the
-   copy put every key a frame late (ibus, measured), and a method that is slow, drops
-   or reorders events changed which keys were down. So the key is reported from the
-   server's event now, as GLFW does, and the copy only gives the text. That holds while
-   the method composes too: ibus can leave a composition open after its commit (a dead
-   key, measured), and keys that waited on it were lost. */
 static void key_early(BackendWindow *b, XEvent *ev)
 {
     if (ev->xkey.keycode == 0 || ev->xkey.keycode >= 256)
@@ -1750,7 +1735,6 @@ static void process_event(BackendWindow *b, XEvent *ev)
     }
 
     case KeyPress:
-        /* keycode 0 is no key: the input method committing text */
         if (ev->xkey.keycode == 0 || (!b->key_early && im_copy(b, ev)))
         {
             key_text(b, ev);
@@ -1802,10 +1786,10 @@ static void process_event(BackendWindow *b, XEvent *ev)
         const int x = ev->xmotion.x, y = ev->xmotion.y;
         if (b->cursor_mode == MOUSE_MODE_CAPTURED && b->grabbed)
         {
-            if (x != b->warp_x || y != b->warp_y)
+            if (b->reanchor)
+                b->reanchor = false;
+            else if (x != b->warp_x || y != b->warp_y)
             {
-                /* the position moves with the motion, as on Win32 and Wayland: mouse_delta
-                   is the difference of positions, and the real pointer stays at the centre */
                 b->virt_x += x - b->last_x;
                 b->virt_y += y - b->last_y;
                 Event e = {.type = EVENT_MOUSE_MOVE};
@@ -1821,6 +1805,8 @@ static void process_event(BackendWindow *b, XEvent *ev)
         }
         b->last_x = x;
         b->last_y = y;
+        if (b->cursor_mode == MOUSE_MODE_CAPTURED)
+            break;
         hit_motion(b, x, y);
         Event e = {.type = EVENT_MOUSE_MOVE};
         e.data.mouse.x = x;
@@ -1833,6 +1819,8 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case LeaveNotify:
     {
         b->hovered = ev->type == EnterNotify;
+        if (b->cursor_mode == MOUSE_MODE_CAPTURED)
+            b->reanchor = true;
         Event e = {.type = EVENT_WINDOW_ENTER};
         e.data.enter.entered = b->hovered;
         push(b, &e);
@@ -2038,7 +2026,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
 typedef struct PendingX
 {
     bool is_touch;
-    bool im_taken; /* a key event the input method took: key_early */
+    bool im_taken;
     XEvent ev;
     TouchPhase phase;
     int touch_id;
@@ -2164,7 +2152,6 @@ static void sync_stuck_keys(BackendWindow *b)
     }
 }
 
-/* A key event XFilterEvent kept: its window reports the key now (key_early). */
 static void key_taken_by_im(BackendWindow *b, XEvent *ev)
 {
     if (ev->xkey.window == b->win)
@@ -2201,7 +2188,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         XNextEvent(g.dpy, &ev);
         if (ev.type == KeyPress || ev.type == KeyRelease)
         {
-            XEvent orig = ev; /* some input methods clear the keycode while filtering */
+            XEvent orig = ev;
             if (XFilterEvent(&ev, None))
             {
                 key_taken_by_im(b, &orig);
@@ -2639,7 +2626,6 @@ void backend_set_mouse_pos(BackendWindow *b, int x, int y)
 {
     if (b->cursor_mode == MOUSE_MODE_CAPTURED)
     {
-        /* the real pointer stays at the centre: a warp there would come back as motion */
         b->virt_x = x;
         b->virt_y = y;
         return;
