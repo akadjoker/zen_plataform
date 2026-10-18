@@ -152,6 +152,18 @@ struct BackendWindow
     bool kc_down[256];
     int kc_key[256];
     double kc_gone[256]; /* when the server was first seen not holding the key, 0 while it does */
+    /* key events the input method took and that were reported from the server's event;
+       its copy, handed back later, then only gives the text (see key_taken_by_im) */
+    struct
+    {
+        int type;
+        unsigned keycode;
+        unsigned long serial;
+        Time time;
+    } im_taken[64];
+    int im_taken_next;
+    unsigned long kc_serial[256]; /* serial of the newest key event handled, by keycode */
+    bool key_early; /* the key event being processed is one the input method took */
     struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
     int pending_n, pending_cap;
 
@@ -598,6 +610,10 @@ bool backend_init(void)
     if (XSupportsLocale())
         XSetLocaleModifiers("");
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
+    /* XMODIFIERS names a method that is not there (ibus-x11 not started yet): Xlib's
+       own still gives text and the locale's compose sequences, where none gave no text */
+    if (!g.xim && XSupportsLocale() && XSetLocaleModifiers("@im=none"))
+        g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
 
     g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
     g.has_es_profile = glx_has_extension("GLX_EXT_create_context_es2_profile");
@@ -1082,6 +1098,8 @@ static void press_held_keys(BackendWindow *b)
     }
 }
 
+static void key_text(BackendWindow *b, XEvent *ev);
+
 static void handle_key(BackendWindow *b, XEvent *ev, bool down)
 {
     KeySym ks = XLookupKeysym(&ev->xkey, 0);
@@ -1093,6 +1111,7 @@ static void handle_key(BackendWindow *b, XEvent *ev, bool down)
         b->kc_down[ev->xkey.keycode] = down;
         b->kc_gone[ev->xkey.keycode] = 0;
         b->kc_key[ev->xkey.keycode] = key;
+        b->kc_serial[ev->xkey.keycode] = ev->xany.serial;
     }
     e.data.key.scancode = (int)ev->xkey.keycode;
     e.data.key.down = down;
@@ -1100,10 +1119,13 @@ static void handle_key(BackendWindow *b, XEvent *ev, bool down)
     e.data.key.mods = translate_mods(ev->xkey.state);
     push(b, &e);
 
-    if (!down)
-        return;
+    if (down && !b->key_early)
+        key_text(b, ev);
+}
 
-    /* text: feed the IM and decode UTF-8 into codepoints */
+/* text: feed the IM and decode UTF-8 into codepoints */
+static void key_text(BackendWindow *b, XEvent *ev)
+{
     if (b->xic)
     {
         char buf[64];
@@ -1636,6 +1658,50 @@ static void release_pointer(BackendWindow *b)
     XFlush(g.dpy);
 }
 
+/* The input method's copy of a key event already reported when the method took it:
+   same type, keycode, serial and server time (the match is forgotten). A method that
+   fell behind hands its copies back after newer events of the same key, which the
+   list may no longer hold: events off the connection come in serial order, so a key
+   event older than one already handled can only be a copy put back in the queue. */
+static bool im_copy(BackendWindow *b, const XEvent *ev)
+{
+    for (int i = 0; i < (int)(sizeof b->im_taken / sizeof b->im_taken[0]); i++)
+    {
+        if (b->im_taken[i].type == ev->type && b->im_taken[i].keycode == ev->xkey.keycode &&
+            b->im_taken[i].serial == ev->xany.serial && b->im_taken[i].time == ev->xkey.time)
+        {
+            b->im_taken[i].type = 0;
+            return true;
+        }
+    }
+    return ev->xkey.keycode < 256 && (long)(ev->xany.serial - b->kc_serial[ev->xkey.keycode]) < 0;
+}
+
+static void process_event(BackendWindow *b, XEvent *ev);
+
+/* An input method (XIM: ibus, fcitx) takes every key event and hands a copy back a
+   moment later, by which time the pump has usually emptied the queue: waiting for the
+   copy put every key a frame late (ibus, measured), and a method that is slow, drops
+   or reorders events changed which keys were down. So the key is reported from the
+   server's event now and the copy only gives the text. While the method is composing,
+   a press is the method's own (Enter picks a candidate); a release is always the key's. */
+static void key_early(BackendWindow *b, XEvent *ev)
+{
+    if (ev->xkey.keycode == 0 || ev->xkey.keycode >= 256)
+        return;
+    if (ev->type == KeyPress && b->preedit.len > 0)
+        return;
+    int i = b->im_taken_next;
+    b->im_taken_next = (i + 1) % (int)(sizeof b->im_taken / sizeof b->im_taken[0]);
+    b->im_taken[i].type = ev->type;
+    b->im_taken[i].keycode = ev->xkey.keycode;
+    b->im_taken[i].serial = ev->xany.serial;
+    b->im_taken[i].time = ev->xkey.time;
+    b->key_early = true;
+    process_event(b, ev);
+    b->key_early = false;
+}
+
 static void process_event(BackendWindow *b, XEvent *ev)
 {
     switch (ev->type)
@@ -1684,9 +1750,17 @@ static void process_event(BackendWindow *b, XEvent *ev)
     }
 
     case KeyPress:
+        /* keycode 0 is no key: the input method committing text */
+        if (ev->xkey.keycode == 0 || (!b->key_early && im_copy(b, ev)))
+        {
+            key_text(b, ev);
+            break;
+        }
         handle_key(b, ev, true);
         break;
     case KeyRelease:
+        if (!b->key_early && im_copy(b, ev))
+            break;
         /* swallow the synthetic release of an auto-repeat pair */
         if (!g.detectable_repeat && XEventsQueued(g.dpy, QueuedAfterReading))
         {
@@ -1960,6 +2034,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
 typedef struct PendingX
 {
     bool is_touch;
+    bool im_taken; /* a key event the input method took: key_early */
     XEvent ev;
     TouchPhase phase;
     int touch_id;
@@ -2003,7 +2078,10 @@ static void process_item(BackendWindow *b, const PendingX *it)
     else
     {
         XEvent ev = it->ev; /* process_event may touch it */
-        process_event(b, &ev);
+        if (it->im_taken)
+            key_early(b, &ev);
+        else
+            process_event(b, &ev);
     }
 }
 
@@ -2082,6 +2160,25 @@ static void sync_stuck_keys(BackendWindow *b)
     }
 }
 
+/* A key event XFilterEvent kept: its window reports the key now (key_early). */
+static void key_taken_by_im(BackendWindow *b, XEvent *ev)
+{
+    if (ev->xkey.window == b->win)
+    {
+        key_early(b, ev);
+        return;
+    }
+    XPointer found = NULL;
+    if (XFindContext(g.dpy, ev->xkey.window, g.ctx, &found) == 0 && found)
+    {
+        PendingX item;
+        memset(&item, 0, sizeof item);
+        item.im_taken = true;
+        item.ev = *ev;
+        defer_item((BackendWindow *)found, &item);
+    }
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
@@ -2098,7 +2195,16 @@ void backend_pump_events(BackendWindow *b, Core *core)
     {
         XEvent ev;
         XNextEvent(g.dpy, &ev);
-        if (XFilterEvent(&ev, None))
+        if (ev.type == KeyPress || ev.type == KeyRelease)
+        {
+            XEvent orig = ev; /* some input methods clear the keycode while filtering */
+            if (XFilterEvent(&ev, None))
+            {
+                key_taken_by_im(b, &orig);
+                continue;
+            }
+        }
+        else if (XFilterEvent(&ev, None))
             continue;
         if (ev.type == SelectionRequest)
         {

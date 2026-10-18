@@ -28,6 +28,15 @@ cmake ..
 make
 ```
 
+The X11 tests open windows and type with XTest, so on a desktop they belong on a
+display of their own. `tests/run_x11_isolated.sh` starts a headless gnome-shell,
+a rootful Xwayland and an ibus-x11 for it, and runs each test with ibus and with no
+input method, the session in use untouched:
+
+```sh
+tests/run_x11_isolated.sh build/tests/test_input_x11 build/tests/test_x11_window
+```
+
 On Windows, from a Visual Studio developer prompt:
 
 ```sh
@@ -331,6 +340,8 @@ tests/
   test_events.c           event hook, text and IME events, lock keys, capture, device and touch events (fake backend)
   test_preedit.c          the composition buffer an input method edits
   test_x11_window.c       capture, lock keys, window kinds, hit test, image cursors on a real X server
+  test_input_x11.c        keys on a real X server: a key in the frame the server sends it, held keys
+                          through keyboard grabs, an input method's copies and commits, dead keys
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach
   test_dialog.c           zenity/kdialog/xdg-open arguments and answers, with stand-in programs

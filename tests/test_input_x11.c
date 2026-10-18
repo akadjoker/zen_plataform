@@ -8,6 +8,7 @@
 #include <X11/extensions/XTest.h>
 #endif
 
+#include <langinfo.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -289,6 +290,43 @@ static void test_lost_release_heals(PlatformWindow *w)
     CHECK(!key_down(w, KEY_Z));
 }
 
+/* An input method that fell behind hands its copy of a press back after the release
+   (Xlib puts it back in the queue): it is older than the release, so it is no new
+   press and the key does not stick. Text input is off so no method takes it again. */
+static void test_late_copy(PlatformWindow *w)
+{
+    KeyCode q = XKeysymToKeycode(g_dpy, XK_q);
+    Display *wd = window_native_handle(w, NATIVE_DISPLAY);
+    window_text_input_stop(w);
+    send_key(q, true, 0);
+    CHECK(wait_pressed(w, KEY_Q));
+    send_key(q, false, 0);
+    CHECK(wait_released(w, KEY_Q));
+
+    XEvent copy;
+    memset(&copy, 0, sizeof copy);
+    copy.xkey.type = KeyPress;
+    copy.xkey.serial = 1; /* older than anything on the connection */
+    copy.xkey.display = wd;
+    copy.xkey.window = g_win;
+    copy.xkey.root = DefaultRootWindow(wd);
+    copy.xkey.same_screen = True;
+    copy.xkey.keycode = q;
+    XPutBackEvent(wd, &copy);
+    int presses = 0;
+    Event ev;
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+            presses += ev.type == EVENT_KEY && ev.data.key.down;
+        time_sleep(2);
+    }
+    CHECK(presses == 0);
+    CHECK(!key_down(w, KEY_Q));
+    window_text_input_start(w);
+}
+
 #ifdef HAVE_XTEST
 static void fake_key(Display *d, KeyCode code, bool press)
 {
@@ -296,21 +334,231 @@ static void fake_key(Display *d, KeyCode code, bool press)
     XSync(d, False);
 }
 
-/* Keys the server really holds, delivered the way a keyboard does it. Needs the window
-   focused (whatever has focus gets the keys), so it is skipped when it is not. */
-static void test_real_keys(PlatformWindow *w)
+/* Whatever has the focus gets the keys. With no window manager (Xvfb, a bare
+   Xwayland) nobody gives it, so the test takes it; window_is_focused alone does not
+   say, the synthetic focus events of the tests above set it too. */
+static bool take_focus(PlatformWindow *w)
 {
-    for (int i = 0; i < 50; i++)
+    for (int i = 0; i < 100; i++)
+    {
+        Window focus;
+        int revert;
+        XGetInputFocus(g_dpy, &focus, &revert);
+        if (focus == g_win && window_is_focused(w))
+            return true;
+        if (i % 25 == 0)
+        {
+            XSetInputFocus(g_dpy, g_win, RevertToParent, CurrentTime);
+            XSync(g_dpy, False);
+        }
+        window_begin_frame(w);
+        time_sleep(5);
+    }
+    return false;
+}
+
+static void drain(PlatformWindow *w)
+{
+    Event ev;
+    for (int i = 0; i < 10; i++)
     {
         window_begin_frame(w);
-        time_sleep(2);
+        while (poll_event(w, &ev))
+        {
+        }
+        time_sleep(5);
     }
-    int xt_event, xt_error, xt_major, xt_minor;
-    if (!window_is_focused(w) || !XTestQueryExtension(g_dpy, &xt_event, &xt_error, &xt_major, &xt_minor))
+}
+
+/* A key the server has sent is in the very next frame. An input method (ibus) takes
+   every key event and hands a copy back a moment later: waiting for that copy put
+   each key one frame late. And its copy is not a second key event. */
+static void test_same_frame(PlatformWindow *w)
+{
+    static const KeySym keys[] = {XK_a, XK_s, XK_d, XK_Up, XK_Left, XK_space, XK_Shift_L, XK_Return};
+    const int n = (int)(sizeof keys / sizeof keys[0]);
+    const int map[] = {KEY_A, KEY_S, KEY_D, KEY_UP, KEY_LEFT, KEY_SPACE, KEY_LEFT_SHIFT, KEY_ENTER};
+    drain(w);
+    int late = 0;
+    for (int i = 0; i < n; i++)
     {
-        printf("SKIP real keys: window not focused or no XTEST\n");
+        KeyCode code = XKeysymToKeycode(g_dpy, keys[i]);
+        fake_key(g_dpy, code, true);
+        window_begin_frame(w);
+        late += !key_pressed(w, map[i]);
+        fake_key(g_dpy, code, false);
+        window_begin_frame(w);
+        late += !key_released(w, map[i]);
+    }
+    if (late)
+        printf("  %d of %d key events came a frame late\n", late, 2 * n);
+    CHECK(late == 0);
+
+    int extra = 0;
+    Event ev;
+    for (int i = 0; i < 20; i++)
+    {
+        time_sleep(5);
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+            extra += ev.type == EVENT_KEY;
+    }
+    CHECK(extra == 0); /* the input method's copies were not reported again */
+}
+
+/* Typed through the input method: each key once, the text once. */
+static void test_text_once(PlatformWindow *w)
+{
+    static const KeySym word[] = {XK_h, XK_i, XK_space, XK_o, XK_o};
+    if (!XSupportsLocale())
+    {
+        printf("SKIP text: Xlib does not support the locale\n");
         return;
     }
+    drain(w);
+    for (size_t i = 0; i < sizeof word / sizeof word[0]; i++)
+    {
+        KeyCode code = XKeysymToKeycode(g_dpy, word[i]);
+        XTestFakeKeyEvent(g_dpy, code, True, 0);
+        XTestFakeKeyEvent(g_dpy, code, False, 0);
+    }
+    XSync(g_dpy, False);
+    char text[32] = "";
+    int len = 0, presses = 0, releases = 0;
+    Event ev;
+    for (int i = 0; i < 40; i++)
+    {
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+        {
+            if (ev.type == EVENT_CHAR && len < 31)
+                text[len++] = (char)ev.data.codepoint;
+            if (ev.type == EVENT_KEY && ev.data.key.down)
+                presses++;
+            else if (ev.type == EVENT_KEY)
+                releases++;
+        }
+        time_sleep(5);
+    }
+    if (strcmp(text, "hi oo") != 0)
+        printf("  typed \"hi oo\", got \"%s\"\n", text);
+    CHECK(strcmp(text, "hi oo") == 0);
+    CHECK(presses == 5);
+    CHECK(releases == 5);
+}
+
+/* Another client grabbing the keyboard for a moment (a global shortcut, the input
+   method's switcher) is no focus change: a held key stays down in every frame, and
+   no focus event reaches the application. A release that went to the grab instead
+   is found by the sync with the server's keymap. */
+static void test_grab_keeps_keys(PlatformWindow *w)
+{
+    KeyCode up = XKeysymToKeycode(g_dpy, XK_Up);
+    Window root = DefaultRootWindow(g_dpy);
+    drain(w);
+    fake_key(g_dpy, up, true);
+    CHECK(wait_pressed(w, KEY_UP));
+    int dropped = 0, focus_events = 0;
+    Event ev;
+    for (int round = 0; round < 3; round++)
+    {
+        XGrabKeyboard(g_dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+        XSync(g_dpy, False);
+        for (int i = 0; i < 5; i++)
+        {
+            time_sleep(5);
+            window_begin_frame(w);
+            dropped += !key_down(w, KEY_UP);
+            while (poll_event(w, &ev))
+                focus_events += ev.type == EVENT_WINDOW_FOCUS;
+        }
+        XUngrabKeyboard(g_dpy, CurrentTime);
+        XSync(g_dpy, False);
+        for (int i = 0; i < 5; i++)
+        {
+            time_sleep(5);
+            window_begin_frame(w);
+            dropped += !key_down(w, KEY_UP);
+            while (poll_event(w, &ev))
+                focus_events += ev.type == EVENT_WINDOW_FOCUS;
+        }
+    }
+    CHECK(dropped == 0);
+    CHECK(focus_events == 0);
+    CHECK(window_is_focused(w));
+
+    XGrabKeyboard(g_dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    fake_key(g_dpy, up, false); /* goes to the grab, not to the window */
+    XUngrabKeyboard(g_dpy, CurrentTime);
+    XSync(g_dpy, False);
+    CHECK(wait_released(w, KEY_UP));
+    CHECK(!key_down(w, KEY_UP));
+}
+
+/* A dead key and a letter compose one character, with Xlib's own input method or
+   ibus: the keys are reported as they come, the method's commit (a KeyPress with
+   keycode 0) is text and no key. The dead key goes on a spare keycode for the test. */
+static void test_dead_key(PlatformWindow *w)
+{
+    const char *codeset = nl_langinfo(CODESET);
+    if (!XSupportsLocale() || strcmp(codeset, "UTF-8") != 0)
+    {
+        printf("SKIP dead key: the locale is not UTF-8 (%s)\n", codeset);
+        return;
+    }
+    int min, max;
+    XDisplayKeycodes(g_dpy, &min, &max);
+    KeyCode spare = 0;
+    for (int kc = max; kc >= min && !spare; kc--)
+    {
+        if (XkbKeycodeToKeysym(g_dpy, (KeyCode)kc, 0, 0) == NoSymbol)
+            spare = (KeyCode)kc;
+    }
+    if (!spare)
+    {
+        printf("SKIP dead key: no spare keycode\n");
+        return;
+    }
+    KeySym sym = XK_dead_acute;
+    XChangeKeyboardMapping(g_dpy, spare, 1, &sym, 1);
+    XSync(g_dpy, False);
+    drain(w); /* the new mapping reaches the window and the input method */
+
+    KeyCode e = XKeysymToKeycode(g_dpy, XK_e);
+    fake_key(g_dpy, spare, true);
+    fake_key(g_dpy, spare, false);
+    fake_key(g_dpy, e, true);
+    fake_key(g_dpy, e, false);
+    uint32_t text[8];
+    int len = 0, commits = 0;
+    Event ev;
+    for (int i = 0; i < 40; i++)
+    {
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+        {
+            if (ev.type == EVENT_CHAR && len < 8)
+                text[len++] = ev.data.codepoint;
+            if (ev.type == EVENT_KEY && ev.data.key.scancode == 0)
+                commits++;
+        }
+        time_sleep(5);
+    }
+    if (len != 1 || text[0] != 0xE9)
+        printf("  dead acute + e gave %d characters, the first U+%04X\n", len, len ? (unsigned)text[0] : 0u);
+    CHECK(len == 1 && text[0] == 0xE9);
+    CHECK(commits == 0);
+    CHECK(!key_down(w, KEY_E));
+
+    sym = NoSymbol;
+    XChangeKeyboardMapping(g_dpy, spare, 1, &sym, 1);
+    XSync(g_dpy, False);
+    drain(w);
+}
+
+/* Keys the server really holds, delivered the way a keyboard does it. */
+static void test_real_keys(PlatformWindow *w)
+{
     KeyCode shift = XKeysymToKeycode(g_dpy, XK_Shift_L);
 
     fake_key(g_dpy, shift, true);
@@ -398,8 +646,21 @@ int main(void)
         test_repeat(w);
         test_focus_loss(w);
         test_lost_release_heals(w);
+        test_late_copy(w);
 #ifdef HAVE_XTEST
-        test_real_keys(w);
+        int xt_event, xt_error, xt_major, xt_minor;
+        if (!XTestQueryExtension(g_dpy, &xt_event, &xt_error, &xt_major, &xt_minor))
+            printf("SKIP real keys: no XTEST\n");
+        else if (!take_focus(w))
+            printf("SKIP real keys: the window never got the focus\n");
+        else
+        {
+            test_real_keys(w);
+            test_same_frame(w);
+            test_text_once(w);
+            test_dead_key(w);
+            test_grab_keeps_keys(w);
+        }
 #endif
         test_cursors(w);
     }
