@@ -205,6 +205,14 @@ jobs:
     env:
       VERSION: ${{ inputs.release_version || github.ref_name }}
     steps:
+      - name: Check the version
+        run: |
+          case "$VERSION" in
+            v[0-9]*) ;;
+            *) echo "::error::the version must look like v0.1.0 or v0.1.0-rc1, got '$VERSION'"; exit 1 ;;
+          esac
+          git check-ref-format "refs/tags/$VERSION" || { echo "::error::'$VERSION' is not a valid tag name"; exit 1; }
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
