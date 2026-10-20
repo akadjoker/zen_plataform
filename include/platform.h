@@ -284,7 +284,9 @@ extern "C"
 
     typedef void (*LogCallback)(LogLevel level, const char *message, void *user);
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__MINGW32__) && !defined(__clang__)
+#define PLATFORM_PRINTF(f, a) __attribute__((format(gnu_printf, f, a)))
+#elif defined(__GNUC__) || defined(__clang__)
 #define PLATFORM_PRINTF(f, a) __attribute__((format(printf, f, a)))
 #else
 #define PLATFORM_PRINTF(f, a)
