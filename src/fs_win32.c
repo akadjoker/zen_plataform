@@ -226,6 +226,32 @@ bool fs_get_base_path(char *out, size_t cap)
     return true;
 }
 
+bool fs_get_executable_path(char *out, size_t cap)
+{
+    wchar_t wide[PATH_CAP];
+    char utf8[PATH_CAP];
+    DWORD n = GetModuleFileNameW(NULL, wide, PATH_CAP);
+    if (n == 0 || n >= PATH_CAP)
+        return win32_error("cannot determine the executable path", NULL);
+    if (!win32_narrow(wide, utf8, sizeof utf8))
+        return false;
+    win32_slashes(utf8);
+    if (strlen(utf8) >= cap)
+    {
+        if (cap)
+            out[0] = '\0';
+        return error_set("path too long");
+    }
+    strcpy(out, utf8);
+    return true;
+}
+
+bool fs_make_executable(const char *path)
+{
+    (void)path;
+    return true;
+}
+
 static bool valid_name(const char *name)
 {
     return name[0] && strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && !strpbrk(name, "/\\:*?\"<>|");

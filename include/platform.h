@@ -1101,6 +1101,11 @@ extern "C"
     PLATFORM_API bool fs_get_pref_path(char *out, size_t cap, const char *org, const char *app);
     PLATFORM_API bool fs_get_temp_path(char *out, size_t cap);
 
+    /* Full path of the running executable, '/' separators. */
+    PLATFORM_API bool fs_get_executable_path(char *out, size_t cap);
+    /* Gives a file the execute permission where the OS has one; a no-op elsewhere. */
+    PLATFORM_API bool fs_make_executable(const char *path);
+
     /* Directories, raylib-style cursor over the process cwd. The dir_* string
        getters return a pointer to internal storage, valid until the next call. */
     PLATFORM_API const char *dir_current(void); /* working directory */

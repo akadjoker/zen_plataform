@@ -245,6 +245,39 @@ bool fs_get_base_path(char *out, size_t cap)
 #endif
 }
 
+bool fs_get_executable_path(char *out, size_t cap)
+{
+#if defined(__ANDROID__)
+    (void)out;
+    (void)cap;
+    return error_set("no executable path on this platform");
+#else
+    char exe[PATH_CAP];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0)
+        return error_set("cannot determine the executable path: %s", strerror(errno));
+    exe[n] = '\0';
+    if ((size_t)n >= cap)
+    {
+        if (cap)
+            out[0] = '\0';
+        return error_set("path too long");
+    }
+    strcpy(out, exe);
+    return true;
+#endif
+}
+
+bool fs_make_executable(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return error_set("cannot stat %s: %s", path, strerror(errno));
+    if (chmod(path, (st.st_mode & 07777) | S_IXUSR | S_IXGRP | S_IXOTH) != 0)
+        return error_set("cannot make %s executable: %s", path, strerror(errno));
+    return true;
+}
+
 static bool valid_name(const char *name)
 {
     return name[0] && strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && !strchr(name, '/');
