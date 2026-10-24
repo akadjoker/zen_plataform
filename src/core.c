@@ -364,7 +364,10 @@ PlatformWindow *window_create(const WindowConfig *cfg)
     w->cfg = *cfg;
     if (w->cfg.monitor == MONITOR_MOUSE)
     {
-        int under = monitor_from_mouse();
+        /* Under XWayland the X pointer only moves over X windows, so it is stale while the mouse
+           is over a native Wayland window (the terminal, the editor). The compositor knows where
+           the mouse is and places the new window there by itself (MONITOR_CURRENT). */
+        int under = getenv("WAYLAND_DISPLAY") ? -1 : monitor_from_mouse();
         w->cfg.monitor = under >= 0 ? under : MONITOR_CURRENT;
     }
     w->core.owner = w;

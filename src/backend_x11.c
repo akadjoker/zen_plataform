@@ -892,6 +892,22 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     int w = cfg->width > 0 ? cfg->width : 640;
     int h = cfg->height > 0 ? cfg->height : 480;
 
+    /* On a chosen monitor the window is placed before it is mapped, as a user position: a
+       compositor (XWayland under mutter) places a new window by itself and a move made right
+       after the map comes too late, so it opened on the primary monitor. */
+    bool placed = false;
+    MonitorInfo place;
+    /* No monitor asked for under XWayland: the compositor places the window (by the real mouse)
+       and it is not moved afterwards. */
+    const bool wm_places = cfg->monitor < 0 && getenv("WAYLAND_DISPLAY") != NULL;
+    if (cfg->monitor >= 0 && backend_monitor_info(cfg->monitor, &place) &&
+        (cfg->x == WINDOW_POS_CENTERED || cfg->x == WINDOW_POS_UNDEFINED || cfg->mode != WINDOW_WINDOWED))
+    {
+        x = place.x + (place.width > w ? (place.width - w) / 2 : 0);
+        y = place.y + (place.height > h ? (place.height - h) / 2 : 0);
+        placed = true;
+    }
+
     b->win = XCreateWindow(g.dpy, g.root, x, y, (unsigned)w, (unsigned)h, 0,
                            vi->depth, InputOutput, vi->visual,
                            CWColormap | CWEventMask | CWBackPixel | CWBorderPixel, &swa);
@@ -937,7 +953,14 @@ BackendWindow *backend_create(const WindowConfig *cfg)
             hints->min_width = hints->max_width = w;
             hints->min_height = hints->max_height = h;
         }
-        if (cfg->x != WINDOW_POS_UNDEFINED && cfg->y != WINDOW_POS_UNDEFINED)
+        if (placed)
+        {
+            hints->flags |= USPosition | PPosition;
+            hints->x = x;
+            hints->y = y;
+        }
+        else if (cfg->x != WINDOW_POS_UNDEFINED && cfg->y != WINDOW_POS_UNDEFINED &&
+                 !(wm_places && (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED)))
         {
             hints->flags |= PPosition;
             hints->x = x;
@@ -945,6 +968,13 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         }
         XSetWMNormalHints(g.dpy, b->win, hints);
         XFree(hints);
+    }
+    /* Full screen from the first frame: the state set before the map makes the window manager
+       map it full screen on the monitor it was placed on. */
+    if (cfg->mode != WINDOW_WINDOWED)
+    {
+        Atom state = g.NET_WM_STATE_FULLSCREEN;
+        XChangeProperty(g.dpy, b->win, g.NET_WM_STATE, XA_ATOM, 32, PropModeReplace, (unsigned char *)&state, 1);
     }
 
     b->text_input = true;
@@ -988,7 +1018,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
        monitor < 0 means MONITOR_CURRENT – resolve to whichever monitor
        contains the window now (after XMapWindow placed it). */
     int target_monitor = cfg->monitor;
-    if (target_monitor < 0)
+    if (target_monitor < 0 && !wm_places)
     {
         /* Find which monitor the window landed on. */
         int nmon = backend_monitor_count();
@@ -1009,7 +1039,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
             target_monitor = 0;
     }
 
-    if (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED)
+    if (!wm_places && (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED))
     {
         MonitorInfo m;
         if (backend_monitor_info(target_monitor, &m))
