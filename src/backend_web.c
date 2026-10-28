@@ -354,11 +354,24 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->render = cfg->render;
     b->css_w = cfg->width > 0 ? cfg->width : 640;
     b->css_h = cfg->height > 0 ? cfg->height : 480;
+    /* No size asked for: the page's stylesheet sizes the canvas, and resizes follow it. */
+    const bool page_sized = cfg->width <= 0 || cfg->height <= 0;
+    if (page_sized)
+    {
+        double css_w, css_h;
+        emscripten_get_element_css_size(CANVAS_TARGET, &css_w, &css_h);
+        if (css_w >= 1.0 && css_h >= 1.0)
+        {
+            b->css_w = (int)css_w;
+            b->css_h = (int)css_h;
+        }
+    }
 
     if (cfg->render == RENDER_PIXELS)
     {
         /* A 2D context, sized 1:1 with the canvas, presented via putImageData. */
-        emscripten_set_element_css_size(CANVAS_TARGET, b->css_w, b->css_h);
+        if (!page_sized)
+            emscripten_set_element_css_size(CANVAS_TARGET, b->css_w, b->css_h);
         emscripten_set_canvas_element_size(CANVAS_TARGET, b->css_w, b->css_h);
         EM_ASM({ Module._pf_ctx = Module['canvas'].getContext('2d'); });
     }
@@ -390,7 +403,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         emscripten_webgl_make_context_current(b->gl);
 
         double dpr = emscripten_get_device_pixel_ratio();
-        emscripten_set_element_css_size(CANVAS_TARGET, b->css_w, b->css_h);
+        if (!page_sized)
+            emscripten_set_element_css_size(CANVAS_TARGET, b->css_w, b->css_h);
         emscripten_set_canvas_element_size(CANVAS_TARGET, (int)(b->css_w * dpr), (int)(b->css_h * dpr));
     }
     b->focused = true;

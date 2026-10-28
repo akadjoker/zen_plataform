@@ -88,7 +88,7 @@ extern "C"
     typedef struct
     {
         const char *title;
-        int width, height; /* screen coordinates, not pixels */
+        int width, height; /* screen coordinates, not pixels; 0 on the web: the canvas as the page lays it out */
         int x, y;          /* WINDOW_POS_CENTERED / _UNDEFINED, or virtual coord */
         int monitor;       /* index, MONITOR_CURRENT or MONITOR_MOUSE */
         WindowMode mode;
