@@ -18,7 +18,9 @@
 #include <android/asset_manager.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#include <android/api-level.h>
 #include <EGL/egl.h>
+#include <jni.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -909,6 +911,96 @@ const char *os_backend_data_dir(void)
 /*  entry point - the glue calls this; we wire callbacks and run user main()  */
 /* ========================================================================== */
 
+/* Immersive: the status and navigation bars hidden, back with a swipe from the
+ * edge. Java calls that touch the window must run on the UI thread, which is
+ * where the activity callbacks run, with activity->env as its JNIEnv; so the
+ * glue's focus callback is wrapped and the bars are hidden each time the
+ * window gains focus (the system shows them again after a dialog or a resume). */
+static void (*g_glue_focus_changed)(ANativeActivity *, int);
+
+/* A lookup that failed leaves an exception pending, and no JNI call may follow it. */
+static bool jni_failed(JNIEnv *env)
+{
+    if (!(*env)->ExceptionCheck(env))
+        return false;
+    (*env)->ExceptionClear(env);
+    return true;
+}
+
+static jobject call_object(JNIEnv *env, jobject target, const char *name, const char *signature)
+{
+    jclass type = (*env)->GetObjectClass(env, target);
+    jmethodID method = (*env)->GetMethodID(env, type, name, signature);
+    (*env)->DeleteLocalRef(env, type);
+    if (!method || jni_failed(env))
+        return NULL;
+    jobject result = (*env)->CallObjectMethod(env, target, method);
+    return jni_failed(env) ? NULL : result;
+}
+
+static void hide_system_bars(ANativeActivity *activity)
+{
+    JNIEnv *env = activity->env;
+    jobject window = call_object(env, activity->clazz, "getWindow", "()Landroid/view/Window;");
+    if (window && android_get_device_api_level() >= 30)
+    {
+        jobject controller = call_object(env, window, "getInsetsController", "()Landroid/view/WindowInsetsController;");
+        jclass types = (*env)->FindClass(env, "android/view/WindowInsets$Type");
+        if (jni_failed(env))
+            types = NULL;
+        jmethodID bars = types ? (*env)->GetStaticMethodID(env, types, "systemBars", "()I") : NULL;
+        if (jni_failed(env))
+            bars = NULL;
+        if (controller && bars)
+        {
+            const jint which = (*env)->CallStaticIntMethod(env, types, bars);
+            jclass type = (*env)->GetObjectClass(env, controller);
+            jmethodID behavior = (*env)->GetMethodID(env, type, "setSystemBarsBehavior", "(I)V");
+            if (jni_failed(env))
+                behavior = NULL;
+            jmethodID hide = (*env)->GetMethodID(env, type, "hide", "(I)V");
+            if (jni_failed(env))
+                hide = NULL;
+            if (behavior)
+                (*env)->CallVoidMethod(env, controller, behavior, 2 /* BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE */);
+            if (hide)
+                (*env)->CallVoidMethod(env, controller, hide, which);
+            (*env)->DeleteLocalRef(env, type);
+        }
+        if (types)
+            (*env)->DeleteLocalRef(env, types);
+        if (controller)
+            (*env)->DeleteLocalRef(env, controller);
+    }
+    else if (window)
+    {
+        jobject decor = call_object(env, window, "getDecorView", "()Landroid/view/View;");
+        if (decor)
+        {
+            jclass type = (*env)->GetObjectClass(env, decor);
+            jmethodID set = (*env)->GetMethodID(env, type, "setSystemUiVisibility", "(I)V");
+            if (jni_failed(env))
+                set = NULL;
+            /* IMMERSIVE_STICKY | FULLSCREEN | HIDE_NAVIGATION and the matching LAYOUT_ flags. */
+            if (set)
+                (*env)->CallVoidMethod(env, decor, set, 0x1000 | 0x4 | 0x2 | 0x400 | 0x200 | 0x100);
+            (*env)->DeleteLocalRef(env, type);
+            (*env)->DeleteLocalRef(env, decor);
+        }
+    }
+    jni_failed(env);
+    if (window)
+        (*env)->DeleteLocalRef(env, window);
+}
+
+static void on_window_focus_changed(ANativeActivity *activity, int focused)
+{
+    if (focused)
+        hide_system_bars(activity);
+    if (g_glue_focus_changed)
+        g_glue_focus_changed(activity, focused);
+}
+
 extern int main(void);
 
 void android_main(struct android_app *app)
@@ -916,6 +1008,8 @@ void android_main(struct android_app *app)
     g_app = app;
     app->onAppCmd = handle_cmd;
     app->onInputEvent = handle_input;
+    g_glue_focus_changed = app->activity->callbacks->onWindowFocusChanged;
+    app->activity->callbacks->onWindowFocusChanged = on_window_focus_changed;
 
     main();
 
