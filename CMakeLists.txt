@@ -37,6 +37,10 @@ elseif(EMSCRIPTEN)
 elseif(ANDROID)
     set(BACKEND_SRC src/backend_android.c src/io_android.c
         ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+    # The glue's entry renamed: backend_android.c's ANativeActivity_onCreate calls it
+    # and wraps the focus callback there, on the UI thread, before any focus event.
+    set_source_files_properties(${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
+        PROPERTIES COMPILE_DEFINITIONS ANativeActivity_onCreate=zen_glue_on_create)
 elseif(WIN32)
     set(BACKEND_SRC src/backend_win32.c)
 elseif(APPLE)

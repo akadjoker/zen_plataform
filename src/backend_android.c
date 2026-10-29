@@ -1001,6 +1001,15 @@ static void on_window_focus_changed(ANativeActivity *activity, int focused)
         g_glue_focus_changed(activity, focused);
 }
 
+void zen_glue_on_create(ANativeActivity *activity, void *saved_state, size_t saved_state_size);
+
+JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *saved_state, size_t saved_state_size)
+{
+    zen_glue_on_create(activity, saved_state, saved_state_size);
+    g_glue_focus_changed = activity->callbacks->onWindowFocusChanged;
+    activity->callbacks->onWindowFocusChanged = on_window_focus_changed;
+}
+
 extern int main(void);
 
 void android_main(struct android_app *app)
@@ -1008,8 +1017,6 @@ void android_main(struct android_app *app)
     g_app = app;
     app->onAppCmd = handle_cmd;
     app->onInputEvent = handle_input;
-    g_glue_focus_changed = app->activity->callbacks->onWindowFocusChanged;
-    app->activity->callbacks->onWindowFocusChanged = on_window_focus_changed;
 
     main();
 
