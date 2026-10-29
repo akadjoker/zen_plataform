@@ -473,7 +473,10 @@ void window_begin_frame(PlatformWindow *w)
     backend_pump_events(w->b, &w->core);
 
     if (s->close_request)
+    {
+        s->close_request = false;
         window_set_should_close(w, true);
+    }
     if (s->exit_key && key_pressed(w, s->exit_key))
         window_set_should_close(w, true);
 }
