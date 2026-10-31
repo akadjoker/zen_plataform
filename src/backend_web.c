@@ -231,10 +231,21 @@ static EM_BOOL on_mouse(int type, const EmscriptenMouseEvent *e, void *user)
         Event ev = {.type = EVENT_MOUSE_MOVE};
         ev.data.mouse.x = (int)e->targetX;
         ev.data.mouse.y = (int)e->targetY;
+        ev.data.mouse.dx = (int)e->movementX;
+        ev.data.mouse.dy = (int)e->movementY;
         enqueue_event(b, &ev);
     }
     else
     {
+        /* The browser only grants the pointer lock inside a gesture handler, so a
+           captured mouse that lost it (Escape, or asked for before any gesture)
+           takes it back on the next press. */
+        if (type == EMSCRIPTEN_EVENT_MOUSEDOWN && b->cursor_mode == MOUSE_MODE_CAPTURED)
+        {
+            EmscriptenPointerlockChangeEvent lock;
+            if (emscripten_get_pointerlock_status(&lock) == EMSCRIPTEN_RESULT_SUCCESS && !lock.isActive)
+                emscripten_request_pointerlock(CANVAS_TARGET, EM_FALSE);
+        }
         int btn = e->button == 0 ? MOUSE_LEFT : e->button == 1 ? MOUSE_MIDDLE
                                             : e->button == 2   ? MOUSE_RIGHT
                                                                : -1;
