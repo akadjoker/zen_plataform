@@ -96,10 +96,10 @@ extern "C"
         GLConfig gl;
         bool resizable;
         bool vsync;
-        bool undecorated;      /* no title bar or border: draw your own (see window_set_hit_test) */
-        bool hidden;           /* create without showing; window_show maps it later. Ignored where a
-                                  window only appears with its first frame (Wayland, web, Android) */
-        WindowKind kind;       /* WINDOW_KIND_NORMAL by default */
+        bool undecorated;       /* no title bar or border: draw your own (see window_set_hit_test) */
+        bool hidden;            /* create without showing; window_show maps it later. Ignored where a
+                                   window only appears with its first frame (Wayland, web, Android) */
+        WindowKind kind;        /* WINDOW_KIND_NORMAL by default */
         PlatformWindow *parent; /* the window a dialog, utility, popup or tooltip belongs to, or NULL */
     } WindowConfig;
 
@@ -134,7 +134,8 @@ extern "C"
         EVENT_WINDOW_RESTORE,
         EVENT_WINDOW_ENTER,         /* pointer entered or left the window */
         EVENT_WINDOW_SCALE_CHANGED, /* moved to a monitor with a different scale */
-        EVENT_WINDOW_DROP,          /* paths are valid only during this event */
+        EVENT_WINDOW_DROP,          /* paths are valid only during this event; on the web the files are in
+                                       the MEMFS under /drop/<name> (see platform_web_fetch_file) */
 
         EVENT_KEY,  /* a physical key changed state */
         EVENT_CHAR, /* text input, one Unicode codepoint */
@@ -259,6 +260,14 @@ extern "C"
        creation. Returns false if the platform could not be brought up. */
     PLATFORM_API bool platform_init(void);
     PLATFORM_API void platform_shutdown(void);
+
+#ifdef __EMSCRIPTEN__
+    /* Web only. Fetches url into the MEMFS file path (directories are created) and then raises
+       EVENT_WINDOW_DROP with that one path, as a dropped file does. The page can show progress by
+       setting Module.onFileProgress(name, loaded, total) and Module.onFileError(name, message);
+       both are also called for files dropped on the canvas. */
+    PLATFORM_API void platform_web_fetch_file(const char *url, const char *path);
+#endif
 
     PLATFORM_API const char *platform_get_error(void);
     PLATFORM_API void platform_clear_error(void);
@@ -788,7 +797,7 @@ extern "C"
     PLATFORM_API PlatformCursor *cursor_create(const uint32_t *argb, int width, int height, int hot_x, int hot_y);
     PLATFORM_API void cursor_destroy(PlatformCursor *cursor);
     PLATFORM_API void mouse_set_cursor_image(PlatformWindow *w, PlatformCursor *cursor);
-    PLATFORM_API void mouse_set_mode(PlatformWindow *w, int mode);     /* MOUSE_MODE_* */
+    PLATFORM_API void mouse_set_mode(PlatformWindow *w, int mode); /* MOUSE_MODE_* */
     /* Keep receiving mouse motion and buttons while the pointer is outside the window,
        as when dragging out of it (SDL_CaptureMouse). Turn it off when the drag ends.
        Returns whether the capture is in effect; another program may hold a grab. */
@@ -838,8 +847,8 @@ extern "C"
     PLATFORM_API void gesture_set_enabled(PlatformWindow *w, unsigned flags); /* GESTURE_* mask, default all */
     PLATFORM_API unsigned gesture_detected(PlatformWindow *w);
     PLATFORM_API bool gesture_is_detected(PlatformWindow *w, unsigned gesture);
-    PLATFORM_API float gesture_hold_duration(PlatformWindow *w); /* seconds, while HOLD */
-    PLATFORM_API void gesture_drag_vector(PlatformWindow *w, float *x, float *y); /* pixels, from the touch-down point */
+    PLATFORM_API float gesture_hold_duration(PlatformWindow *w);                   /* seconds, while HOLD */
+    PLATFORM_API void gesture_drag_vector(PlatformWindow *w, float *x, float *y);  /* pixels, from the touch-down point */
     PLATFORM_API float gesture_drag_angle(PlatformWindow *w);                      /* degrees, set on a swipe; 0 = right, counterclockwise */
     PLATFORM_API void gesture_pinch_vector(PlatformWindow *w, float *x, float *y); /* pixels, first to second finger */
     PLATFORM_API float gesture_pinch_angle(PlatformWindow *w);                     /* degrees, like the drag angle */
@@ -933,7 +942,7 @@ extern "C"
     PLATFORM_API int joystick_hat_count(int index);
     PLATFORM_API float joystick_axis(int index, int axis); /* -1..1, no deadzone */
     PLATFORM_API bool joystick_button(int index, int button);
-    PLATFORM_API int joystick_hat(int index, int hat); /* JOYHAT_* mask, 0 centred */
+    PLATFORM_API int joystick_hat(int index, int hat);  /* JOYHAT_* mask, 0 centred */
     PLATFORM_API int joystick_gamepad_index(int index); /* the gamepad slot of this joystick, or -1 */
 
     /* ========================================================================== */

@@ -321,6 +321,55 @@ static EM_BOOL on_touch(int type, const EmscriptenTouchEvent *e, void *user)
 }
 
 /* ========================================================================== */
+/*  file drop and fetch: files land in the MEMFS, then EVENT_WINDOW_DROP      */
+/* ========================================================================== */
+
+#define WEB_DROP_MAX 64
+
+static char *g_drop_paths[WEB_DROP_MAX];
+static int g_drop_n;
+static int g_drop_staged;
+
+static void web_drop_clear(void)
+{
+    for (int i = 0; i < g_drop_n; i++)
+        free(g_drop_paths[i]);
+    g_drop_n = 0;
+}
+
+/* Called from the JS side, one path per file, then the end call. */
+EMSCRIPTEN_KEEPALIVE void pf_web_drop_add(char *path)
+{
+    if (g_drop_staged == 0)
+        web_drop_clear();
+    if (g_drop_staged < WEB_DROP_MAX)
+        g_drop_paths[g_drop_staged++] = path;
+    else
+        free(path);
+}
+
+EMSCRIPTEN_KEEPALIVE void pf_web_drop_end(void)
+{
+    g_drop_n = g_drop_staged;
+    g_drop_staged = 0;
+    if (g_drop_n == 0 || !g_active)
+        return;
+    Event e = {.type = EVENT_WINDOW_DROP};
+    e.data.drop.count = g_drop_n;
+    e.data.drop.paths = (const char **)g_drop_paths;
+    enqueue_event(g_active, &e);
+}
+
+/* Implemented in web/pf_web.js (a --js-library the platform target adds to the link). */
+extern void pf_web_install_drop(void);
+extern void pf_web_fetch_js(const char *url, const char *path);
+
+void platform_web_fetch_file(const char *url, const char *path)
+{
+    pf_web_fetch_js(url, path);
+}
+
+/* ========================================================================== */
 /*  init / create                                                             */
 /* ========================================================================== */
 
@@ -411,6 +460,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     emscripten_set_touchend_callback(CANVAS_TARGET, b, EM_TRUE, on_touch);
     emscripten_set_touchcancel_callback(CANVAS_TARGET, b, EM_TRUE, on_touch);
 
+    pf_web_install_drop();
     g_active = b;
     return b;
 }

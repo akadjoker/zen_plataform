@@ -59,6 +59,11 @@ endif()
 add_library(platform ${CORE_SRC} ${BACKEND_SRC})
 target_include_directories(platform PUBLIC include PRIVATE src)
 target_compile_features(platform PUBLIC c_std_11)
+if(EMSCRIPTEN)
+    # drop and fetch live in a JS library; it is merged at the final link
+    target_link_options(platform INTERFACE --js-library ${CMAKE_CURRENT_SOURCE_DIR}/web/pf_web.js)
+    set_property(TARGET platform APPEND PROPERTY INTERFACE_LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/pf_web.js)
+endif()
 set_target_properties(platform PROPERTIES
     C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
 if(NOT BUILD_SHARED_LIBS)
