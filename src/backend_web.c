@@ -439,7 +439,19 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         emscripten_webgl_make_context_current(b->gl);
 
         double dpr = emscripten_get_device_pixel_ratio();
-        emscripten_set_element_css_size(CANVAS_TARGET, b->css_w, b->css_h);
+        if (EM_ASM_INT({ var c = Module['canvas']; return c && c.hasAttribute('data-fill-window') ? 1 : 0; }))
+        {
+            /* The page sizes the canvas with CSS (the whole window): take that size, not the config's */
+            double css_w, css_h;
+            emscripten_get_element_css_size(CANVAS_TARGET, &css_w, &css_h);
+            if (css_w >= 1 && css_h >= 1)
+            {
+                b->css_w = (int)css_w;
+                b->css_h = (int)css_h;
+            }
+        }
+        else
+            emscripten_set_element_css_size(CANVAS_TARGET, b->css_w, b->css_h);
         emscripten_set_canvas_element_size(CANVAS_TARGET, (int)(b->css_w * dpr), (int)(b->css_h * dpr));
     }
     b->focused = true;
