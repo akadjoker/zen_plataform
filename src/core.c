@@ -472,6 +472,15 @@ static uint64_t time_base(void)
 /* Whether platform_init has succeeded and platform_shutdown has not been called since. */
 static bool g_ready;
 
+#ifndef __EMSCRIPTEN__
+bool platform_web_download(const char *path, const char *name)
+{
+    (void)path;
+    (void)name;
+    return false;
+}
+#endif
+
 bool platform_init(void)
 {
     if (g_ready)
