@@ -3,18 +3,28 @@
 mergeInto(LibraryManager.library, {
   pf_web_install_drop__deps: ['$stringToNewUTF8', '$FS'],
   pf_web_install_drop: function() {
-    var c = Module['canvas'];
-    if (!c)
-      return;
-    c.addEventListener('dragenter', function(e) { e.preventDefault(); });
+    // the whole page takes part, so a file dropped beside the canvas is not opened by the browser
+    var c = window;
+    var capture = true;
+    c.addEventListener('dragenter', function(e) { e.preventDefault(); }, capture);
     c.addEventListener('dragover', function(e) {
       e.preventDefault();
       if (e.dataTransfer)
         e.dataTransfer.dropEffect = 'copy';
-    });
+    }, capture);
     c.addEventListener('drop', function(e) {
       e.preventDefault();
-      var files = e.dataTransfer ? Array.prototype.slice.call(e.dataTransfer.files) : [];
+      e.stopPropagation();
+      var files = [];
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length)
+        files = Array.prototype.slice.call(e.dataTransfer.files);
+      else if (e.dataTransfer && e.dataTransfer.items)
+        for (var n = 0; n < e.dataTransfer.items.length; n++) {
+          var it = e.dataTransfer.items[n];
+          var f0 = it.kind === 'file' ? it.getAsFile() : null;
+          if (f0)
+            files.push(f0);
+        }
       if (!files.length)
         return;
       try { FS.mkdir('/drop'); } catch (x) {}
@@ -43,7 +53,7 @@ mergeInto(LibraryManager.library, {
         });
       };
       next(0);
-    });
+    }, capture);
   },
 
   pf_web_fetch_js__deps: ['$stringToNewUTF8', '$FS', '$UTF8ToString'],

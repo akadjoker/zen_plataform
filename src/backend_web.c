@@ -414,8 +414,10 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->render = cfg->render;
     b->css_w = cfg->width > 0 ? cfg->width : 640;
     b->css_h = cfg->height > 0 ? cfg->height : 480;
-    /* No size asked for: the page's stylesheet sizes the canvas, and resizes follow it. */
-    const bool page_sized = cfg->width <= 0 || cfg->height <= 0;
+    /* The page's stylesheet sizes the canvas, and resizes follow it: when no size was asked for, or when the canvas carries
+       data-fill-window (the page makes it the whole window, whatever size the config says). */
+    const bool page_sized = cfg->width <= 0 || cfg->height <= 0 ||
+                            EM_ASM_INT({ var c = Module['canvas']; return c && c.hasAttribute('data-fill-window') ? 1 : 0; });
     if (page_sized)
     {
         double css_w, css_h;
