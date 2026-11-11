@@ -332,6 +332,15 @@ static uint64_t now_nanos(void)
 #endif
 }
 
+#ifndef __EMSCRIPTEN__
+bool platform_web_download(const char *path, const char *name)
+{
+    (void)path;
+    (void)name;
+    return false;
+}
+#endif
+
 bool platform_init(void)
 {
     g_time_base = now_nanos();

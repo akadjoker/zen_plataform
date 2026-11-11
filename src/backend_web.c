@@ -363,10 +363,18 @@ EMSCRIPTEN_KEEPALIVE void pf_web_drop_end(void)
 /* Implemented in web/pf_web.js (a --js-library the platform target adds to the link). */
 extern void pf_web_install_drop(void);
 extern void pf_web_fetch_js(const char *url, const char *path);
+extern int pf_web_download_js(const char *path, const char *name);
 
 void platform_web_fetch_file(const char *url, const char *path)
 {
     pf_web_fetch_js(url, path);
+}
+
+bool platform_web_download(const char *path, const char *name)
+{
+    if (!path || !name)
+        return false;
+    return pf_web_download_js(path, name) != 0;
 }
 
 /* ========================================================================== */

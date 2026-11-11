@@ -56,6 +56,30 @@ mergeInto(LibraryManager.library, {
     }, capture);
   },
 
+  pf_web_download_js__deps: ['$FS', '$UTF8ToString'],
+  pf_web_download_js: function(pathPtr, namePtr) {
+    var path = UTF8ToString(pathPtr);
+    var name = UTF8ToString(namePtr);
+    var data;
+    try { data = FS.readFile(path); } catch (x) { return 0; }
+    var blob = new Blob([data], { type: 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    // the browser reads the Blob after the click returns: revoke a moment later
+    setTimeout(function() {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 2000);
+    if (Module['onDownload'])
+      Module['onDownload'](name, data.length);
+    return 1;
+  },
+
   pf_web_fetch_js__deps: ['$stringToNewUTF8', '$FS', '$UTF8ToString'],
   pf_web_fetch_js: function(urlPtr, pathPtr) {
     var url = UTF8ToString(urlPtr);

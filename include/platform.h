@@ -261,6 +261,12 @@ extern "C"
     PLATFORM_API bool platform_init(void);
     PLATFORM_API void platform_shutdown(void);
 
+    /* Hands the file at path (the MEMFS on the web) to the browser as a download called name: a
+       Blob made from the file's bytes, an anchor clicked, the object URL revoked. Web only: on
+       the other platforms it does nothing and returns false. Also false when the file cannot be
+       read. The page can watch downloads through Module.onDownload(name, size). */
+    PLATFORM_API bool platform_web_download(const char *path, const char *name);
+
 #ifdef __EMSCRIPTEN__
     /* Web only. Fetches url into the MEMFS file path (directories are created) and then raises
        EVENT_WINDOW_DROP with that one path, as a dropped file does. The page can show progress by
