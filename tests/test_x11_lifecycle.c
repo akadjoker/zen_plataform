@@ -183,6 +183,61 @@ static void test_cycles(void)
     CHECK(open_fds() == before);
 }
 
+/* A window that cannot be made (a GL version nobody has, too many samples, ES without the extension) must give
+   back everything it took: the X window, the colormap, the context. */
+static void test_failed_creates(void)
+{
+    WindowConfig base = {.title = "fail", .width = 80, .height = 60, .x = WINDOW_POS_UNDEFINED, .y = WINDOW_POS_UNDEFINED};
+    for (int warm = 0; warm < 2; warm++)
+    {
+        WindowConfig cfg = base;
+        cfg.gl.major = 9;
+        cfg.gl.minor = 9;
+        PlatformWindow *w = window_create(&cfg);
+        if (w)
+            window_destroy(w);
+    }
+    const int before = open_fds();
+    int failed = 0;
+    for (int i = 0; i < 60; i++)
+    {
+        WindowConfig cfg = base;
+        switch (i % 3)
+        {
+        case 0:
+            cfg.gl.major = 9;
+            cfg.gl.minor = 9;
+            break;
+        case 1:
+            cfg.gl.msaa = 64;
+            break;
+        default:
+            cfg.gl.profile = GL_PROFILE_ES;
+            cfg.gl.major = 7;
+            cfg.gl.minor = 7;
+            break;
+        }
+        PlatformWindow *w = window_create(&cfg);
+        if (w)
+            window_destroy(w);
+        else
+            failed++;
+    }
+    CHECK(failed > 0);
+    CHECK(window_create(NULL) == NULL);
+    CHECK(open_fds() == before);
+
+    /* and a good one still works after all that */
+    PlatformWindow *ok = window_create(&base);
+    CHECK(ok != NULL);
+    if (ok)
+    {
+        window_begin_frame(ok);
+        window_swap(ok);
+        window_destroy(ok);
+    }
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -193,6 +248,7 @@ int main(void)
     test_resize_storm();
     test_close_twice();
     test_cycles();
+    test_failed_creates();
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
