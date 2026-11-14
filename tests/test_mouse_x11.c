@@ -345,6 +345,30 @@ static void test_release_outside(PlatformWindow *w)
 
 /* ---- (c) enter and leave in a drag, and the order of it all ---- */
 
+/* A drag out of the window and a release outside: "the pointer left" is said once, not again when the button goes up
+   (the server reports the end of the implicit grab as a second crossing). */
+static void test_leave_once(PlatformWindow *w)
+{
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    clear_log();
+    btn(1, true);
+    ptr_in(WIN_W + 80, 80);
+    settle(w);
+    btn(1, false);
+    settle(w);
+    char buf[256];
+    printf("  c: left once: %s\n", describe(buf, sizeof buf));
+    CHECK(count_type(EVENT_WINDOW_ENTER, false, true) == 1);
+    CHECK(count_type(EVENT_WINDOW_ENTER, true, true) == 0);
+    CHECK(!window_is_hovered(w));
+    clear_log();
+    ptr_in(150, 100); /* back in: entered once */
+    settle(w);
+    CHECK(count_type(EVENT_WINDOW_ENTER, true, true) == 1 && window_is_hovered(w));
+}
+
 
 static void test_order(PlatformWindow *w)
 {
@@ -703,6 +727,7 @@ int main(void)
     RUN("focus", test_focus_loss_with_button_held);
     RUN("outside", test_release_outside);
     RUN("order", test_order);
+    RUN("leave", test_leave_once);
     RUN("second", test_second_button);
     RUN("oneframe", test_click_inside_one_frame);
     RUN("nested", test_nested_loop);

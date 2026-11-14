@@ -1854,9 +1854,14 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case EnterNotify:
     case LeaveNotify:
     {
-        b->hovered = ev->type == EnterNotify;
+        const bool entered = ev->type == EnterNotify;
         if (b->cursor_mode == MOUSE_MODE_CAPTURED)
             b->reanchor = true;
+        /* The server also says "left" when a button held outside the window is let go (the implicit grab ends) and
+           "entered" when a grab starts with the pointer inside: the window already knew. */
+        if (entered == b->hovered)
+            break;
+        b->hovered = entered;
         Event e = {.type = EVENT_WINDOW_ENTER};
         e.data.enter.entered = b->hovered;
         push(b, &e);
