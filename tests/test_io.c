@@ -195,6 +195,27 @@ static void test_load_save(void)
     CHECK(!io_save_file(ROOT "/n.bin", NULL, 3));
 }
 
+/* procfs reports a size of 0 for files that do hold text: the size alone cannot say a file is empty. */
+static void test_unsized_files(void)
+{
+#if defined(__linux__)
+    size_t n = 0;
+    char *status = io_load_file("/proc/self/status", &n);
+    CHECK(status != NULL);
+    CHECK(n > 0 && status && strlen(status) == n);
+    CHECK(status && strstr(status, "Name:") != NULL);
+    fs_free(status);
+
+    char *cpuinfo = file_read_text("/proc/cpuinfo");
+    CHECK(cpuinfo && cpuinfo[0] != '\0');
+    fs_free(cpuinfo);
+
+    uint8_t *raw = file_read("/proc/self/stat", &n);
+    CHECK(raw && n > 0);
+    fs_free(raw);
+#endif
+}
+
 static void test_assets(void)
 {
     CHECK(io_save_file(ROOT "/asset.txt", "packed", 6));
@@ -232,6 +253,7 @@ int main(void)
     test_file_modes();
     test_open_errors();
     test_load_save();
+    test_unsized_files();
     test_assets();
 
     cleanup();

@@ -316,7 +316,8 @@ void *io_load(IoStream *s, size_t *out_size, bool close)
     uint8_t *buf;
     int64_t size = s->vt->size(s);
     int64_t pos = size >= 0 ? s->vt->seek(s, 0, IO_SEEK_CUR) : -1;
-    if (pos >= 0 && size >= pos && (uint64_t)(size - pos) < SIZE_MAX)
+    /* Nothing left by the size is not proof of an empty file: procfs and sysfs say 0 for files full of text. */
+    if (pos >= 0 && size > pos && (uint64_t)(size - pos) < SIZE_MAX)
         buf = load_sized(s, (size_t)(size - pos), &len);
     else
         buf = load_unsized(s, &len);
