@@ -161,6 +161,43 @@ static void mouse_touch_emit(Core *core, TouchPhase phase)
     core_push_event(core, &t);
 }
 
+/* Events that only say "it is now here": the newest says all the older ones did. */
+static bool latest_wins(EventType type)
+{
+    return type == EVENT_MOUSE_MOVE || type == EVENT_WINDOW_RESIZE || type == EVENT_WINDOW_FB_RESIZE ||
+           type == EVENT_WINDOW_MOVE;
+}
+
+/* A frame that gathers more events than the list holds (a slow frame, a fast mouse, a window being dragged) keeps
+   the ones that matter: the newest pointer, size or position event replaces the last of its kind, and a key, a
+   button or text pushes out the oldest of those instead of being lost. The state arrays and the key and char
+   queues are filled whatever happens here. */
+static void frame_event_add(InputState *s, const Event *ev)
+{
+    if (s->fe_count < FRAME_EVENT_MAX)
+    {
+        s->frame_events[s->fe_count++] = *ev;
+        return;
+    }
+    if (latest_wins(ev->type))
+    {
+        for (int i = s->fe_count - 1; i >= s->fe_cursor; i--)
+            if (s->frame_events[i].type == ev->type)
+            {
+                s->frame_events[i] = *ev;
+                return;
+            }
+        return;
+    }
+    for (int i = s->fe_cursor; i < s->fe_count; i++)
+        if (latest_wins(s->frame_events[i].type))
+        {
+            memmove(&s->frame_events[i], &s->frame_events[i + 1], (size_t)(s->fe_count - 1 - i) * sizeof s->frame_events[0]);
+            s->frame_events[s->fe_count - 1] = *ev;
+            return;
+        }
+}
+
 void core_push_event(Core *core, const Event *ev)
 {
     InputState *s = &core->in;
@@ -172,8 +209,7 @@ void core_push_event(Core *core, const Event *ev)
     if (core->hook)
         core->hook(core->owner, ev, core->hook_user);
 
-    if (s->fe_count < FRAME_EVENT_MAX)
-        s->frame_events[s->fe_count++] = *ev;
+    frame_event_add(s, ev);
 
     switch (ev->type)
     {

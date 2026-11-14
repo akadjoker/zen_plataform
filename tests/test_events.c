@@ -4,6 +4,7 @@
  */
 #include "platform.h"
 #include "backend_fake.h"
+#include "core_internal.h"
 #include "gamepad_internal.h"
 
 #include <stdio.h>
@@ -90,6 +91,122 @@ static void test_hook(PlatformWindow *w)
     fake_key(w, KEY_B, false, false);
     fake_mouse_button(w, MOUSE_LEFT, false);
     window_begin_frame(w);
+}
+
+/* More events in one frame than the frame list holds (a slow frame, a fast mouse, a window being dragged): what
+   only says "it is now here" is merged, and a key or a button is never lost for the sake of pointer motion. */
+static void test_event_storm(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    while (poll_event(w, &(Event){0}))
+    {
+    }
+    for (int i = 0; i < 3 * FRAME_EVENT_MAX; i++)
+    {
+        Event m = {.type = EVENT_MOUSE_MOVE};
+        m.data.mouse.x = i;
+        m.data.mouse.y = i + 1;
+        core_push_event(&w->core, &m);
+        if (i % 3 == 0)
+        {
+            Event r = {.type = EVENT_WINDOW_RESIZE};
+            r.data.resize.w = 300 + i;
+            r.data.resize.h = 200;
+            core_push_event(&w->core, &r);
+            Event f = {.type = EVENT_WINDOW_FB_RESIZE};
+            f.data.resize.w = 300 + i;
+            f.data.resize.h = 200;
+            core_push_event(&w->core, &f);
+        }
+    }
+    Event k = {.type = EVENT_KEY};
+    k.data.key.key = KEY_Q;
+    k.data.key.down = true;
+    core_push_event(&w->core, &k);
+    Event c = {.type = EVENT_CHAR};
+    c.data.codepoint = 'q';
+    core_push_event(&w->core, &c);
+    Event b = {.type = EVENT_MOUSE_BUTTON};
+    b.data.mouse.button = MOUSE_LEFT;
+    b.data.mouse.down = true;
+    core_push_event(&w->core, &b);
+    Event last_resize = {.type = EVENT_WINDOW_RESIZE};
+    last_resize.data.resize.w = 1999;
+    last_resize.data.resize.h = 777;
+    core_push_event(&w->core, &last_resize);
+    Event last_fb = {.type = EVENT_WINDOW_FB_RESIZE};
+    last_fb.data.resize.w = 1999;
+    last_fb.data.resize.h = 777;
+    core_push_event(&w->core, &last_fb);
+    Event last_move = {.type = EVENT_MOUSE_MOVE};
+    last_move.data.mouse.x = 4242;
+    last_move.data.mouse.y = 4243;
+    core_push_event(&w->core, &last_move);
+
+    int keys = 0, chars = 0, buttons = 0, total = 0;
+    int resize_w = -1, resize_h = -1, fb_w = -1, move_x = -1, move_y = -1;
+    EventType order[4];
+    int ordered = 0;
+    Event e;
+    while (poll_event(w, &e))
+    {
+        total++;
+        if (e.type == EVENT_KEY && e.data.key.key == KEY_Q && e.data.key.down)
+        {
+            keys++;
+            if (ordered < 4)
+                order[ordered++] = e.type;
+        }
+        else if (e.type == EVENT_CHAR && e.data.codepoint == 'q')
+        {
+            chars++;
+            if (ordered < 4)
+                order[ordered++] = e.type;
+        }
+        else if (e.type == EVENT_MOUSE_BUTTON && e.data.mouse.down)
+        {
+            buttons++;
+            if (ordered < 4)
+                order[ordered++] = e.type;
+        }
+        else if (e.type == EVENT_WINDOW_RESIZE)
+        {
+            resize_w = e.data.resize.w;
+            resize_h = e.data.resize.h;
+        }
+        else if (e.type == EVENT_WINDOW_FB_RESIZE)
+            fb_w = e.data.resize.w;
+        else if (e.type == EVENT_MOUSE_MOVE)
+        {
+            move_x = e.data.mouse.x;
+            move_y = e.data.mouse.y;
+        }
+    }
+    CHECK(total <= FRAME_EVENT_MAX);
+    CHECK(keys == 1);
+    CHECK(chars == 1);
+    CHECK(buttons == 1);
+    CHECK(ordered == 3 && order[0] == EVENT_KEY && order[1] == EVENT_CHAR && order[2] == EVENT_MOUSE_BUTTON);
+    CHECK(resize_w == 1999 && resize_h == 777);
+    CHECK(fb_w == 1999);
+    CHECK(move_x == 4242 && move_y == 4243);
+    /* the polled state never depended on the list */
+    int mx = 0, my = 0;
+    mouse_position(w, &mx, &my);
+    CHECK(mx == 4242 && my == 4243);
+    CHECK(key_down(w, KEY_Q));
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+
+    Event up = {.type = EVENT_KEY};
+    up.data.key.key = KEY_Q;
+    core_push_event(&w->core, &up);
+    Event bup = {.type = EVENT_MOUSE_BUTTON};
+    bup.data.mouse.button = MOUSE_LEFT;
+    core_push_event(&w->core, &bup);
+    window_begin_frame(w);
+    while (char_get_pressed(w))
+    {
+    }
 }
 
 static void test_text_event(PlatformWindow *w)
@@ -462,6 +579,7 @@ int main(void)
     if (!w)
         return 1;
     test_hook(w);
+    test_event_storm(w);
     test_text_event(w);
     test_lock_mods(w);
     test_capture(w);
