@@ -100,8 +100,31 @@ static void test_kill(void)
     CHECK(process_exit_code(id) != -1);
 }
 
+/* An exit code of 259 is STILL_ACTIVE to GetExitCodeProcess: it must not read as a process that never ends. The
+   same child is a plain exit code elsewhere. */
+static void test_exit_code_259(void)
+{
+#if defined(_WIN32)
+    const char *args[] = {"/c", "exit 259"};
+    int64_t id = process_spawn("cmd.exe", args, 2, false);
+#else
+    const char *args[] = {"-c", "exit 259"}; /* 259 & 0xff = 3 */
+    int64_t id = process_spawn("/bin/sh", args, 2, false);
+#endif
+    CHECK(id > 0);
+    CHECK(wait_finished(id));
+    CHECK(!process_is_running(id));
+#if defined(_WIN32)
+    CHECK(process_exit_code(id) == 259);
+#else
+    CHECK(process_exit_code(id) == 3);
+#endif
+}
+
 static void test_failures(void)
 {
+    CHECK(process_exit_code(2147480000) == -1); /* an id nobody got from process_spawn */
+    CHECK(!process_is_running(2147480000));
     CHECK(process_spawn(NULL, NULL, 0, false) == 0);
     CHECK(!process_is_running(0));
     CHECK(process_exit_code(-5) == -1);
@@ -122,6 +145,7 @@ int main(void)
     test_exit_code();
     test_arguments();
     test_kill();
+    test_exit_code_259();
     test_failures();
     printf("test_process: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

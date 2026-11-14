@@ -13,9 +13,11 @@ typedef struct
     HANDLE process;
     bool running;
     int exit_code;
+    unsigned long order; /* when it was started: the oldest finished record makes room first */
 } ProcessInfo;
 
 static ProcessInfo g_processes[PROCESS_CAP];
+static unsigned long g_started;
 static SRWLOCK g_lock = SRWLOCK_INIT;
 
 static ProcessInfo *find_process(DWORD pid)
@@ -35,17 +37,19 @@ static ProcessInfo *free_slot(void)
         if (g_processes[i].pid == 0)
             return &g_processes[i];
     }
+    ProcessInfo *oldest = NULL;
     for (int i = 0; i < PROCESS_CAP; i++)
     {
-        if (!g_processes[i].running)
-        {
-            if (g_processes[i].process)
-                CloseHandle(g_processes[i].process);
-            memset(&g_processes[i], 0, sizeof g_processes[i]);
-            return &g_processes[i];
-        }
+        if (!g_processes[i].running && (!oldest || g_processes[i].order < oldest->order))
+            oldest = &g_processes[i];
     }
-    return NULL;
+    if (oldest)
+    {
+        if (oldest->process)
+            CloseHandle(oldest->process);
+        memset(oldest, 0, sizeof *oldest);
+    }
+    return oldest;
 }
 
 static bool needs_quotes(const char *text)
@@ -55,7 +59,7 @@ static bool needs_quotes(const char *text)
     for (const char *p = text; *p; p++)
     {
         char c = *p;
-        if (c == ' ' || c == '\t' || c == '"' || c == '&' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '"' || c == '|' || c == '<' || c == '>' || c == '%' || c == '&' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
             c == '^' || c == '=' || c == ';' || c == '!' || c == '\'' || c == '+' || c == ',' || c == '`' || c == '~')
             return true;
     }
@@ -137,13 +141,12 @@ static bool refresh(ProcessInfo *info)
 {
     if (!info->running)
         return false;
-    DWORD code = 0;
-    if (!GetExitCodeProcess(info->process, &code))
-        return false;
-    if (code == STILL_ACTIVE)
+    /* The exit code alone cannot tell: a process that ends with 259 (STILL_ACTIVE) would read as running for ever. */
+    if (WaitForSingleObject(info->process, 0) == WAIT_TIMEOUT)
         return true;
+    DWORD code = 0;
     info->running = false;
-    info->exit_code = (int)code;
+    info->exit_code = GetExitCodeProcess(info->process, &code) ? (int)code : -1;
     return false;
 }
 
@@ -201,6 +204,7 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
     slot->process = pi.hProcess;
     slot->running = true;
     slot->exit_code = 0;
+    slot->order = ++g_started;
     ReleaseSRWLockExclusive(&g_lock);
     free(wide);
     free(command);
@@ -240,7 +244,7 @@ bool process_kill(int64_t id)
     ProcessInfo *info = find_process((DWORD)id);
     if (info)
     {
-        if (info->running)
+        if (refresh(info)) /* still running: one that already ended cannot be terminated, and needs no killing */
         {
             ok = TerminateProcess(info->process, 0) != 0;
             if (ok)
@@ -257,12 +261,10 @@ bool process_kill(int64_t id)
     }
     else
     {
-        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)id);
-        if (h)
-        {
-            ok = TerminateProcess(h, 0) != 0;
-            CloseHandle(h);
-        }
+        /* Not a child process_spawn started, or one whose record is gone (the number may be somebody else's now):
+           ending it would be ending a stranger. */
+        ReleaseSRWLockExclusive(&g_lock);
+        return error_set("process %lld was not started by process_spawn", (long long)id);
     }
     ReleaseSRWLockExclusive(&g_lock);
     if (!ok)

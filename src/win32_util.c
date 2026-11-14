@@ -3,7 +3,9 @@
 
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 bool win32_widen(const char *utf8, wchar_t *out, size_t cap)
 {
@@ -15,6 +17,46 @@ bool win32_widen(const char *utf8, wchar_t *out, size_t cap)
         out[0] = L'\0';
         return error_set(GetLastError() == ERROR_INSUFFICIENT_BUFFER ? "path too long" : "invalid UTF-8");
     }
+    return true;
+}
+
+bool win32_widen_path(const char *utf8, wchar_t *out, size_t cap)
+{
+    if (!win32_widen(utf8, out, cap))
+        return false;
+    size_t n = wcslen(out);
+    if (n < LONG_PATH_FROM)
+        return true;
+    if (out[0] == L'\\' && out[1] == L'\\' && (out[2] == L'?' || out[2] == L'.') && out[3] == L'\\')
+        return true; /* already the raw form: the caller's own spelling */
+    wchar_t *full = (wchar_t *)malloc(cap * sizeof *full);
+    if (!full)
+        return error_set("out of memory");
+    DWORD got = GetFullPathNameW(out, (DWORD)cap, full, NULL);
+    if (got == 0 || got >= cap)
+    {
+        free(full);
+        out[0] = L'\0';
+        return error_set("path too long");
+    }
+    /* "\\?\" turns off the clean-up Windows does on a name (slashes, "." and ".."): GetFullPathNameW did it */
+    const wchar_t *prefix = L"\\\\?\\";
+    const wchar_t *body = full;
+    if (full[0] == L'\\' && full[1] == L'\\')
+    {
+        prefix = L"\\\\?\\UNC\\";
+        body = full + 2;
+    }
+    size_t pn = wcslen(prefix), bn = wcslen(body);
+    if (pn + bn + 1 > cap)
+    {
+        free(full);
+        out[0] = L'\0';
+        return error_set("path too long");
+    }
+    memcpy(out, prefix, pn * sizeof *out);
+    memcpy(out + pn, body, (bn + 1) * sizeof *out);
+    free(full);
     return true;
 }
 

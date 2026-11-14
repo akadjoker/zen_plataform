@@ -99,7 +99,7 @@ static const IoVTable k_handle_vt = {h_size, h_seek, h_read, h_write, h_flush, h
 IoStream *io_platform_open_file(const char *path, int flags)
 {
     wchar_t wide[PATH_CAP];
-    if (!win32_widen(path, wide, PATH_CAP))
+    if (!win32_widen_path(path, wide, PATH_CAP))
         return NULL;
 
     DWORD access = 0;
@@ -143,7 +143,7 @@ IoStream *io_platform_open_file(const char *path, int flags)
 bool io_platform_replace_file(const char *from, const char *to)
 {
     wchar_t wfrom[PATH_CAP], wto[PATH_CAP];
-    if (!win32_widen(from, wfrom, PATH_CAP) || !win32_widen(to, wto, PATH_CAP))
+    if (!win32_widen_path(from, wfrom, PATH_CAP) || !win32_widen_path(to, wto, PATH_CAP))
         return false;
     if (!MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         return win32_error("cannot rename", from);
@@ -153,5 +153,5 @@ bool io_platform_replace_file(const char *from, const char *to)
 bool io_platform_remove_file(const char *path)
 {
     wchar_t wide[PATH_CAP];
-    return win32_widen(path, wide, PATH_CAP) && DeleteFileW(wide);
+    return win32_widen_path(path, wide, PATH_CAP) && DeleteFileW(wide);
 }

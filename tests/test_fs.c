@@ -148,6 +148,57 @@ static void cleanup(void)
     remove(ROOT);
 }
 
+/* Paths of more than 260 characters, which the Windows file functions only take with the \\?\ prefix (the library
+   adds it): create the folders, write, read, list, rename and remove, at the bottom of a path of ~380 characters. */
+static bool count_entries(const char *path, PathType type, void *user)
+{
+    (void)path;
+    (void)type;
+    (*(int *)user)++;
+    return true;
+}
+
+static void test_long_paths(void)
+{
+    char dir[1024] = ROOT;
+    size_t n = strlen(dir);
+    for (int i = 0; i < 14; i++)
+        n += (size_t)snprintf(dir + n, sizeof dir - n, "/level_%02d_with_a_longish_name", i);
+    CHECK(n > 380);
+    CHECK(fs_create_directory(dir));
+    CHECK(dir_exists(dir));
+    CHECK(fs_create_directory(dir)); /* again: nothing to do */
+
+    char file[1100], moved[1100];
+    snprintf(file, sizeof file, "%s/deep.txt", dir);
+    snprintf(moved, sizeof moved, "%s/moved.txt", dir);
+    CHECK(file_write_text(file, "deep down"));
+    CHECK(file_exists(file));
+    char *back = file_read_text(file);
+    CHECK(back && strcmp(back, "deep down") == 0);
+    fs_free(back);
+    CHECK(file_size(file) == 9);
+
+    CHECK(fs_rename_path(file, moved));
+    CHECK(!file_exists(file) && file_exists(moved));
+
+    int seen = 0;
+    bool ok = fs_enumerate_directory(dir, false, count_entries, &seen);
+    CHECK(ok);
+    CHECK(seen == 1); /* the moved file */
+
+    CHECK(fs_remove_path(moved));
+    CHECK(!file_exists(moved));
+    /* the folders go from the bottom up */
+    for (int i = 13; i >= 0; i--)
+    {
+        CHECK(fs_remove_path(dir));
+        char *cut = strrchr(dir, '/');
+        if (cut)
+            *cut = 0;
+    }
+}
+
 int main(void)
 {
     dir_make(ROOT);
@@ -156,6 +207,7 @@ int main(void)
     test_path_helpers();
     test_directories();
     test_assets();
+    test_long_paths();
 
     cleanup();
 

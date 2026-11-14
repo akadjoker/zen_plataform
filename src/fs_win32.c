@@ -36,7 +36,7 @@ bool fs_get_path_info(const char *path, PathInfo *out)
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (!path || !path[0])
         return error_set("empty path");
-    if (!win32_widen(path, wide, PATH_CAP))
+    if (!win32_widen_path(path, wide, PATH_CAP))
         return false;
     if (!GetFileAttributesExW(wide, GetFileExInfoStandard, &data))
         return win32_error("cannot stat", path);
@@ -56,10 +56,41 @@ static bool make_one(const wchar_t *wide, const char *path)
 {
     if (CreateDirectoryW(wide, NULL))
         return true;
+    DWORD error = GetLastError();
     DWORD attributes = GetFileAttributesW(wide);
-    if (GetLastError() == ERROR_ALREADY_EXISTS && attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY))
+    /* a directory that is there is not a failure, whatever the reason CreateDirectory gave (a drive root and some
+       folders of the system answer "access denied" instead of "already exists") */
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY))
         return true;
+    SetLastError(error);
     return win32_error("cannot create directory", path);
+}
+
+/* How many characters of the path are the root, which exists and is not created: "C:\", "\\?\C:\", the server and
+   share of "\\server\share\" and of "\\?\UNC\server\share\". */
+static size_t root_length(const wchar_t *p)
+{
+    size_t skip = 0;
+    if (wcsncmp(p, L"\\\\?\\UNC\\", 8) == 0)
+        skip = 8;
+    else if (wcsncmp(p, L"\\\\?\\", 4) == 0 && p[4] && p[5] == L':')
+        return p[6] == L'\\' ? 7 : 6;
+    else if (p[0] && p[1] == L':')
+        return (p[2] == L'\\' || p[2] == L'/') ? 3 : 2;
+    else if ((p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/'))
+        skip = 2;
+    else
+        return 0;
+    /* a network path: the server and the share are two components */
+    size_t i = skip;
+    for (int parts = 0; parts < 2 && p[i]; parts++)
+    {
+        while (p[i] && p[i] != L'\\' && p[i] != L'/')
+            i++;
+        if (p[i])
+            i++;
+    }
+    return i;
 }
 
 bool fs_create_directory(const char *path)
@@ -67,13 +98,9 @@ bool fs_create_directory(const char *path)
     wchar_t wide[PATH_CAP];
     if (!path || !path[0])
         return error_set("empty path");
-    if (!win32_widen(path, wide, PATH_CAP))
+    if (!win32_widen_path(path, wide, PATH_CAP))
         return false;
-    size_t root = 0;
-    if (wide[0] && wide[1] == L':')
-        root = (wide[2] == L'\\' || wide[2] == L'/') ? 3 : 2;
-    else if ((wide[0] == L'\\' || wide[0] == L'/') && (wide[1] == L'\\' || wide[1] == L'/'))
-        root = 2;
+    size_t root = root_length(wide);
     for (wchar_t *p = wide + (root ? root : 1); *p; p++)
     {
         if (*p != L'\\' && *p != L'/')
@@ -92,7 +119,7 @@ bool fs_remove_path(const char *path)
     wchar_t wide[PATH_CAP];
     if (!path || !path[0])
         return error_set("empty path");
-    if (!win32_widen(path, wide, PATH_CAP))
+    if (!win32_widen_path(path, wide, PATH_CAP))
         return false;
     DWORD attributes = GetFileAttributesW(wide);
     if (attributes == INVALID_FILE_ATTRIBUTES)
@@ -108,7 +135,7 @@ bool fs_rename_path(const char *from, const char *to)
     wchar_t wfrom[PATH_CAP], wto[PATH_CAP];
     if (!from || !from[0] || !to || !to[0])
         return error_set("empty path");
-    if (!win32_widen(from, wfrom, PATH_CAP) || !win32_widen(to, wto, PATH_CAP))
+    if (!win32_widen_path(from, wfrom, PATH_CAP) || !win32_widen_path(to, wto, PATH_CAP))
         return false;
     if (!MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING))
         return win32_error("cannot rename", from);
@@ -129,7 +156,7 @@ static int enum_dir(EnumState *es)
     wchar_t pattern[PATH_CAP];
     char name[PATH_CAP];
     size_t base = strlen(es->path);
-    if (!win32_widen(es->path, pattern, PATH_CAP - 3))
+    if (!win32_widen_path(es->path, pattern, PATH_CAP - 3))
         return -1;
     size_t wl = wcslen(pattern);
     if (wl > 0 && pattern[wl - 1] != L'\\' && pattern[wl - 1] != L'/')
