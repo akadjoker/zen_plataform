@@ -617,6 +617,49 @@ static void test_nested_loop(PlatformWindow *main_w)
 
 /* ---- the window manager takes a press of the title bar and never gives the release back ---- */
 
+static HitTestResult hit_title(PlatformWindow *w, int x, int y, void *user)
+{
+    (void)w;
+    (void)user;
+    return (y < 30 && x < WIN_W - 40) ? HIT_DRAG : HIT_NORMAL;
+}
+
+static void test_hit_press_taken_by_wm(PlatformWindow *w)
+{
+    window_set_hit_test(w, hit_title, NULL);
+    reset(w);
+    ptr_in(50, 10); /* the title bar */
+    settle(w);
+    clear_log();
+    btn(1, true); /* the window sends _NET_WM_MOVERESIZE and lets go of its grab */
+    settle(w);
+    /* the window manager has the pointer now: the release goes to it, not to the window */
+    int r = XGrabPointer(g_dpy, DefaultRootWindow(g_dpy), False, ButtonPressMask | ButtonReleaseMask,
+                         GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+    CHECK(r == GrabSuccess);
+    btn(1, false);
+    settle(w);
+    XUngrabPointer(g_dpy, CurrentTime);
+    XFlush(g_dpy);
+    settle(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+
+    /* an ordinary click in the body right after must come through whole */
+    clear_log();
+    ptr_in(100, 100);
+    settle(w);
+    btn(1, true);
+    settle(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+    btn(1, false);
+    settle(w);
+    char buf[256];
+    printf("  hit test: click after a title-bar press the WM took: %s\n", describe(buf, sizeof buf));
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    CHECK(count_type(EVENT_MOUSE_BUTTON, true, true) == 1 && count_type(EVENT_MOUSE_BUTTON, false, true) == 1);
+    window_set_hit_test(w, NULL, NULL);
+}
+
 /* ---- MOUSE_MODE_CAPTURED ---- */
 
 int main(void)
@@ -663,6 +706,7 @@ int main(void)
     RUN("second", test_second_button);
     RUN("oneframe", test_click_inside_one_frame);
     RUN("nested", test_nested_loop);
+    RUN("hit", test_hit_press_taken_by_wm);
 
     reset(w);
     XDestroyWindow(g_dpy, g_helper);

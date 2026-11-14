@@ -1801,6 +1801,9 @@ static void process_event(BackendWindow *b, XEvent *ev)
         break;
 
     case ButtonPress:
+        /* A new press means the one the window manager took (a title-bar drag) is over, whether or not the release
+           ever came back to this window: the flag must not swallow the release of this one. */
+        b->hit_press = false;
         if (hit_press(b, ev))
             break;
         handle_button(b, ev, true);
