@@ -1249,8 +1249,10 @@ static void handle_button(BackendWindow *b, XEvent *ev, bool down)
     Event e = {.type = EVENT_MOUSE_BUTTON};
     e.data.mouse.button = mb;
     e.data.mouse.down = down;
-    e.data.mouse.x = ev->xbutton.x;
-    e.data.mouse.y = ev->xbutton.y;
+    /* The captured mouse lives in a virtual space of its own (its moves say so); the real pointer sits near the
+       centre of the window then, so a button must not report that. */
+    e.data.mouse.x = b->cursor_mode == MOUSE_MODE_CAPTURED ? b->virt_x : ev->xbutton.x;
+    e.data.mouse.y = b->cursor_mode == MOUSE_MODE_CAPTURED ? b->virt_y : ev->xbutton.y;
     push(b, &e);
 }
 

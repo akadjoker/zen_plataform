@@ -686,6 +686,94 @@ static void test_hit_press_taken_by_wm(PlatformWindow *w)
 
 /* ---- MOUSE_MODE_CAPTURED ---- */
 
+static void test_captured(PlatformWindow *w)
+{
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    mouse_set_mode(w, MOUSE_MODE_CAPTURED);
+    settle(w);
+    settle(w);
+    CHECK(pointer_grabbed_by_someone());
+
+    clear_log();
+    btn(1, true);
+    settle(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+    ptr_to(WIN_X + WIN_W / 2 + 15, WIN_Y + WIN_H / 2 + 7); /* the pointer is at the centre after the warp */
+    ptr_to(WIN_X + WIN_W / 2 + 40, WIN_Y + WIN_H / 2 + 9);
+    settle(w);
+    char buf[256];
+    printf("  e: captured, button held: %s\n", describe(buf, sizeof buf));
+    CHECK(count_type(EVENT_MOUSE_MOVE, false, false) >= 1);
+    btn(1, false);
+    settle(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    CHECK(count_type(EVENT_MOUSE_BUTTON, false, true) == 1);
+
+    /* a button held, the focus leaves (a modal opens): the grab is let go, the state clears, the release is not lost
+       when the user lets go later */
+    clear_log();
+    btn(1, true);
+    settle(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+    focus_helper();
+    settle(w);
+    printf("  e: captured, focus taken while held: %s\n", describe(buf, sizeof buf));
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    CHECK(count_type(EVENT_MOUSE_BUTTON, false, true) == 1);
+    btn(1, false);
+    settle(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    CHECK(!pointer_grabbed_by_someone()); /* nobody holds the pointer while the window is out of focus */
+
+    /* focus back: the capture resumes, a click through it works */
+    focus_window(w);
+    settle(w);
+    settle(w);
+    CHECK(window_is_focused(w));
+    CHECK(pointer_grabbed_by_someone());
+    clear_log();
+    btn(3, true);
+    btn(3, false);
+    settle(w);
+    printf("  e: captured, click after the return: %s\n", describe(buf, sizeof buf));
+    CHECK(count_type(EVENT_MOUSE_BUTTON, true, true) == 1 && count_type(EVENT_MOUSE_BUTTON, false, true) == 1);
+    CHECK(!mouse_button_down(w, MOUSE_RIGHT));
+
+    mouse_set_mode(w, MOUSE_MODE_NORMAL);
+    settle(w);
+    CHECK(!pointer_grabbed_by_someone());
+}
+
+/* The button events of a captured window say where the (virtual) pointer is, like its moves do, not where the
+   real pointer sits (near the centre of the window). */
+static void test_captured_button_position(PlatformWindow *w)
+{
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    mouse_set_mode(w, MOUSE_MODE_CAPTURED);
+    settle(w);
+    settle(w);
+    clear_log();
+    ptr_to(WIN_X + WIN_W / 2 + 30, WIN_Y + WIN_H / 2 + 20);
+    settle(w);
+    int mx, my;
+    mouse_position(w, &mx, &my);
+    btn(1, true);
+    settle(w);
+    btn(1, false);
+    settle(w);
+    int at = last_index(EVENT_MOUSE_BUTTON);
+    printf("  e: captured, virtual pointer %d,%d, release reports %d,%d\n", mx, my, at >= 0 ? g_log[at].x : -1,
+           at >= 0 ? g_log[at].y : -1);
+    CHECK(at >= 0 && g_log[at].x == mx && g_log[at].y == my);
+
+    mouse_set_mode(w, MOUSE_MODE_NORMAL);
+    settle(w);
+}
+
 int main(void)
 {
     g_dpy = XOpenDisplay(NULL);
@@ -732,6 +820,8 @@ int main(void)
     RUN("oneframe", test_click_inside_one_frame);
     RUN("nested", test_nested_loop);
     RUN("hit", test_hit_press_taken_by_wm);
+    RUN("captured", test_captured);
+    RUN("capbutton", test_captured_button_position);
 
     reset(w);
     XDestroyWindow(g_dpy, g_helper);
