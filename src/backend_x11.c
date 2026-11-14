@@ -2124,6 +2124,23 @@ static void defer_item(BackendWindow *owner, const PendingX *item)
     owner->pending[owner->pending_n++] = *item;
 }
 
+/* A captured window that another window's pump finds the focus change of (the nested modal loop: only the modal
+   window is pumped) cannot wait for its own pump to let go of the pointer, or the user could not reach the modal. The
+   rest of the focus event is still the owner's to handle, in order, when it pumps. */
+static void focus_moves_pointer_grab(BackendWindow *owner, const XEvent *ev)
+{
+    if (owner->cursor_mode != MOUSE_MODE_CAPTURED)
+        return;
+    if (ev->xfocus.mode == NotifyGrab || ev->xfocus.mode == NotifyUngrab)
+        return;
+    if (ev->type == FocusOut && ev->xfocus.detail == NotifyInferior)
+        return;
+    if (ev->type == FocusIn)
+        grab_pointer(owner);
+    else
+        release_pointer(owner);
+}
+
 static void defer_event(BackendWindow *owner, const XEvent *ev)
 {
     PendingX item;
@@ -2300,7 +2317,11 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
         XPointer found = NULL;
         if (XFindContext(g.dpy, ev.xany.window, g.ctx, &found) == 0 && found)
+        {
+            if (ev.type == FocusIn || ev.type == FocusOut)
+                focus_moves_pointer_grab((BackendWindow *)found, &ev);
             defer_event((BackendWindow *)found, &ev);
+        }
         /* anything else (the clipboard helper, a window already destroyed) is dropped */
     }
     flush_preedit(b); /* the input method may have changed the composition while filtering */

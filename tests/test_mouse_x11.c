@@ -639,6 +639,79 @@ static void test_nested_loop(PlatformWindow *main_w)
         pump_once(main_w);
 }
 
+/* The captured mouse and a nested modal loop: the main window is not pumped while the modal one runs, so the focus
+   loss it is owed must still let go of the pointer at once, or the pointer stays locked in the main window and the
+   user cannot reach the modal. */
+static void test_captured_nested(PlatformWindow *main_w)
+{
+    WindowConfig cfg = {.title = "mouse_modal2", .width = 120, .height = 90, .x = 900, .y = 100, .render = RENDER_PIXELS};
+    PlatformWindow *modal = window_create(&cfg);
+    CHECK(modal != NULL);
+    if (!modal)
+        return;
+    reset(main_w);
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(modal);
+        window_begin_frame(main_w);
+        time_sleep(5);
+    }
+    ptr_in(100, 80);
+    settle(main_w);
+    mouse_set_mode(main_w, MOUSE_MODE_CAPTURED);
+    settle(main_w);
+    CHECK(pointer_grabbed_by_someone());
+    btn(1, true);
+    settle(main_w);
+    CHECK(mouse_button_down(main_w, MOUSE_LEFT));
+
+    /* the modal takes the focus; from now on only the modal is pumped */
+    XSetInputFocus(g_dpy, xwin(modal), RevertToPointerRoot, CurrentTime);
+    XSync(g_dpy, False);
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(3);
+    }
+    bool locked = pointer_grabbed_by_someone();
+    printf("  e: captured main, modal pumping alone: pointer still held by the main window: %d\n", locked);
+    CHECK(!locked);
+
+    /* the user lets go and clicks in the modal; the main window comes back, pumps, and finds a consistent state */
+    btn(1, false);
+    ptr_to(940, 130);
+    XSync(g_dpy, False);
+    for (int i = 0; i < 5; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(3);
+    }
+    focus_window(main_w);
+    XSync(g_dpy, False);
+    for (int i = 0; i < 5; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(3);
+    }
+    clear_log();
+    for (int i = 0; i < 10; i++)
+    {
+        pump_once(main_w);
+        time_sleep(3);
+    }
+    char buf[256];
+    printf("  e: captured main, after the modal: %s\n", describe(buf, sizeof buf));
+    CHECK(!mouse_button_down(main_w, MOUSE_LEFT));
+    CHECK(window_is_focused(main_w));
+    CHECK(pointer_grabbed_by_someone()); /* the capture is back with the focus */
+    mouse_set_mode(main_w, MOUSE_MODE_NORMAL);
+    settle(main_w);
+    CHECK(!pointer_grabbed_by_someone());
+    window_destroy(modal);
+    for (int i = 0; i < 5; i++)
+        pump_once(main_w);
+}
+
 /* ---- the window manager takes a press of the title bar and never gives the release back ---- */
 
 static HitTestResult hit_title(PlatformWindow *w, int x, int y, void *user)
@@ -819,6 +892,7 @@ int main(void)
     RUN("second", test_second_button);
     RUN("oneframe", test_click_inside_one_frame);
     RUN("nested", test_nested_loop);
+    RUN("capnested", test_captured_nested);
     RUN("hit", test_hit_press_taken_by_wm);
     RUN("captured", test_captured);
     RUN("capbutton", test_captured_button_position);
