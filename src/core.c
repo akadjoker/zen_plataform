@@ -227,6 +227,29 @@ void core_push_event(Core *core, const Event *ev)
     if (s->real_touch > 0 && !s->synth && (ev->type == EVENT_MOUSE_MOVE || ev->type == EVENT_MOUSE_BUTTON))
         return;
 
+    /* A release of a button that is not held (its press went to another window, or the focus loss already let it go)
+       says nothing new: every release a program sees has its press. */
+    if (ev->type == EVENT_MOUSE_BUTTON && !ev->data.mouse.down && ev->data.mouse.button >= 0 &&
+        ev->data.mouse.button < MOUSE_BUTTON_MAX && !s->mouse_down[ev->data.mouse.button])
+        return;
+
+    /* Losing the focus lets go of every button: the stream says so too, before the loss, so whoever follows the events
+       (not only the polled state) does not keep a button down. */
+    if (ev->type == EVENT_WINDOW_FOCUS && !ev->data.focus.gained)
+    {
+        for (int b = 0; b < MOUSE_BUTTON_MAX; b++)
+        {
+            if (!s->mouse_down[b])
+                continue;
+            Event up = {.type = EVENT_MOUSE_BUTTON};
+            up.data.mouse.button = b;
+            up.data.mouse.down = false;
+            up.data.mouse.x = s->mouse_x;
+            up.data.mouse.y = s->mouse_y;
+            core_push_event(core, &up);
+        }
+    }
+
     if (core->hook)
         core->hook(core->owner, ev, core->hook_user);
 

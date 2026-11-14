@@ -165,6 +165,16 @@ if(PLATFORM_BACKEND_X11)
     endif()
     add_test(NAME test_input_x11 COMMAND test_input_x11)
     set_tests_properties(test_input_x11 PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Buttons and drags with the pointer moved by XTest (the server's own pointer).
+    add_executable(test_mouse_x11 test_mouse_x11.c)
+    target_link_libraries(test_mouse_x11 PRIVATE platform)
+    if(XTEST_LIB AND XTEST_INCLUDE)
+        target_compile_definitions(test_mouse_x11 PRIVATE HAVE_XTEST=1)
+        target_link_libraries(test_mouse_x11 PRIVATE ${XTEST_LIB})
+    endif()
+    add_test(NAME test_mouse_x11 COMMAND test_mouse_x11)
+    set_tests_properties(test_mouse_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
 
 

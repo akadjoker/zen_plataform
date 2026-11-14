@@ -131,6 +131,72 @@ static void test_event_storm_deltas(PlatformWindow *w)
     CHECK(dy == -2 * moves);
 }
 
+/* The focus going away lets go of what is held, in the stream too (not only in the polled state), once; the
+   release the system sends later for the same press is not a second one. */
+static void test_focus_loss_releases(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    while (poll_event(w, &(Event){0}))
+    {
+    }
+    touch_set_mouse_emulation(w, true);
+    fake_mouse_move(w, 40, 50);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_button(w, MOUSE_RIGHT, true);
+    window_begin_frame(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT) && mouse_button_down(w, MOUSE_RIGHT));
+    while (poll_event(w, &(Event){0}))
+    {
+    }
+
+    Event lost = {.type = EVENT_WINDOW_FOCUS};
+    lost.data.focus.gained = false;
+    fake_inject_event(w, &lost);
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && !mouse_button_down(w, MOUSE_RIGHT));
+    Event e;
+    int releases = 0, focus_at = -1, last_release = -1, touch_up = 0, i = 0;
+    while (poll_event(w, &e))
+    {
+        if (e.type == EVENT_MOUSE_BUTTON && !e.data.mouse.down)
+        {
+            releases++;
+            last_release = i;
+            CHECK(e.data.mouse.x == 40 && e.data.mouse.y == 50);
+        }
+        if (e.type == EVENT_WINDOW_FOCUS)
+            focus_at = i;
+        if (e.type == EVENT_TOUCH && e.data.touch.phase == TOUCH_UP)
+            touch_up++;
+        i++;
+    }
+    CHECK(releases == 2);
+    CHECK(focus_at > last_release && last_release >= 0); /* the releases come before the loss */
+    CHECK(touch_up == 1); /* the finger the left button was standing for lifted too */
+
+    /* the system's own release, late, for a press that was already let go of */
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    window_begin_frame(w);
+    CHECK(!poll_event(w, &e));
+
+    /* the next click is a whole click again, a finger included */
+    Event back = {.type = EVENT_WINDOW_FOCUS};
+    back.data.focus.gained = true;
+    fake_inject_event(w, &back);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    window_begin_frame(w);
+    int touch_down = 0;
+    while (poll_event(w, &e))
+        if (e.type == EVENT_TOUCH && e.data.touch.phase == TOUCH_DOWN)
+            touch_down++;
+    CHECK(touch_down == 1);
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    touch_set_mouse_emulation(w, false);
+}
+
 static void test_event_storm(PlatformWindow *w)
 {
     window_begin_frame(w);
@@ -617,6 +683,7 @@ int main(void)
     test_hook(w);
     test_event_storm(w);
     test_event_storm_deltas(w);
+    test_focus_loss_releases(w);
     test_text_event(w);
     test_lock_mods(w);
     test_capture(w);
