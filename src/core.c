@@ -172,6 +172,18 @@ static bool latest_wins(EventType type)
    the ones that matter: the newest pointer, size or position event replaces the last of its kind, and a key, a
    button or text pushes out the oldest of those instead of being lost. The state arrays and the key and char
    queues are filled whatever happens here. */
+/* Replaces an older event by a newer one of the same kind; a mouse move keeps the sum of both deltas. */
+static void fold_move(Event *older, const Event *newer)
+{
+    Event e = *newer;
+    if (e.type == EVENT_MOUSE_MOVE)
+    {
+        e.data.mouse.dx += older->data.mouse.dx;
+        e.data.mouse.dy += older->data.mouse.dy;
+    }
+    *older = e;
+}
+
 static void frame_event_add(InputState *s, const Event *ev)
 {
     if (s->fe_count < FRAME_EVENT_MAX)
@@ -184,7 +196,7 @@ static void frame_event_add(InputState *s, const Event *ev)
         for (int i = s->fe_count - 1; i >= s->fe_cursor; i--)
             if (s->frame_events[i].type == ev->type)
             {
-                s->frame_events[i] = *ev;
+                fold_move(&s->frame_events[i], ev);
                 return;
             }
         return;
@@ -192,6 +204,15 @@ static void frame_event_add(InputState *s, const Event *ev)
     for (int i = s->fe_cursor; i < s->fe_count; i++)
         if (latest_wins(s->frame_events[i].type))
         {
+            /* The relative motion of a dropped move goes into the next move, so captured-mouse deltas add up. */
+            if (s->frame_events[i].type == EVENT_MOUSE_MOVE)
+                for (int j = i + 1; j < s->fe_count; j++)
+                    if (s->frame_events[j].type == EVENT_MOUSE_MOVE)
+                    {
+                        s->frame_events[j].data.mouse.dx += s->frame_events[i].data.mouse.dx;
+                        s->frame_events[j].data.mouse.dy += s->frame_events[i].data.mouse.dy;
+                        break;
+                    }
             memmove(&s->frame_events[i], &s->frame_events[i + 1], (size_t)(s->fe_count - 1 - i) * sizeof s->frame_events[0]);
             s->frame_events[s->fe_count - 1] = *ev;
             return;

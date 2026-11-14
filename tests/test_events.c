@@ -95,6 +95,42 @@ static void test_hook(PlatformWindow *w)
 
 /* More events in one frame than the frame list holds (a slow frame, a fast mouse, a window being dragged): what
    only says "it is now here" is merged, and a key or a button is never lost for the sake of pointer motion. */
+/* A storm of captured-mouse moves: the moves that are merged or dropped keep their relative motion, so the
+   dx/dy read from the events add up to everything that was pushed. */
+static void test_event_storm_deltas(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    while (poll_event(w, &(Event){0}))
+    {
+    }
+    const int moves = 4 * FRAME_EVENT_MAX;
+    for (int i = 0; i < moves; i++)
+    {
+        Event m = {.type = EVENT_MOUSE_MOVE};
+        m.data.mouse.x = i;
+        m.data.mouse.dx = 1;
+        m.data.mouse.dy = -2;
+        core_push_event(&w->core, &m);
+        if (i % 8 == 0)
+        {
+            Event k = {.type = EVENT_KEY};
+            k.data.key.key = KEY_A;
+            k.data.key.down = (i % 16) == 0;
+            core_push_event(&w->core, &k);
+        }
+    }
+    int dx = 0, dy = 0;
+    Event e;
+    while (poll_event(w, &e))
+        if (e.type == EVENT_MOUSE_MOVE)
+        {
+            dx += e.data.mouse.dx;
+            dy += e.data.mouse.dy;
+        }
+    CHECK(dx == moves);
+    CHECK(dy == -2 * moves);
+}
+
 static void test_event_storm(PlatformWindow *w)
 {
     window_begin_frame(w);
@@ -580,6 +616,7 @@ int main(void)
         return 1;
     test_hook(w);
     test_event_storm(w);
+    test_event_storm_deltas(w);
     test_text_event(w);
     test_lock_mods(w);
     test_capture(w);
