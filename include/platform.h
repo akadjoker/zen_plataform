@@ -503,6 +503,30 @@ extern "C"
     PLATFORM_API bool process_kill(int64_t id);
 
     /* ========================================================================== */
+    /*  Crash report                                                              */
+    /* ========================================================================== */
+
+    /* Called from inside the signal handler, with the report file open as fd: add to the
+       report with crash_write. Only functions that are safe in a signal handler may be used
+       here (write, ...): no malloc, no printf, no locks. */
+    typedef void (*CrashCallback)(int fd, void *user);
+
+    /* Makes the program write a text report to `path` when it dies from SIGSEGV, SIGBUS,
+       SIGFPE, SIGILL or SIGABRT (POSIX), and then die as it would have: core dump, exit status
+       and debugger are as without it. The report is `header` (text of the program's own, up to
+       1023 bytes: its version, when it started), the signal and the address that faulted, what
+       `extra` writes (may be NULL), and a backtrace of the crashing thread where the C library
+       has one. The folder of `path` has to exist. path and header are copied; a second call
+       replaces the first. The handlers run on a stack of their own for the thread that calls
+       this, so a stack overflow there is reported too. Returns false, and does nothing, where
+       this is not supported (Windows, the web). */
+    PLATFORM_API bool crash_handler_install(const char *path, const char *header, CrashCallback extra, void *user);
+    /* Puts the handlers that were there before back. */
+    PLATFORM_API void crash_handler_remove(void);
+    /* Writes text to fd (looping over partial writes), for CrashCallback: safe in a signal handler. */
+    PLATFORM_API void crash_write(int fd, const char *text);
+
+    /* ========================================================================== */
     /*  Native handles                                                            */
     /* ========================================================================== */
 
