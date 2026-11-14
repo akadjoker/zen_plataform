@@ -135,6 +135,11 @@ if(PLATFORM_BACKEND_X11)
     add_test(NAME test_x11_window COMMAND test_x11_window)
     set_tests_properties(test_x11_window PROPERTIES SKIP_RETURN_CODE 77)
 
+    add_executable(test_gl_worker_x11 test_gl_worker_x11.c)
+    target_link_libraries(test_gl_worker_x11 PRIVATE platform)
+    add_test(NAME test_gl_worker_x11 COMMAND test_gl_worker_x11)
+    set_tests_properties(test_gl_worker_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
     add_executable(test_x11_lifecycle test_x11_lifecycle.c)
     target_link_libraries(test_x11_lifecycle PRIVATE platform)
     add_test(NAME test_x11_lifecycle COMMAND test_x11_lifecycle)
