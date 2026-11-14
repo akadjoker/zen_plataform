@@ -2072,18 +2072,44 @@ typedef struct PendingX
    (edges, the frame's event list) in step with its own begin_frame. */
 #define PENDING_MAX 4096
 
+/* A window nobody pumps for a while (the one under a nested modal loop) still gets the pointer's motion over it, a
+   lot of it. When the list is full, a motion directly followed by another motion says nothing the next one does not,
+   so those go; every button, key, focus and crossing event stays, in order. Returns how many were removed. */
+static int pending_compact(BackendWindow *owner)
+{
+    int kept = 0;
+    for (int i = 0; i < owner->pending_n; i++)
+    {
+        const PendingX *it = &owner->pending[i];
+        const PendingX *next = i + 1 < owner->pending_n ? &owner->pending[i + 1] : NULL;
+        if (!it->is_touch && !it->im_taken && it->ev.type == MotionNotify && next && !next->is_touch &&
+            !next->im_taken && next->ev.type == MotionNotify)
+            continue;
+        owner->pending[kept++] = *it;
+    }
+    int removed = owner->pending_n - kept;
+    owner->pending_n = kept;
+    return removed;
+}
+
 static void defer_item(BackendWindow *owner, const PendingX *item)
 {
     if (owner->pending_n == owner->pending_cap)
     {
         if (owner->pending_cap >= PENDING_MAX)
-            return; /* a window nobody pumps: drop rather than grow without bound */
-        int cap = owner->pending_cap ? owner->pending_cap * 2 : 64;
-        PendingX *grown = realloc(owner->pending, (size_t)cap * sizeof *grown);
-        if (!grown)
-            return;
-        owner->pending = grown;
-        owner->pending_cap = cap;
+        {
+            if (pending_compact(owner) == 0)
+                return; /* a window nobody pumps, and nothing to spare: drop rather than grow without bound */
+        }
+        else
+        {
+            int cap = owner->pending_cap ? owner->pending_cap * 2 : 64;
+            PendingX *grown = realloc(owner->pending, (size_t)cap * sizeof *grown);
+            if (!grown)
+                return;
+            owner->pending = grown;
+            owner->pending_cap = cap;
+        }
     }
     owner->pending[owner->pending_n++] = *item;
 }

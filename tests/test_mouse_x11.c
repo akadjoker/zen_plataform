@@ -520,6 +520,101 @@ static void test_click_inside_one_frame(PlatformWindow *w)
 
 /* ---- (e) a nested loop that pumps another window while this one is not pumped ---- */
 
+static void test_nested_loop(PlatformWindow *main_w)
+{
+    WindowConfig cfg = {.title = "mouse_modal", .width = 120, .height = 90, .x = 900, .y = 100, .render = RENDER_PIXELS};
+    PlatformWindow *modal = window_create(&cfg);
+    CHECK(modal != NULL);
+    if (!modal)
+        return;
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(modal);
+        window_begin_frame(main_w);
+        time_sleep(5);
+    }
+
+    /* a press on the main window opens the modal; the release and a lot of motion arrive while only the modal
+       is pumped; when the main window pumps again it still gets all of it */
+    reset(main_w);
+    ptr_in(100, 80);
+    settle(main_w);
+    clear_log();
+    btn(1, true);
+    XSync(g_dpy, False);
+    time_sleep(20);
+    window_begin_frame(main_w);
+    CHECK(mouse_button_down(main_w, MOUSE_LEFT));
+    for (int i = 0; i < 6000; i++) /* a long modal: more motion than the deferred list holds */
+    {
+        ptr_in(20 + (i * 7) % 250, 20 + (i * 3) % 150);
+        if (i % 500 == 0)
+        {
+            XSync(g_dpy, False);
+            window_begin_frame(modal); /* only the modal loop runs */
+        }
+    }
+    btn(1, false);
+    ptr_in(77, 66);
+    XSync(g_dpy, False);
+    for (int i = 0; i < 20; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(2);
+    }
+    /* the nested loop is over: the main window is pumped again */
+    for (int i = 0; i < 10; i++)
+    {
+        pump_once(main_w);
+        time_sleep(2);
+    }
+    char buf[256];
+    describe(buf, sizeof buf);
+    printf("  e: main window after a long nested loop: %d events, %d down, %d up\n", g_n,
+           count_type(EVENT_MOUSE_BUTTON, true, true), count_type(EVENT_MOUSE_BUTTON, false, true));
+    CHECK(!mouse_button_down(main_w, MOUSE_LEFT)); /* the release was not dropped with the surplus motion */
+    CHECK(count_type(EVENT_MOUSE_BUTTON, false, true) == 1);
+    int px, py;
+    mouse_position(main_w, &px, &py);
+    CHECK(px == 77 && py == 66);
+
+    /* focus: the modal takes it and gives it back while the main window is not pumped */
+    reset(main_w);
+    XSetInputFocus(g_dpy, xwin(modal), RevertToPointerRoot, CurrentTime);
+    XSync(g_dpy, False);
+    for (int i = 0; i < 5; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(2);
+    }
+    for (int i = 0; i < 5000; i++)
+        ptr_in(20 + (i * 5) % 250, 20 + (i * 3) % 150);
+    XSync(g_dpy, False);
+    for (int i = 0; i < 5; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(2);
+    }
+    focus_window(main_w);
+    XSync(g_dpy, False);
+    for (int i = 0; i < 5; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(2);
+    }
+    for (int i = 0; i < 10; i++)
+    {
+        pump_once(main_w);
+        time_sleep(2);
+    }
+    CHECK(window_is_focused(main_w));
+    CHECK(!window_is_focused(modal));
+
+    window_destroy(modal);
+    for (int i = 0; i < 5; i++)
+        pump_once(main_w);
+}
+
 /* ---- the window manager takes a press of the title bar and never gives the release back ---- */
 
 /* ---- MOUSE_MODE_CAPTURED ---- */
@@ -567,6 +662,7 @@ int main(void)
     RUN("order", test_order);
     RUN("second", test_second_button);
     RUN("oneframe", test_click_inside_one_frame);
+    RUN("nested", test_nested_loop);
 
     reset(w);
     XDestroyWindow(g_dpy, g_helper);
