@@ -10,9 +10,15 @@
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #define _POSIX_C_SOURCE 200809L
+#include <pthread.h>
 #include <signal.h>
+#include <sys/resource.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -53,6 +59,17 @@ static char *read_all(const char *path)
     return text;
 }
 
+/* The children die on purpose: no core dump, which on some systems means a crash reporter run for each of them (a
+   second or more, with the process waiting for it). A process that is not dumpable gets none, whatever the limit. */
+static void no_core_dump(void)
+{
+    struct rlimit none = {0, 0};
+    setrlimit(RLIMIT_CORE, &none);
+#ifdef __linux__
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+#endif
+}
+
 static void overflow(volatile int depth)
 {
     volatile char block[4096];
@@ -68,6 +85,7 @@ static void run_child(const char *path, int kind, int *signal_seen, char **repor
     pid_t pid = fork();
     if (pid == 0)
     {
+        no_core_dump();
         if (!crash_handler_install(path, "ZenTest 1.0 report", extra_section, (void *)"hello from the callback"))
             _exit(3);
         if (kind == 0)
@@ -117,6 +135,122 @@ static void test_crash_reports(void)
     remove(path);
 }
 
+/* Several threads fault at the same instant. Only one of them may write the report: the others wait for it
+   to end the process. The callback stays in the handler for a while, so a second writer is not missed. */
+#define STORM_THREADS 6
+#define STORM_ROUNDS 150
+
+static volatile int g_storm_arrived;
+
+static void slow_extra_section(int fd, void *user)
+{
+    (void)user;
+    crash_write(fd, "extra section: once\n");
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    do
+        clock_gettime(CLOCK_MONOTONIC, &t);
+    while ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) < 3000000L);
+}
+
+static void *storm_thread(void *arg)
+{
+    (void)arg;
+    __atomic_add_fetch(&g_storm_arrived, 1, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&g_storm_arrived, __ATOMIC_SEQ_CST) < STORM_THREADS)
+    {
+    }
+    *(volatile int *)0 = 1;
+    return NULL;
+}
+
+static int count_of(const char *text, const char *needle)
+{
+    int n = 0;
+    for (const char *p = text; (p = strstr(p, needle)) != NULL; p += strlen(needle))
+        n++;
+    return n;
+}
+
+static void test_crash_in_many_threads(void)
+{
+    const char *tmp = getenv("TMPDIR");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/zen_crash_storm_%d.txt", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+    int doubled = 0, missing = 0, wrong_death = 0;
+    for (int round = 0; round < STORM_ROUNDS; round++)
+    {
+        remove(path);
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            no_core_dump();
+            if (!crash_handler_install(path, "storm", slow_extra_section, NULL))
+                _exit(3);
+            pthread_t threads[STORM_THREADS];
+            g_storm_arrived = 0; /* this thread faults too, so STORM_THREADS in all */
+            for (int i = 0; i < STORM_THREADS - 1; i++)
+                pthread_create(&threads[i], NULL, storm_thread, NULL);
+            storm_thread(NULL);
+            _exit(4);
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGSEGV)
+            wrong_death++;
+        char *report = read_all(path);
+        if (!report)
+            missing++;
+        else
+        {
+            if (count_of(report, "extra section: once") != 1 || count_of(report, "signal 11 (SIGSEGV") != 1)
+                doubled++;
+            free(report);
+        }
+    }
+    remove(path);
+    printf("threads crashing together: %d rounds, %d wrote the report twice, %d without report, %d died other\n",
+           STORM_ROUNDS, doubled, missing, wrong_death);
+    CHECK(doubled == 0);
+    CHECK(missing == 0);
+    CHECK(wrong_death == 0);
+}
+
+/* A report callback that itself crashes: the process still dies of the signal, at once (not by the alarm 10 s
+   later), and what was written before is in the file. */
+static void faulty_extra_section(int fd, void *user)
+{
+    (void)user;
+    crash_write(fd, "before the second fault\n");
+    *(volatile int *)0 = 2;
+}
+
+static void test_fault_inside_the_handler(void)
+{
+    const char *tmp = getenv("TMPDIR");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/zen_crash_nested_%d.txt", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+    remove(path);
+    time_t start = time(NULL);
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        no_core_dump();
+        if (!crash_handler_install(path, "nested", faulty_extra_section, NULL))
+            _exit(3);
+        *(volatile int *)0 = 1;
+        _exit(4);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV);
+    CHECK(time(NULL) - start < 5);
+    char *report = read_all(path);
+    CHECK(report != NULL && strstr(report, "before the second fault") != NULL);
+    free(report);
+    remove(path);
+}
+
 static void test_arguments(void)
 {
     CHECK(!crash_handler_install(NULL, "x", NULL, NULL));
@@ -134,6 +268,8 @@ int main(void)
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
     test_arguments();
     test_crash_reports();
+    test_crash_in_many_threads();
+    test_fault_inside_the_handler();
 #else
     CHECK(!crash_handler_install("crash.txt", "x", NULL, NULL));
     crash_handler_remove();

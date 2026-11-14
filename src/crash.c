@@ -19,7 +19,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -44,7 +47,10 @@ static void *g_user;
 static bool g_installed;
 static struct sigaction g_previous[CRASH_SIGNALS];
 static char g_stack[CRASH_STACK_BYTES];
-static volatile sig_atomic_t g_busy;
+/* g_busy is taken with one atomic exchange: of the threads that crash at the same time exactly one gets 0 back and
+   writes the report. g_owner is that thread, to tell a fault inside the report code from another thread's crash. */
+static atomic_int g_busy;
+static atomic_uintptr_t g_owner;
 
 void crash_write(int fd, const char *text)
 {
@@ -131,6 +137,15 @@ static void write_report(int fd, int sig, const siginfo_t *info)
 #endif
 }
 
+static void die_by_default(int sig)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    sigaction(sig, &action, NULL);
+    raise(sig);
+}
+
 static void on_signal(int sig, siginfo_t *info, void *context)
 {
     (void)context;
@@ -138,22 +153,24 @@ static void on_signal(int sig, siginfo_t *info, void *context)
     // this one, is stopped by the alarm.
     signal(SIGALRM, SIG_DFL);
     alarm(10);
-    if (g_busy)
+    if (atomic_exchange(&g_busy, 1))
+    {
+        // The report is being written already. By this thread (the report code itself faulted): nothing more
+        // can be done, die now. By another one: wait, it ends the process when it is done.
+        if (atomic_load(&g_owner) == (uintptr_t)pthread_self())
+            die_by_default(sig);
         for (;;)
-            pause(); // another thread is writing the report; it ends the process when it is done
-    g_busy = 1;
+            pause();
+    }
+    atomic_store(&g_owner, (uintptr_t)pthread_self());
     int fd = open(g_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0)
     {
         write_report(fd, sig, info);
         close(fd);
     }
-    // Back to the default action (SA_RESETHAND did it already), and take it.
-    struct sigaction action;
-    memset(&action, 0, sizeof(action));
-    action.sa_handler = SIG_DFL;
-    sigaction(sig, &action, NULL);
-    raise(sig);
+    // Back to the default action, and take it.
+    die_by_default(sig);
 }
 
 bool crash_handler_install(const char *path, const char *header, CrashCallback extra, void *user)
@@ -168,7 +185,8 @@ bool crash_handler_install(const char *path, const char *header, CrashCallback e
     g_header[CRASH_HEADER_MAX - 1] = 0;
     g_extra = extra;
     g_user = user;
-    g_busy = 0;
+    atomic_store(&g_busy, 0);
+    atomic_store(&g_owner, 0);
 #ifdef CRASH_HAS_BACKTRACE
     void *warm[2];
     backtrace(warm, 2); // the first call loads the unwinder: not in the handler
@@ -184,7 +202,10 @@ bool crash_handler_install(const char *path, const char *header, CrashCallback e
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = on_signal;
     sigemptyset(&action.sa_mask);
-    action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND | SA_NODEFER;
+    /* No SA_RESETHAND: it would reset the signal for the whole process when the first thread enters, and a thread that
+       crashes a moment later would then die by the default action before the report is written. The handler
+       restores the default itself, once the report is out. */
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     for (int i = 0; i < CRASH_SIGNALS; i++)
         sigaction(g_signals[i], &action, &g_previous[i]);
     g_installed = true;
