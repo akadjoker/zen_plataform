@@ -296,6 +296,29 @@ static void test_focus_loss_with_button_held(PlatformWindow *w)
 
 /* ---- a press and a release inside one frame is not lost ---- */
 
+static void test_click_inside_one_frame(PlatformWindow *w)
+{
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    clear_log();
+    btn(1, true);
+    btn(1, false); /* both are in the queue when the frame begins */
+    XSync(g_dpy, False);
+    time_sleep(20);
+    window_begin_frame(w);
+    bool pressed = mouse_button_pressed(w, MOUSE_LEFT);
+    bool down = mouse_button_down(w, MOUSE_LEFT);
+    window_begin_frame(w);
+    bool released = mouse_button_released(w, MOUSE_LEFT);
+    bool down_later = mouse_button_down(w, MOUSE_LEFT);
+    printf("  click in one frame: pressed %d down %d | next frame released %d down %d\n", pressed, down, released,
+           down_later);
+    /* a program that samples the state once per frame (it reads mouse_button_down) must see the click */
+    CHECK(pressed && down);
+    CHECK(released && !down_later);
+}
+
 /* ---- (e) a nested loop that pumps another window while this one is not pumped ---- */
 
 /* ---- the window manager takes a press of the title bar and never gives the release back ---- */
@@ -341,6 +364,7 @@ int main(void)
     const char *only = getenv("ONLY");
 #define RUN(name, fn) if (!only || strcmp(only, name) == 0) fn(w)
     RUN("focus", test_focus_loss_with_button_held);
+    RUN("oneframe", test_click_inside_one_frame);
 
     reset(w);
     XDestroyWindow(g_dpy, g_helper);

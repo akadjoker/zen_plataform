@@ -197,6 +197,50 @@ static void test_focus_loss_releases(PlatformWindow *w)
     touch_set_mouse_emulation(w, false);
 }
 
+/* A click whose press and release both arrive before the frame begins is still a click for a program that reads
+   the state once a frame: down (and pressed) in this frame, released in the next. */
+static void test_click_in_one_frame(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    window_begin_frame(w);
+    CHECK(mouse_button_pressed(w, MOUSE_LEFT) && mouse_button_down(w, MOUSE_LEFT) && !mouse_button_released(w, MOUSE_LEFT));
+    int presses = 0, releases = 0;
+    Event e;
+    while (poll_event(w, &e))
+        if (e.type == EVENT_MOUSE_BUTTON)
+        {
+            if (e.data.mouse.down)
+                presses++;
+            else
+                releases++;
+        }
+    CHECK(presses == 1 && releases == 1); /* the events keep their own order and number */
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && mouse_button_released(w, MOUSE_LEFT) && !mouse_button_pressed(w, MOUSE_LEFT));
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && !mouse_button_released(w, MOUSE_LEFT));
+
+    /* a click made of frames of its own is not delayed */
+    fake_mouse_button(w, MOUSE_RIGHT, true);
+    window_begin_frame(w);
+    CHECK(mouse_button_pressed(w, MOUSE_RIGHT));
+    fake_mouse_button(w, MOUSE_RIGHT, false);
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_RIGHT) && mouse_button_released(w, MOUSE_RIGHT));
+
+    /* press, release, press again in one frame: it is one click, still held, and the release that follows lets go */
+    fake_mouse_button(w, MOUSE_MIDDLE, true);
+    fake_mouse_button(w, MOUSE_MIDDLE, false);
+    fake_mouse_button(w, MOUSE_MIDDLE, true);
+    window_begin_frame(w);
+    CHECK(mouse_button_down(w, MOUSE_MIDDLE));
+    fake_mouse_button(w, MOUSE_MIDDLE, false);
+    window_begin_frame(w);
+    CHECK(mouse_button_released(w, MOUSE_MIDDLE) && !mouse_button_down(w, MOUSE_MIDDLE));
+}
+
 static void test_event_storm(PlatformWindow *w)
 {
     window_begin_frame(w);
@@ -684,6 +728,7 @@ int main(void)
     test_event_storm(w);
     test_event_storm_deltas(w);
     test_focus_loss_releases(w);
+    test_click_in_one_frame(w);
     test_text_event(w);
     test_lock_mods(w);
     test_capture(w);

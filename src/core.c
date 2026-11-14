@@ -284,7 +284,17 @@ void core_push_event(Core *core, const Event *ev)
     {
         int b = ev->data.mouse.button;
         if (b >= 0 && b < MOUSE_BUTTON_MAX)
-            s->mouse_down[b] = ev->data.mouse.down;
+        {
+            if (ev->data.mouse.down)
+            {
+                s->mouse_down[b] = true;
+                s->mouse_release_pending[b] = false;
+            }
+            else if (!s->mouse_prev[b])
+                s->mouse_release_pending[b] = true; /* pressed in this very frame: stays down until the next */
+            else
+                s->mouse_down[b] = false;
+        }
         if (s->mouse_touch && b == MOUSE_LEFT)
         {
             if (ev->data.mouse.down && !s->mouse_touch_down && s->touch_count == 0)
@@ -322,6 +332,7 @@ void core_push_event(Core *core, const Event *ev)
         {
             memset(s->key_down, 0, sizeof s->key_down);
             memset(s->mouse_down, 0, sizeof s->mouse_down);
+            memset(s->mouse_release_pending, 0, sizeof s->mouse_release_pending);
         }
         break;
     case EVENT_WINDOW_CLOSE:
@@ -538,6 +549,12 @@ void window_begin_frame(PlatformWindow *w)
     InputState *s = &w->core.in;
     memcpy(s->key_prev, s->key_down, sizeof s->key_down);
     memcpy(s->mouse_prev, s->mouse_down, sizeof s->mouse_down);
+    for (int b = 0; b < MOUSE_BUTTON_MAX; b++)
+        if (s->mouse_release_pending[b])
+        {
+            s->mouse_release_pending[b] = false;
+            s->mouse_down[b] = false; /* the release of last frame's click: seen as an edge now */
+        }
     s->mouse_px = s->mouse_x;
     s->mouse_py = s->mouse_y;
     s->wheel_x = s->wheel_y = 0;

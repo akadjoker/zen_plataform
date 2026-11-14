@@ -30,6 +30,9 @@ typedef struct
     bool key_prev[KEY_MAX]; /* previous-frame snapshot, drives edges */
     bool mouse_down[MOUSE_BUTTON_MAX];
     bool mouse_prev[MOUSE_BUTTON_MAX];
+    /* A release that came in the same frame as its press waits here: mouse_down stays true until the next
+       window_begin_frame, so a program that samples the state once per frame still sees the click. */
+    bool mouse_release_pending[MOUSE_BUTTON_MAX];
     int mouse_x, mouse_y, mouse_px, mouse_py;
     float wheel_x, wheel_y;
 
