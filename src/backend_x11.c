@@ -528,6 +528,9 @@ static GLXContext create_context(GLXFBConfig fb, const GLConfig *gl, GLXContext 
 
 bool backend_init(void)
 {
+    /* A GL worker (gl_worker_create) makes its context current on another thread, which is a call on this
+       connection: Xlib must lock it. This has to come before any other Xlib call. */
+    XInitThreads();
     g.dpy = XOpenDisplay(NULL);
     if (!g.dpy)
         return error_set("cannot open the X display");

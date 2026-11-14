@@ -372,9 +372,9 @@ extern "C"
     typedef struct GLWorker GLWorker;
     PLATFORM_API GLWorker *gl_worker_create(PlatformWindow *w);
     /* Call on the worker thread: true binds the context to it, false releases it
-       before the thread ends. The window's thread must not be inside a platform
-       call meanwhile (have it wait for the worker), as the window system
-       connection is not thread-safe. */
+       before the thread ends. On X11 the connection is locked (XInitThreads), so
+       the window's thread may carry on with its own calls meanwhile; a backend
+       that cannot say so would need the window's thread to wait for the worker. */
     PLATFORM_API bool gl_worker_make_current(GLWorker *worker, bool current);
     PLATFORM_API void gl_worker_destroy(GLWorker *worker);
 
