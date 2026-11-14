@@ -111,6 +111,9 @@ const char *path_extension(const char *path)
     return (dot && dot != name) ? dot : "";
 }
 
+static bool is_sep(char c);
+static size_t root_len(const char *p);
+
 void path_directory(const char *path, char *out, size_t cap)
 {
     const char *sep = last_sep(path);
@@ -120,7 +123,14 @@ void path_directory(const char *path, char *out, size_t cap)
             out[0] = '\0';
         return;
     }
+    /* The root stays ("/f" is in "/", not in "", which would mean the working directory); a doubled
+       separator before the name does not. */
+    size_t root = root_len(path);
     size_t n = (size_t)(sep - path);
+    while (n > root && is_sep(path[n - 1]))
+        n--;
+    if (n < root)
+        n = root;
     if (n >= cap)
         n = cap - 1;
     memcpy(out, path, n);

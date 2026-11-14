@@ -63,6 +63,30 @@ static void test_path_helpers(void)
     path_directory("noslash", dir, sizeof dir);
     CHECK(dir[0] == '\0');
 
+    /* The folder of something directly under the root is the root, not "" (which means the working directory),
+       and a doubled separator before the name does not stay in the result. */
+#if !defined(_WIN32)
+    path_directory("/file.txt", dir, sizeof dir);
+    CHECK(strcmp(dir, "/") == 0);
+    path_directory("/", dir, sizeof dir);
+    CHECK(strcmp(dir, "/") == 0);
+    path_directory("//file.txt", dir, sizeof dir);
+    CHECK(strcmp(dir, "/") == 0);
+    path_directory("/home/M\xc3\xbasica/v.mp3", dir, sizeof dir);
+    CHECK(strcmp(dir, "/home/M\xc3\xbasica") == 0);
+    path_directory("/home", dir, sizeof dir);
+    CHECK(strcmp(dir, "/") == 0);
+    path_directory("a//b", dir, sizeof dir);
+    CHECK(strcmp(dir, "a") == 0);
+    path_directory("/a//b", dir, sizeof dir);
+    CHECK(strcmp(dir, "/a") == 0);
+    path_directory("a/b/", dir, sizeof dir);
+    CHECK(strcmp(dir, "a/b") == 0);
+#else
+    path_directory("C:\\file.txt", dir, sizeof dir);
+    CHECK(strcmp(dir, "C:/") == 0 || strcmp(dir, "C:\\") == 0);
+#endif
+
     CHECK(path_has_extension("image.PNG", "png")); /* case-insensitive */
     CHECK(path_has_extension("image.png", ".png"));
     CHECK(!path_has_extension("image.png", "jpg"));
