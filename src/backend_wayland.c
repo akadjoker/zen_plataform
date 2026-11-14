@@ -396,6 +396,12 @@ void backend_shutdown(void)
     xkb_context_unref(g.xkb);
     if (g.wm_base)
         xdg_wm_base_destroy(g.wm_base);
+    if (g.subcompositor)
+        wl_subcompositor_destroy(g.subcompositor);
+#ifdef ZEN_WL_XDG_DECORATION
+    if (g.deco_manager)
+        zxdg_decoration_manager_v1_destroy(g.deco_manager);
+#endif
     if (g.compositor)
         wl_compositor_destroy(g.compositor);
     if (g.registry)
