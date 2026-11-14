@@ -289,10 +289,209 @@ static void test_focus_loss_with_button_held(PlatformWindow *w)
 
 /* ---- (b) press inside, leave, release outside ---- */
 
+static void test_release_outside(PlatformWindow *w)
+{
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    clear_log();
+    btn(1, true);
+    ptr_in(WIN_W + 80, 80); /* right of the window */
+    ptr_in(WIN_W + 120, 90);
+    settle(w);
+    char buf[256];
+    printf("  b: press, leave, move outside: %s\n", describe(buf, sizeof buf));
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+    CHECK(!window_is_hovered(w));
+    int mx, my;
+    mouse_position(w, &mx, &my);
+    CHECK(mx == WIN_W + 120 && my == 90); /* the position keeps following the pointer, outside too */
+
+    clear_log();
+    btn(1, false);
+    settle(w);
+    printf("  b: release outside: %s\n", describe(buf, sizeof buf));
+    CHECK(count_type(EVENT_MOUSE_BUTTON, false, true) == 1);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    int at = last_index(EVENT_MOUSE_BUTTON);
+    CHECK(at >= 0 && g_log[at].x == WIN_W + 120 && g_log[at].y == 90);
+    CHECK(!window_is_hovered(w));
+
+    /* the same to the left and above: coordinates are negative, not clamped or wrapped */
+    reset(w);
+    ptr_in(10, 10);
+    btn(3, true);
+    ptr_in(-50, -40);
+    settle(w);
+    clear_log();
+    btn(3, false);
+    settle(w);
+    CHECK(!mouse_button_down(w, MOUSE_RIGHT));
+    at = last_index(EVENT_MOUSE_BUTTON);
+    CHECK(at >= 0 && !g_log[at].flag && g_log[at].button == MOUSE_RIGHT && g_log[at].x == -50 && g_log[at].y == -40);
+
+    /* coming back in during the drag: enter, the release inside */
+    reset(w);
+    ptr_in(100, 80);
+    btn(1, true);
+    ptr_in(WIN_W + 60, 80);
+    ptr_in(150, 100);
+    settle(w);
+    CHECK(window_is_hovered(w));
+    btn(1, false);
+    settle(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+}
+
 /* ---- (c) enter and leave in a drag, and the order of it all ---- */
 
 
+static void test_order(PlatformWindow *w)
+{
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    clear_log();
+
+    btn(1, true);
+    for (int i = 0; i < 40; i++)
+        ptr_in(100 + i * 12, 80 + i); /* fast: leaves the window half way and keeps going */
+    btn(1, false);
+    ptr_in(5, 5); /* and a move after the release, coming back in */
+    settle(w);
+
+    char buf[512];
+    printf("  c: %s\n", describe(buf, sizeof buf));
+    int down = -1, up = -1, last_move_before_up = -1, first_move_after_up = -1;
+    for (int i = 0; i < g_n; i++)
+    {
+        if (g_log[i].type == EVENT_MOUSE_BUTTON && g_log[i].flag && down < 0)
+            down = i;
+        if (g_log[i].type == EVENT_MOUSE_BUTTON && !g_log[i].flag && up < 0)
+            up = i;
+    }
+    for (int i = 0; i < g_n; i++)
+    {
+        if (g_log[i].type != EVENT_MOUSE_MOVE)
+            continue;
+        if (up >= 0 && i < up)
+            last_move_before_up = i;
+        if (up >= 0 && i > up && first_move_after_up < 0)
+            first_move_after_up = i;
+    }
+    CHECK(down == 0);
+    CHECK(up > down);
+    CHECK(count_type(EVENT_MOUSE_BUTTON, true, true) == 1);
+    CHECK(count_type(EVENT_MOUSE_BUTTON, false, true) == 1);
+    CHECK(last_move_before_up > down);
+    CHECK(first_move_after_up > up);
+    /* the release carries the place of the last move before it; the move after is the pointer back at (5,5) */
+    CHECK(g_log[up].x == g_log[last_move_before_up].x && g_log[up].y == g_log[last_move_before_up].y);
+    CHECK(first_move_after_up >= 0 && g_log[first_move_after_up].x == 5 && g_log[first_move_after_up].y == 5);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+
+    /* the same with the frame so full that the event list has to drop moves: the release stays after the moves
+       that came before it and before the ones that came after */
+    /* The server may not have delivered all of it by the time the one frame runs (a loaded machine): the release is
+       the proof that it had, and the scenario is repeated until it has. */
+    up = -1;
+    for (int attempt = 0; attempt < 5 && up < 0; attempt++)
+    {
+        reset(w);
+        ptr_in(100, 80);
+        settle(w);
+        clear_log();
+        btn(1, true);
+        for (int i = 0; i < 900; i++)
+            ptr_in(20 + (i * 7) % 250, 20 + (i * 3) % 150);
+        ptr_in(111, 77);
+        btn(1, false);
+        ptr_in(222, 133);
+        ptr_in(233, 144);
+        XSync(g_dpy, False);
+        time_sleep(100);
+        pump_once(w); /* one frame holds all of it */
+        for (int i = 0; i < g_n; i++)
+            if (g_log[i].type == EVENT_MOUSE_BUTTON && !g_log[i].flag)
+                up = i;
+    }
+    printf("  c: a full frame: %d events, button down %d, up %d\n", g_n, count_type(EVENT_MOUSE_BUTTON, true, true),
+           count_type(EVENT_MOUSE_BUTTON, false, true));
+    CHECK(count_type(EVENT_MOUSE_BUTTON, true, true) == 1);
+    CHECK(up >= 0);
+    last_move_before_up = first_move_after_up = -1;
+    for (int i = 0; i < g_n; i++)
+        if (g_log[i].type == EVENT_MOUSE_MOVE && up >= 0)
+        {
+            if (i < up)
+                last_move_before_up = i;
+            else if (first_move_after_up < 0)
+                first_move_after_up = i;
+        }
+    CHECK(last_move_before_up >= 0 && g_log[last_move_before_up].x == 111 && g_log[last_move_before_up].y == 77);
+    CHECK(first_move_after_up >= 0);
+    int last_move = last_index(EVENT_MOUSE_MOVE);
+    CHECK(last_move > up && g_log[last_move].x == 233 && g_log[last_move].y == 144);
+    CHECK(mouse_button_down(w, MOUSE_LEFT)); /* a click that began and ended in one frame stays down for it */
+    pump_once(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && mouse_button_released(w, MOUSE_LEFT));
+    int px, py;
+    mouse_position(w, &px, &py);
+    CHECK(px == 233 && py == 144);
+}
+
 /* ---- (d) a second button during a drag with the first ---- */
+
+static void test_second_button(PlatformWindow *w)
+{
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    clear_log();
+    btn(1, true);
+    ptr_in(120, 90);
+    btn(3, true);
+    ptr_in(130, 95);
+    settle(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT) && mouse_button_down(w, MOUSE_RIGHT));
+    btn(3, false);
+    ptr_in(140, 100);
+    settle(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT) && !mouse_button_down(w, MOUSE_RIGHT));
+    btn(1, false);
+    settle(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && !mouse_button_down(w, MOUSE_RIGHT));
+    char buf[256];
+    describe(buf, sizeof buf);
+    printf("  d: %s\n", buf);
+    CHECK(strcmp(buf, "D0 M D2 M U2 M U0") == 0 || strstr(buf, "D0") != NULL);
+    int order[4] = {-1, -1, -1, -1}; /* D0, D2, U2, U0 */
+    for (int i = 0; i < g_n; i++)
+    {
+        if (g_log[i].type != EVENT_MOUSE_BUTTON)
+            continue;
+        int slot = g_log[i].button == MOUSE_LEFT ? (g_log[i].flag ? 0 : 3) : (g_log[i].flag ? 1 : 2);
+        order[slot] = i;
+    }
+    CHECK(order[0] >= 0 && order[0] < order[1] && order[1] < order[2] && order[2] < order[3]);
+    CHECK(count_type(EVENT_MOUSE_BUTTON, true, true) == 2 && count_type(EVENT_MOUSE_BUTTON, false, true) == 2);
+
+    /* the side buttons and the wheel in the middle of a drag */
+    reset(w);
+    ptr_in(100, 80);
+    settle(w);
+    btn(1, true);
+    btn(8, true);
+    btn(4, true); /* wheel up: a press and a release of button 4 */
+    btn(4, false);
+    settle(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT) && mouse_button_down(w, MOUSE_X1));
+    CHECK(mouse_wheel(w) == 0.0f || mouse_wheel(w) == 1.0f);
+    btn(8, false);
+    btn(1, false);
+    settle(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT) && !mouse_button_down(w, MOUSE_X1));
+}
 
 /* ---- a press and a release inside one frame is not lost ---- */
 
@@ -364,6 +563,9 @@ int main(void)
     const char *only = getenv("ONLY");
 #define RUN(name, fn) if (!only || strcmp(only, name) == 0) fn(w)
     RUN("focus", test_focus_loss_with_button_held);
+    RUN("outside", test_release_outside);
+    RUN("order", test_order);
+    RUN("second", test_second_button);
     RUN("oneframe", test_click_inside_one_frame);
 
     reset(w);

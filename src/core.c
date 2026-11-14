@@ -191,32 +191,57 @@ static void frame_event_add(InputState *s, const Event *ev)
         s->frame_events[s->fe_count++] = *ev;
         return;
     }
+    Event add = *ev;
+    int victim = -1;
     if (latest_wins(ev->type))
     {
+        /* Folded into the newest one of its kind, as long as no event of another kind (a button, a key) came after it:
+           folding past one would put this position before an event that really came earlier (a release ahead of the
+           move that followed it). Past such an event the oldest one of the kind makes room instead. */
         for (int i = s->fe_count - 1; i >= s->fe_cursor; i--)
+        {
             if (s->frame_events[i].type == ev->type)
             {
                 fold_move(&s->frame_events[i], ev);
                 return;
             }
-        return;
-    }
-    for (int i = s->fe_cursor; i < s->fe_count; i++)
-        if (latest_wins(s->frame_events[i].type))
-        {
-            /* The relative motion of a dropped move goes into the next move, so captured-mouse deltas add up. */
-            if (s->frame_events[i].type == EVENT_MOUSE_MOVE)
-                for (int j = i + 1; j < s->fe_count; j++)
-                    if (s->frame_events[j].type == EVENT_MOUSE_MOVE)
-                    {
-                        s->frame_events[j].data.mouse.dx += s->frame_events[i].data.mouse.dx;
-                        s->frame_events[j].data.mouse.dy += s->frame_events[i].data.mouse.dy;
-                        break;
-                    }
-            memmove(&s->frame_events[i], &s->frame_events[i + 1], (size_t)(s->fe_count - 1 - i) * sizeof s->frame_events[0]);
-            s->frame_events[s->fe_count - 1] = *ev;
-            return;
+            if (!latest_wins(s->frame_events[i].type))
+                break;
         }
+        for (int i = s->fe_cursor; i < s->fe_count; i++)
+            if (s->frame_events[i].type == ev->type)
+            {
+                victim = i;
+                break;
+            }
+    }
+    if (victim < 0)
+        for (int i = s->fe_cursor; i < s->fe_count; i++)
+            if (latest_wins(s->frame_events[i].type))
+            {
+                victim = i;
+                break;
+            }
+    if (victim < 0)
+        return; /* nothing in the list can be spared */
+    /* The relative motion of a dropped move goes into the next move, so captured-mouse deltas add up. */
+    if (s->frame_events[victim].type == EVENT_MOUSE_MOVE)
+    {
+        Event *next = &add;
+        for (int j = victim + 1; j < s->fe_count; j++)
+            if (s->frame_events[j].type == EVENT_MOUSE_MOVE)
+            {
+                next = &s->frame_events[j];
+                break;
+            }
+        if (next->type == EVENT_MOUSE_MOVE)
+        {
+            next->data.mouse.dx += s->frame_events[victim].data.mouse.dx;
+            next->data.mouse.dy += s->frame_events[victim].data.mouse.dy;
+        }
+    }
+    memmove(&s->frame_events[victim], &s->frame_events[victim + 1], (size_t)(s->fe_count - 1 - victim) * sizeof s->frame_events[0]);
+    s->frame_events[s->fe_count - 1] = add;
 }
 
 void core_push_event(Core *core, const Event *ev)

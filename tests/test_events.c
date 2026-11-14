@@ -131,6 +131,72 @@ static void test_event_storm_deltas(PlatformWindow *w)
     CHECK(dy == -2 * moves);
 }
 
+static void push_move(PlatformWindow *w, int x, int y)
+{
+    Event m = {.type = EVENT_MOUSE_MOVE};
+    m.data.mouse.x = x;
+    m.data.mouse.y = y;
+    core_push_event(&w->core, &m);
+}
+
+static void push_button(PlatformWindow *w, int button, bool down)
+{
+    Event b = {.type = EVENT_MOUSE_BUTTON};
+    b.data.mouse.button = button;
+    b.data.mouse.down = down;
+    core_push_event(&w->core, &b);
+}
+
+/* A press, a drag, a release and the pointer moving on, all in one frame that holds more than the list does: the
+   events still come in the order they happened, so the release is never ahead of a move that came before it, nor
+   behind one that came after, and none of the buttons is lost. */
+static void test_button_order_in_full_list(PlatformWindow *w)
+{
+    window_begin_frame(w);
+    while (poll_event(w, &(Event){0}))
+    {
+    }
+    push_move(w, 100, 80);
+    push_button(w, MOUSE_LEFT, true);
+    for (int i = 0; i < 3 * FRAME_EVENT_MAX; i++)
+        push_move(w, 20 + (i * 7) % 250, 20 + (i * 3) % 150);
+    push_move(w, 111, 77);
+    push_button(w, MOUSE_LEFT, false);
+    push_move(w, 222, 133);
+    push_move(w, 233, 144);
+
+    Event e;
+    int n = 0, down = -1, up = -1, last_before = -1, first_after = -1, last_move = -1;
+    Event list[FRAME_EVENT_MAX];
+    while (poll_event(w, &e) && n < FRAME_EVENT_MAX)
+        list[n++] = e;
+    for (int i = 0; i < n; i++)
+    {
+        if (list[i].type == EVENT_MOUSE_BUTTON)
+        {
+            if (list[i].data.mouse.down && down < 0)
+                down = i;
+            if (!list[i].data.mouse.down && up < 0)
+                up = i;
+        }
+    }
+    for (int i = 0; i < n; i++)
+        if (list[i].type == EVENT_MOUSE_MOVE)
+        {
+            last_move = i;
+            if (up >= 0 && i < up)
+                last_before = i;
+            else if (up >= 0 && first_after < 0)
+                first_after = i;
+        }
+    CHECK(down >= 0); /* the press is not pushed out by the moves */
+    CHECK(up > down);
+    CHECK(last_before > down && list[last_before].data.mouse.x == 111 && list[last_before].data.mouse.y == 77);
+    CHECK(first_after > up);
+    CHECK(last_move == n - 1 && list[last_move].data.mouse.x == 233 && list[last_move].data.mouse.y == 144);
+    CHECK(mouse_x(w) == 233 && mouse_y(w) == 144);
+}
+
 /* The focus going away lets go of what is held, in the stream too (not only in the polled state), once; the
    release the system sends later for the same press is not a second one. */
 static void test_focus_loss_releases(PlatformWindow *w)
@@ -727,6 +793,7 @@ int main(void)
     test_hook(w);
     test_event_storm(w);
     test_event_storm_deltas(w);
+    test_button_order_in_full_list(w);
     test_focus_loss_releases(w);
     test_click_in_one_frame(w);
     test_text_event(w);
