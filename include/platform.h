@@ -499,7 +499,9 @@ extern "C"
     PLATFORM_API bool process_is_running(int64_t id);
     /* -1 while the process runs or when the id is unknown. */
     PLATFORM_API int process_exit_code(int64_t id);
-    /* Ends the process and reaps it. */
+    /* Ends the process and reaps it. An id that process_spawn did not hand out, or whose record is among
+       those the table has forgotten, is refused: the number may belong to some other process by now. A child that
+       ended is waited for by the next call into these functions, so it does not stay a zombie. */
     PLATFORM_API bool process_kill(int64_t id);
 
     /* ========================================================================== */

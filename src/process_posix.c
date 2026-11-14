@@ -20,10 +20,12 @@ typedef struct
 {
     pid_t pid;
     bool running;
-    int exit_code;
+    int exit_code; /* -1 when the system no longer knew the child (somebody else waited for it) */
+    unsigned long order; /* when the child was started: the oldest finished record is the one that makes room */
 } ProcessInfo;
 
 static ProcessInfo g_processes[PROCESS_CAP];
+static unsigned long g_started;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int wait_for_pid(pid_t pid, int *status, int options, pid_t *out_pid)
@@ -53,6 +55,7 @@ static ProcessInfo *find_process(pid_t pid)
     return NULL;
 }
 
+/* A slot nobody used, else the finished record that is the oldest. NULL when all PROCESS_CAP children still run. */
 static ProcessInfo *free_slot(void)
 {
     for (int i = 0; i < PROCESS_CAP; i++)
@@ -60,12 +63,13 @@ static ProcessInfo *free_slot(void)
         if (g_processes[i].pid == 0)
             return &g_processes[i];
     }
+    ProcessInfo *oldest = NULL;
     for (int i = 0; i < PROCESS_CAP; i++)
     {
-        if (!g_processes[i].running)
-            return &g_processes[i];
+        if (!g_processes[i].running && (!oldest || g_processes[i].order < oldest->order))
+            oldest = &g_processes[i];
     }
-    return NULL;
+    return oldest;
 }
 
 static int status_to_code(int status)
@@ -73,31 +77,27 @@ static int status_to_code(int status)
     return WIFEXITED(status) ? WEXITSTATUS(status) : status;
 }
 
-static bool check_running(pid_t pid, int *code)
+/* Looks at one child without waiting, and records its end. */
+static void poll_slot(ProcessInfo *info)
 {
-    ProcessInfo *info = find_process(pid);
-    if (info && !info->running)
-    {
-        if (code)
-            *code = info->exit_code;
-        return false;
-    }
+    if (!info->running)
+        return;
     int status = 0;
     pid_t done = -1;
-    int result = wait_for_pid(pid, &status, WNOHANG, &done);
+    int result = wait_for_pid(info->pid, &status, WNOHANG, &done);
     if (result == 0 && done == 0)
-        return true;
-    if (result != 0)
-        return false;
-    status = status_to_code(status);
-    if (info)
-    {
-        info->running = false;
-        info->exit_code = status;
-    }
-    if (code)
-        *code = status;
-    return false;
+        return; /* still running */
+    info->running = false;
+    info->exit_code = result == 0 ? status_to_code(status) : -1;
+}
+
+/* Every child that has ended is waited for, so one nobody asks about does not stay a zombie, and its slot can be
+   given to a newer child. Called with the lock held, on every way into the table. */
+static void reap_children(void)
+{
+    for (int i = 0; i < PROCESS_CAP; i++)
+        if (g_processes[i].pid != 0 && g_processes[i].running)
+            poll_slot(&g_processes[i]);
 }
 
 int64_t process_spawn(const char *path, const char *const *args, int argc, bool open_console)
@@ -119,6 +119,7 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
         argv[i + 1] = (char *)args[i];
 
     pthread_mutex_lock(&g_lock);
+    reap_children();
     ProcessInfo *slot = free_slot();
     if (!slot)
     {
@@ -145,9 +146,15 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
         _exit(127);
     }
 
+    /* The system can give a pid out again once its earlier owner is gone: a record that still carries it is that
+       owner's, and would hide this child (find_process takes the first match). */
+    for (int i = 0; i < PROCESS_CAP; i++)
+        if (&g_processes[i] != slot && g_processes[i].pid == pid)
+            memset(&g_processes[i], 0, sizeof g_processes[i]);
     slot->pid = pid;
     slot->running = true;
     slot->exit_code = 0;
+    slot->order = ++g_started;
     pthread_mutex_unlock(&g_lock);
     free(argv);
     return (int64_t)pid;
@@ -158,7 +165,9 @@ bool process_is_running(int64_t id)
     if (id <= 0)
         return false;
     pthread_mutex_lock(&g_lock);
-    bool running = check_running((pid_t)id, NULL);
+    reap_children();
+    const ProcessInfo *info = find_process((pid_t)id);
+    bool running = info && info->running;
     pthread_mutex_unlock(&g_lock);
     return running;
 }
@@ -168,8 +177,9 @@ int process_exit_code(int64_t id)
     if (id <= 0)
         return -1;
     pthread_mutex_lock(&g_lock);
-    int code = 0;
-    int result = check_running((pid_t)id, &code) ? -1 : code;
+    reap_children();
+    const ProcessInfo *info = find_process((pid_t)id);
+    int result = (!info || info->running) ? -1 : info->exit_code;
     pthread_mutex_unlock(&g_lock);
     return result;
 }
@@ -179,8 +189,16 @@ bool process_kill(int64_t id)
     if (id <= 0)
         return error_set("invalid process id");
     pthread_mutex_lock(&g_lock);
-    const ProcessInfo *known = find_process((pid_t)id);
-    if (known && !known->running)
+    reap_children();
+    ProcessInfo *info = find_process((pid_t)id);
+    if (!info)
+    {
+        /* Not a child process_spawn started (or one so old its record is gone, and the number may belong to
+           somebody else now): killing it would be killing a stranger. */
+        pthread_mutex_unlock(&g_lock);
+        return error_set("process %lld was not started by process_spawn", (long long)id);
+    }
+    if (!info->running)
     {
         pthread_mutex_unlock(&g_lock);
         return true;
@@ -190,12 +208,8 @@ bool process_kill(int64_t id)
     {
         int status = 0;
         wait_for_pid((pid_t)id, &status, 0, NULL);
-        ProcessInfo *info = find_process((pid_t)id);
-        if (info)
-        {
-            info->running = false;
-            info->exit_code = status_to_code(status);
-        }
+        info->running = false;
+        info->exit_code = status_to_code(status);
     }
     pthread_mutex_unlock(&g_lock);
     if (r != 0)
