@@ -234,31 +234,51 @@ static void test_timeout(void)
 
 /* ---- detach ---- */
 
-static volatile int g_detached_done;
+/* A mutex around the flag: a volatile int polled between sleeps is a data race, and ThreadSanitizer says so. */
+static int g_detached_done;
+static PlatformMutex *g_done_mutex;
+
+static int detached_done(void)
+{
+    mutex_lock(g_done_mutex);
+    int v = g_detached_done;
+    mutex_unlock(g_done_mutex);
+    return v;
+}
+
+static void set_detached_done(int v)
+{
+    mutex_lock(g_done_mutex);
+    g_detached_done = v;
+    mutex_unlock(g_done_mutex);
+}
+
 static int detached_work(void *user)
 {
     (void)user;
     time_sleep(20);
-    g_detached_done = 1;
+    set_detached_done(1);
     return 0;
 }
 
 static void test_detach(void)
 {
+    g_done_mutex = mutex_create();
     PlatformThread *t = thread_create(detached_work, NULL, "detached");
     thread_detach(t); /* before it finishes: the thread frees its own record */
-    for (int i = 0; i < 200 && !g_detached_done; i++)
+    for (int i = 0; i < 200 && !detached_done(); i++)
         time_sleep(5);
-    CHECK(g_detached_done);
+    CHECK(detached_done());
 
-    g_detached_done = 0;
+    set_detached_done(0);
     t = thread_create(detached_work, NULL, NULL);
-    for (int i = 0; i < 200 && !g_detached_done; i++)
+    for (int i = 0; i < 200 && !detached_done(); i++)
         time_sleep(5);
     time_sleep(20);
     thread_detach(t); /* after it finished: detach frees the record */
-    CHECK(g_detached_done);
+    CHECK(detached_done());
     time_sleep(20);
+    mutex_destroy(g_done_mutex);
 }
 
 int main(void)
