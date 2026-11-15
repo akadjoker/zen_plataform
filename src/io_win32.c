@@ -87,6 +87,10 @@ static size_t h_write(IoStream *s, const void *src, size_t n)
 
 static bool h_flush(IoStream *s)
 {
+    /* FlushFileBuffers wants a handle with write access (GENERIC_WRITE) and fails with "access denied" on one opened to read;
+       there is nothing of ours to flush then, and fsync on a descriptor opened to read says the same: success */
+    if (s->read_only)
+        return true;
     if (FlushFileBuffers(handle_of(s)))
         return true;
     return win32_error("flush failed", NULL);
@@ -145,6 +149,7 @@ IoStream *io_platform_open_file(const char *path, int flags)
         return NULL;
     }
     s->u.handle = h;
+    s->read_only = !(flags & (IO_MODE_WRITE | IO_MODE_APPEND));
     return s;
 }
 

@@ -17,6 +17,7 @@ struct IoStream
 {
     const IoVTable *vt;
     bool eof;
+    bool read_only; /* Windows: a handle opened to read only, which FlushFileBuffers refuses */
     union
     {
         int fd;
