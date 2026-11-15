@@ -256,7 +256,10 @@ extern "C"
     /* ========================================================================== */
 
     /* Initialize global platform state. Required before monitor queries or window
-       creation. Returns false if the platform could not be brought up. */
+       creation (window_create returns NULL before it has succeeded, and after
+       platform_shutdown). Returns false if the platform could not be brought up;
+       a call when it is already up does nothing and returns true. platform_shutdown
+       with the platform not up does nothing. */
     PLATFORM_API bool platform_init(void);
     PLATFORM_API void platform_shutdown(void);
 
@@ -1062,6 +1065,10 @@ extern "C"
     /* Whole-stream loads are NUL-terminated (size excludes it); free with fs_free. */
     PLATFORM_API void *io_load(IoStream *s, size_t *out_size, bool close);
     PLATFORM_API void *io_load_file(const char *path, size_t *out_size);
+    /* Writes a temporary file of its own beside the target, syncs it and renames it over the target, so a crash
+       leaves the old file or the new one, and saves of one path from several threads or programs do not step on
+       each other. An existing file keeps its permissions, and a symbolic link at path is followed: the file it
+       leads to is the one replaced (POSIX; on Windows a link is replaced). */
     PLATFORM_API bool io_save_file(const char *path, const void *data, size_t size);
 
     PLATFORM_API uint8_t *asset_read(const char *path, size_t *out_size);
