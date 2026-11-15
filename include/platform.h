@@ -972,7 +972,9 @@ extern "C"
     /*  Time                                                                      */
     /* ========================================================================== */
 
-    PLATFORM_API double time_seconds(void); /* since platform_init */
+    /* Monotonic, from zero at the first platform_init of the process, or at the first read of the clock if that came earlier
+       (it never jumps back: not at platform_init, not after a platform_shutdown and another init). */
+    PLATFORM_API double time_seconds(void);
     PLATFORM_API uint64_t time_nanos(void);
     PLATFORM_API void time_sleep(uint32_t milliseconds);
 

@@ -428,7 +428,7 @@ void core_push_touch(Core *core, TouchPhase phase, int id, float x, float y, flo
 /*  Lifecycle                                                                 */
 /* ========================================================================== */
 
-static uint64_t g_time_base; /* nanoseconds at platform_init */
+static uint64_t g_time_base; /* nanoseconds of the monotonic clock at the first use of this clock; 0 until then */
 
 static uint64_t now_nanos(void)
 {
@@ -448,6 +448,27 @@ static uint64_t now_nanos(void)
 #endif
 }
 
+/* The zero of time_nanos and time_seconds: the first of platform_init and the first read of the clock, once for the life of the
+   process (so a clock read before platform_init does not jump back, to zero, when it runs, nor at every platform_init after
+   a shutdown). Atomic, because any thread may read the time first. */
+static uint64_t time_base(void)
+{
+#if defined(_WIN32)
+    uint64_t base = (uint64_t)InterlockedCompareExchange64((volatile LONG64 *)&g_time_base, 0, 0);
+    if (base)
+        return base;
+    uint64_t now = now_nanos();
+    base = (uint64_t)InterlockedCompareExchange64((volatile LONG64 *)&g_time_base, (LONG64)now, 0);
+    return base ? base : now;
+#else
+    uint64_t base = __atomic_load_n(&g_time_base, __ATOMIC_RELAXED);
+    if (base)
+        return base;
+    uint64_t now = now_nanos(), expected = 0;
+    return __atomic_compare_exchange_n(&g_time_base, &expected, now, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED) ? now : expected;
+#endif
+}
+
 /* Whether platform_init has succeeded and platform_shutdown has not been called since. */
 static bool g_ready;
 
@@ -455,7 +476,7 @@ bool platform_init(void)
 {
     if (g_ready)
         return true; /* a second call would open the display again and lose the first */
-    g_time_base = now_nanos();
+    time_base();
     if (!backend_init())
         return false;
     gamepad_init();
@@ -1162,7 +1183,8 @@ int touch_id(PlatformWindow *w, int index)
 
 uint64_t time_nanos(void)
 {
-    return now_nanos() - g_time_base;
+    const uint64_t base = time_base(); /* first: the clock is read after the zero is fixed, never before it */
+    return now_nanos() - base;
 }
 double time_seconds(void)
 {

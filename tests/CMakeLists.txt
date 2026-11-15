@@ -22,6 +22,7 @@ add_fake_test(test_app_run)
 add_fake_test(test_gestures)
 add_fake_test(test_log)
 add_fake_test(test_events)
+add_fake_test(test_time)
 
 # Portable modules with no window backend: compile just their sources (in ARGN).
 function(add_unit_test name)
