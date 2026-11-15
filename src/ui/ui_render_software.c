@@ -151,37 +151,58 @@ static void draw_gradient(Framebuffer *fb, UiRect r, UiColor top, UiColor bottom
 }
 
 /* Tint a glyph's 8-bit coverage by color and source-over it onto the fb,
-   clipped to `clip` (the scissor in force when the text command was emitted). */
+   clipped to `clip` (the scissor in force when the text command was emitted).
+   The glyph's rows and columns that can show are worked out once, not tested
+   for each pixel; a pixel of full coverage is the colour itself. */
 static void blit_glyph(Framebuffer *fb, const UiGlyph *g, int px, int py, UiColor color, UiRect clip)
 {
     if (!g->cov)
         return;
     int cr = (color >> 16) & 0xFF, cg = (color >> 8) & 0xFF, cb = color & 0xFF;
     int ca = (color >> 24) & 0xFF;
-    for (int y = 0; y < g->h; ++y)
+    const uint32_t solid = 0xFF000000u | (color & 0x00FFFFFFu);
+
+    /* columns x0..x1 and rows y0..y1 of the glyph that fall inside the framebuffer and the clip */
+    int64_t x0 = 0, x1 = g->w, y0 = 0, y1 = g->h;
+    int64_t lo_x = px < clip.x ? clip.x : px, hi_x = (int64_t)clip.x + clip.w;
+    int64_t lo_y = py < clip.y ? clip.y : py, hi_y = (int64_t)clip.y + clip.h;
+    if (lo_x < 0)
+        lo_x = 0;
+    if (lo_y < 0)
+        lo_y = 0;
+    if (hi_x > fb->width)
+        hi_x = fb->width;
+    if (hi_y > fb->height)
+        hi_y = fb->height;
+    x0 = lo_x - px;
+    y0 = lo_y - py;
+    if (x1 > hi_x - px)
+        x1 = hi_x - px;
+    if (y1 > hi_y - py)
+        y1 = hi_y - py;
+    if (x0 >= x1 || y0 >= y1)
+        return;
+
+    for (int y = (int)y0; y < (int)y1; ++y)
     {
-        int dy = py + y;
-        if (dy < 0 || dy >= fb->height)
-            continue;
-        if (dy < clip.y || dy >= clip.y + clip.h)
-            continue;
-        for (int x = 0; x < g->w; ++x)
+        const uint8_t *cov = g->cov + (size_t)y * g->w;
+        uint32_t *row = fb->pixels + (size_t)(py + y) * fb->stride + px;
+        for (int x = (int)x0; x < (int)x1; ++x)
         {
-            int dx = px + x;
-            if (dx < 0 || dx >= fb->width)
-                continue;
-            if (dx < clip.x || dx >= clip.x + clip.w)
-                continue;
-            int a = g->cov[y * g->w + x] * ca / 255;
+            int a = ca == 255 ? cov[x] : cov[x] * ca / 255;
             if (!a)
                 continue;
-            uint32_t d = fb->pixels[dy * fb->stride + dx];
+            if (a == 255)
+            {
+                row[x] = solid;
+                continue;
+            }
+            uint32_t d = row[x];
             int dr = (d >> 16) & 0xFF, dg = (d >> 8) & 0xFF, db = d & 0xFF;
             dr += (cr - dr) * a / 255;
             dg += (cg - dg) * a / 255;
             db += (cb - db) * a / 255;
-            fb->pixels[dy * fb->stride + dx] =
-                0xFF000000u | ((uint32_t)dr << 16) | ((uint32_t)dg << 8) | (uint32_t)db;
+            row[x] = 0xFF000000u | ((uint32_t)dr << 16) | ((uint32_t)dg << 8) | (uint32_t)db;
         }
     }
 }

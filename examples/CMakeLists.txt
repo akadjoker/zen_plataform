@@ -72,6 +72,9 @@ else()
     add_executable(bench_draw2d bench_draw2d.c)
     target_link_libraries(bench_draw2d PRIVATE platform)
 
+    add_executable(bench_ui_software bench_ui_software.c)
+    target_link_libraries(bench_ui_software PRIVATE zen_ui platform ${MATH_LIB})
+
     add_executable(bench_sprite bench_sprite.c)
     target_link_libraries(bench_sprite PRIVATE zen_2d platform ${MATH_LIB} OpenGL::GL)
 
