@@ -211,8 +211,37 @@ int ui_font_line_height(const UiFont *f)
 
 /* --------------------------------------------------------------- public --- */
 
-static UiFont *ttf_from_mem(const uint8_t *data, int px, uint8_t *owned)
+/* stb_truetype trusts what it is given: it follows the table directory wherever it points, with no check against the size
+   of the data. A file that is not a font (no sfnt tag, offset -1 from stbtt_GetFontOffsetForIndex, which it then reads at
+   data[-1]) or is a font cut short (its tables run past the end) is refused here, before stb sees it. What is inside a
+   table is still stb's to trust: a font made to crash it will, so fonts from a source nobody trusts do not belong here. */
+static bool sfnt_fits(const uint8_t *data, size_t size)
 {
+    if (!data || size < 16) /* 12 for the offset table, and a collection's header reads 4 bytes more */
+        return false;
+    int start = stbtt_GetFontOffsetForIndex(data, 0);
+    if (start < 0 || (size_t)start > size || size - (size_t)start < 12)
+        return false;
+    const uint8_t *dir = data + start;
+    unsigned tables = ((unsigned)dir[4] << 8) | dir[5];
+    if (tables == 0 || size - (size_t)start - 12 < (size_t)tables * 16)
+        return false;
+    for (unsigned i = 0; i < tables; ++i)
+    {
+        const uint8_t *rec = dir + 12 + (size_t)i * 16;
+        uint64_t offset = ((uint64_t)rec[8] << 24) | ((uint64_t)rec[9] << 16) | ((uint64_t)rec[10] << 8) | rec[11];
+        uint64_t length = ((uint64_t)rec[12] << 24) | ((uint64_t)rec[13] << 16) | ((uint64_t)rec[14] << 8) | rec[15];
+        if (offset > size || length > size - offset)
+            return false;
+    }
+    return true;
+}
+
+/* On failure it returns NULL and `owned` is still the caller's to free. */
+static UiFont *ttf_from_mem(const uint8_t *data, size_t size, int px, uint8_t *owned)
+{
+    if (!sfnt_fits(data, size))
+        return NULL;
     UiFont *f = (UiFont *)calloc(1, sizeof(UiFont));
     if (!f)
         return NULL;
@@ -220,7 +249,6 @@ static UiFont *ttf_from_mem(const uint8_t *data, int px, uint8_t *owned)
     f->owned_data = owned;
     if (!stbtt_InitFont(&f->info, data, stbtt_GetFontOffsetForIndex(data, 0)))
     {
-        free(owned);
         free(f);
         return NULL;
     }
@@ -236,8 +264,7 @@ static UiFont *ttf_from_mem(const uint8_t *data, int px, uint8_t *owned)
 
 UiFont *zui_font_load_ttf_mem(const uint8_t *data, int size, int px)
 {
-    (void)size;
-    return ttf_from_mem(data, px, NULL); /* not copied; caller keeps data alive */
+    return ttf_from_mem(data, size > 0 ? (size_t)size : 0, px, NULL); /* not copied; caller keeps data alive */
 }
 
 UiFont *zui_font_load_ttf(const char *path, int px)
@@ -246,7 +273,7 @@ UiFont *zui_font_load_ttf(const char *path, int px)
     uint8_t *data = file_read(path, &size);
     if (!data)
         return NULL;
-    UiFont *f = ttf_from_mem(data, px, data); /* font owns the bytes now */
+    UiFont *f = ttf_from_mem(data, size, px, data); /* font owns the bytes now */
     if (!f)
         fs_free(data);
     return f;
@@ -262,7 +289,7 @@ UiFont *zui_font_default(int px)
     for (int i = 0; i < DEFAULT_CACHE; ++i)
         if (g_default[i] && g_default_px[i] == px)
             return g_default[i];
-    UiFont *f = ttf_from_mem(ui_font_default_data, px, NULL);
+    UiFont *f = ttf_from_mem(ui_font_default_data, ui_font_default_size, px, NULL);
     if (!f)
         return zui_font_builtin(px / 8 < 1 ? 1 : px / 8);
     for (int i = 0; i < DEFAULT_CACHE; ++i)

@@ -126,6 +126,64 @@ static void test_render_text_matches_reference(UiFont *font, const char *what)
     framebuffer_free(&b);
 }
 
+/* ------------------------------------------------------------------ fonts that are not fonts -- */
+
+/* A file that is not a font, or is a font cut short, is refused with NULL: it used to be freed twice (the loader gave the
+   bytes to ttf_from_mem, which freed them when stb_truetype said no, and the caller freed them again), and a font whose
+   tables run past the end of the data was handed to stb_truetype, which reads wherever the table directory says. */
+#define BAD_FONT_FILE "test_ui_bad_font.ttf"
+
+static bool save_bytes(const char *path, const void *data, size_t n)
+{
+    return io_save_file(path, data, n);
+}
+
+static void test_font_load_refuses_bad_files(void)
+{
+    size_t size = 0;
+    uint8_t *good = file_read(ZEN_TEST_FONT, &size);
+    CHECK(good != NULL && size > 100000);
+    if (!good)
+        return;
+
+    /* text, empty, four bytes of a font's magic, a header that promises tables the file does not have */
+    static const char text[] = "This is a text file, not a TrueType font. It is long enough to hold a table directory.";
+    CHECK(save_bytes(BAD_FONT_FILE, text, sizeof text));
+    CHECK(zui_font_load_ttf(BAD_FONT_FILE, 16) == NULL);
+    CHECK(save_bytes(BAD_FONT_FILE, "", 0));
+    CHECK(zui_font_load_ttf(BAD_FONT_FILE, 16) == NULL);
+    CHECK(save_bytes(BAD_FONT_FILE, good, 4));
+    CHECK(zui_font_load_ttf(BAD_FONT_FILE, 16) == NULL);
+    CHECK(save_bytes(BAD_FONT_FILE, good, 200)); /* the directory is there, the tables are not */
+    CHECK(zui_font_load_ttf(BAD_FONT_FILE, 16) == NULL);
+    CHECK(save_bytes(BAD_FONT_FILE, good, size / 2)); /* cut in half: glyf and the rest run past the end */
+    CHECK(zui_font_load_ttf(BAD_FONT_FILE, 16) == NULL);
+    CHECK(save_bytes(BAD_FONT_FILE, good, size - 1)); /* one byte short */
+    CHECK(zui_font_load_ttf(BAD_FONT_FILE, 16) == NULL);
+
+    /* the same bytes from memory, in a buffer of exactly their size so that a read past the end is caught */
+    uint8_t *cut = malloc(size / 2);
+    CHECK(cut != NULL);
+    if (cut)
+    {
+        memcpy(cut, good, size / 2);
+        CHECK(zui_font_load_ttf_mem(cut, (int)(size / 2), 16) == NULL);
+        free(cut);
+    }
+    CHECK(zui_font_load_ttf_mem(good, 0, 16) == NULL);
+    CHECK(zui_font_load_ttf_mem(NULL, 100, 16) == NULL);
+
+    /* the whole font still loads, from a file and from memory */
+    UiFont *f = zui_font_load_ttf(ZEN_TEST_FONT, 16);
+    CHECK(f != NULL);
+    zui_font_free(f);
+    f = zui_font_load_ttf_mem(good, (int)size, 16);
+    CHECK(f != NULL);
+    zui_font_free(f);
+    remove(BAD_FONT_FILE);
+    fs_free(good);
+}
+
 int main(void)
 {
     UiFont *builtin = zui_font_builtin(3);
@@ -137,6 +195,8 @@ int main(void)
         test_render_text_matches_reference(ttf, "DejaVu Sans 13 px");
     zui_font_free(ttf);
     zui_font_free(builtin);
+
+    test_font_load_refuses_bad_files();
 
     printf("%d checks passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
