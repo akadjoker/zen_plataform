@@ -26,10 +26,12 @@ void draw_reset_clip(void)
     g_clip.on = false;
 }
 
+/* The far edges are summed in 64 bits: an extent of INT_MAX means "as far as there is", and x + w would wrap round to a
+   negative number and reject everything. */
 static inline bool clip_reject(int x, int y)
 {
-    return g_clip.on &&
-        (x < g_clip.x || y < g_clip.y || x >= g_clip.x + g_clip.w || y >= g_clip.y + g_clip.h);
+    return g_clip.on && (x < g_clip.x || y < g_clip.y || x >= (int64_t)g_clip.x + g_clip.w ||
+                         y >= (int64_t)g_clip.y + g_clip.h);
 }
 
 /* ---- framebuffer ownership ---- */
@@ -158,21 +160,23 @@ void draw_fill_rect(Framebuffer *fb, int x, int y, int w, int h, uint32_t color,
 {
     if (!fb || !fb->pixels || w <= 0 || h <= 0)
         return;
-    int x0 = x < 0 ? 0 : x;
-    int y0 = y < 0 ? 0 : y;
-    int x1 = x + w > fb->width ? fb->width : x + w;
-    int y1 = y + h > fb->height ? fb->height : y + h;
+    /* 64 bits for the far edges, see clip_reject: x + w wraps for a rectangle of width INT_MAX */
+    int64_t x0 = x < 0 ? 0 : x;
+    int64_t y0 = y < 0 ? 0 : y;
+    int64_t x1 = (int64_t)x + w > fb->width ? fb->width : (int64_t)x + w;
+    int64_t y1 = (int64_t)y + h > fb->height ? fb->height : (int64_t)y + h;
     if (g_clip.on) /* honour the scissor like the per-pixel primitives do */
     {
         if (x0 < g_clip.x) x0 = g_clip.x;
         if (y0 < g_clip.y) y0 = g_clip.y;
-        if (x1 > g_clip.x + g_clip.w) x1 = g_clip.x + g_clip.w;
-        if (y1 > g_clip.y + g_clip.h) y1 = g_clip.y + g_clip.h;
+        if (x1 > (int64_t)g_clip.x + g_clip.w) x1 = (int64_t)g_clip.x + g_clip.w;
+        if (y1 > (int64_t)g_clip.y + g_clip.h) y1 = (int64_t)g_clip.y + g_clip.h;
     }
-    for (int yy = y0; yy < y1; yy++)
+    /* all four now lie inside the framebuffer (or the range is empty): they fit an int again */
+    for (int yy = (int)y0; yy < (int)y1; yy++)
     {
         uint32_t *row = fb->pixels + (size_t)yy * fb->stride;
-        for (int xx = x0; xx < x1; xx++)
+        for (int xx = (int)x0; xx < (int)x1; xx++)
             row[xx] = blend == BLEND_ALPHA ? blend_over(row[xx], color) : color;
     }
 }

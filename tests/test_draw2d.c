@@ -5,6 +5,7 @@
  */
 #include "platform.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -147,6 +148,39 @@ static void test_blit(void)
     free(db.pixels);
 }
 
+/* A size or a clip extent of INT_MAX means "as far as there is": x + w must not wrap round to a negative number
+   (which made the rectangle, or the whole clip, empty). */
+static void test_huge_extents(void)
+{
+    Framebuffer fb = make_fb(10, 8);
+    draw_clear(&fb, 0xFF000000);
+    draw_fill_rect(&fb, 3, 2, INT_MAX, INT_MAX, 0xFF00FF00, BLEND_NONE);
+    CHECK(draw_get_pixel(&fb, 3, 2) == 0xFF00FF00);
+    CHECK(draw_get_pixel(&fb, 9, 7) == 0xFF00FF00);
+    CHECK(draw_get_pixel(&fb, 2, 2) == 0xFF000000); /* left of it */
+    CHECK(draw_get_pixel(&fb, 3, 1) == 0xFF000000); /* above it */
+
+    draw_clear(&fb, 0xFF000000);
+    draw_fill_rect(&fb, -5, -5, INT_MAX, 7, 0xFF0000FF, BLEND_NONE); /* rows 0..1, every column */
+    CHECK(draw_get_pixel(&fb, 0, 0) == 0xFF0000FF && draw_get_pixel(&fb, 9, 1) == 0xFF0000FF);
+    CHECK(draw_get_pixel(&fb, 9, 2) == 0xFF000000);
+    draw_fill_rect(&fb, INT_MAX - 1, 0, INT_MAX, 3, 0xFFFFFFFF, BLEND_NONE); /* far outside: nothing, no crash */
+    draw_fill_rect(&fb, 0, 0, 5, INT_MAX, 0xFFFF0000, BLEND_NONE);
+    CHECK(draw_get_pixel(&fb, 4, 7) == 0xFFFF0000 && draw_get_pixel(&fb, 5, 7) == 0xFF000000);
+
+    draw_clear(&fb, 0xFF000000);
+    draw_set_clip(2, 2, INT_MAX, INT_MAX); /* everything from (2,2) on */
+    draw_pixel(&fb, 3, 3, 0xFFFFFF00, BLEND_NONE);
+    CHECK(draw_get_pixel(&fb, 3, 3) == 0xFFFFFF00);
+    draw_pixel(&fb, 1, 3, 0xFFFFFF00, BLEND_NONE);
+    CHECK(draw_get_pixel(&fb, 1, 3) == 0xFF000000);
+    draw_fill_rect(&fb, 0, 0, 10, 8, 0xFF00FFFF, BLEND_NONE);
+    CHECK(draw_get_pixel(&fb, 9, 7) == 0xFF00FFFF && draw_get_pixel(&fb, 2, 2) == 0xFF00FFFF);
+    CHECK(draw_get_pixel(&fb, 1, 2) == 0xFF000000 && draw_get_pixel(&fb, 2, 1) == 0xFF000000);
+    draw_reset_clip();
+    free(fb.pixels);
+}
+
 int main(void)
 {
     test_clear_pixel();
@@ -154,6 +188,7 @@ int main(void)
     test_rect_line();
     test_circle_triangle();
     test_blit();
+    test_huge_extents();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
