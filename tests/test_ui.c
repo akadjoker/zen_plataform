@@ -358,6 +358,76 @@ static void test_utf8(void)
     CHECK(ui_utf8_count("\xFF\xFF", 2) == 2);
 }
 
+/* ------------------------------------------------------------------ text input -- */
+
+static char g_input[64];
+
+static bool input_frame(PlatformWindow *w, UiContext *ui)
+{
+    window_begin_frame(w);
+    zui_begin(ui, w);
+    zui_row(ui, 28, 1);
+    bool changed = zui_text_input(ui, "##t", g_input, (int)sizeof g_input);
+    zui_end(ui);
+    return changed;
+}
+
+static void press_key(PlatformWindow *w, UiContext *ui, int key)
+{
+    fake_key(w, key, true, false);
+    input_frame(w, ui);
+    fake_key(w, key, false, false);
+    input_frame(w, ui);
+}
+
+/* A buffer that is not valid UTF-8 (a Latin-1 file name in the dialog's name field, a string cut in the middle of a
+   character) has a byte that looks like the start of a longer character than there are bytes left. Delete then moved
+   memory by a negative length (a huge one), and Right put the caret past the end for the next key of the same frame. */
+static void test_text_input_invalid_utf8(void)
+{
+    PlatformWindow *w = make_window();
+    UiContext *ui = zui_create();
+    UiFont *font = zui_font_builtin(1);
+    CHECK(w && ui && font);
+    if (!w || !ui || !font)
+        return;
+    zui_set_font(ui, font);
+
+    /* focus the field with a click in it (the window is 400 wide, the field spans it, the first row is 10 to 38) */
+    snprintf(g_input, sizeof g_input, "caf\xE9");
+    fake_mouse_move(w, 300, 24);
+    input_frame(w, ui);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_move(w, 300, 24);
+    input_frame(w, ui);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    input_frame(w, ui);
+
+    press_key(w, ui, KEY_END);
+    press_key(w, ui, KEY_LEFT);   /* the caret from the end to before the last byte, 0xE9: a 3-byte start with no more bytes */
+    press_key(w, ui, KEY_DELETE); /* deleted the byte, not the 3 it claims to start */
+    CHECK(strcmp(g_input, "caf") == 0);
+
+    snprintf(g_input, sizeof g_input, "a\xE2");
+    press_key(w, ui, KEY_HOME);
+    press_key(w, ui, KEY_RIGHT);  /* over the "a" */
+    press_key(w, ui, KEY_RIGHT);  /* over the cut character: the end, not past it */
+    press_key(w, ui, KEY_BACKSPACE);
+    CHECK(strcmp(g_input, "a") == 0);
+    press_key(w, ui, KEY_DELETE); /* at the end: nothing to delete */
+    CHECK(strcmp(g_input, "a") == 0);
+
+    /* a string that does start well still edits as one character: backspace takes the whole of "é" */
+    snprintf(g_input, sizeof g_input, "x\xC3\xA9");
+    press_key(w, ui, KEY_END);
+    press_key(w, ui, KEY_BACKSPACE);
+    CHECK(strcmp(g_input, "x") == 0);
+
+    zui_destroy(ui);
+    zui_font_free(font);
+    window_destroy(w);
+}
+
 /* ------------------------------------------------------------------ the file dialog -- */
 
 /* One frame of the dialog, over a window the test feeds with the fake backend. Returns what zui_dialog says. */
@@ -549,6 +619,7 @@ int main(void)
     test_state_store_grows();
     test_dialog_flow();
     test_utf8();
+    test_text_input_invalid_utf8();
 
     platform_shutdown();
     printf("%d checks passed, %d failed\n", g_pass, g_fail);

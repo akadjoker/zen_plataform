@@ -305,22 +305,27 @@ bool zui_progress(UiContext *ui, float fraction)
     return false;
 }
 
-/* Length in bytes of the UTF-8 char that ends just before byte offset `at`. */
+/* Length in bytes of the UTF-8 char that ends just before byte offset `at` (at most 4: a run of stray continuation bytes is
+   not one character). */
 static int utf8_prev_len(const char *s, int at)
 {
     int n = 1;
-    while (at - n > 0 && ((uint8_t)s[at - n] & 0xC0) == 0x80)
+    while (n < 4 && at - n > 0 && ((uint8_t)s[at - n] & 0xC0) == 0x80)
         n++;
     return n;
 }
-/* Length in bytes of the UTF-8 char starting at byte offset `at`. */
-static int utf8_at_len(const char *s, int at)
+/* Length in bytes of the UTF-8 char starting at byte offset `at` of a string of `len` bytes: the start byte and the
+   continuation bytes that really follow it. A byte that claims a longer character than there are bytes left (a Latin-1
+   name, a string cut in the middle of a character) is one character of its own: the length never goes past the end,
+   which Delete and Right used to, moving memory by a negative size. */
+static int utf8_at_len(const char *s, int at, int len)
 {
     uint8_t c = (uint8_t)s[at];
-    if (c >= 0xF0) return 4;
-    if (c >= 0xE0) return 3;
-    if (c >= 0xC0) return 2;
-    return 1;
+    int want = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+    int n = 1;
+    while (n < want && at + n < len && ((uint8_t)s[at + n] & 0xC0) == 0x80)
+        n++;
+    return n;
 }
 /* Encode codepoint to UTF-8 in out (<=4 bytes); returns the byte count. */
 static int utf8_encode(uint32_t cp, char out[4])
@@ -369,7 +374,7 @@ bool zui_text_input(UiContext *ui, const char *label, char *buf, int cap)
                 int d = ui->in.mouse_x - gx; if (d < 0) d = -d;
                 if (d < bestd) { bestd = d; best = i; }
                 if (i == len) break;
-                i += utf8_at_len(buf, i);
+                i += utf8_at_len(buf, i, len);
             }
             ui->caret = best;
         }
@@ -395,14 +400,14 @@ bool zui_text_input(UiContext *ui, const char *label, char *buf, int cap)
             }
             else if (key == KEY_DELETE && ui->caret < len)
             {
-                int n = utf8_at_len(buf, ui->caret);
+                int n = utf8_at_len(buf, ui->caret, len);
                 memmove(buf + ui->caret, buf + ui->caret + n, (size_t)(len - ui->caret - n + 1));
                 len -= n; changed = true;
             }
             else if (key == KEY_LEFT && ui->caret > 0)
                 ui->caret -= utf8_prev_len(buf, ui->caret);
             else if (key == KEY_RIGHT && ui->caret < len)
-                ui->caret += utf8_at_len(buf, ui->caret);
+                ui->caret += utf8_at_len(buf, ui->caret, len);
             else if (key == KEY_HOME)
                 ui->caret = 0;
             else if (key == KEY_END)
