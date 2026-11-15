@@ -148,6 +148,57 @@ static void test_blit(void)
     free(db.pixels);
 }
 
+/* A source rectangle that reaches outside the source reads the nearest edge of it, as the nearest-neighbour path
+   always did. The bilinear path used to read the neighbour texel without checking: before the source (a negative
+   rectangle) or after it (a rectangle longer than the source), outside the pixels and in the next or the previous row. */
+static void test_blit_outside_source(void)
+{
+    Framebuffer src = make_fb(4, 3);
+    for (int y = 0; y < 3; y++)
+        for (int x = 0; x < 4; x++)
+            src.pixels[y * 4 + x] = 0xFF000000u | (uint32_t)((y * 4 + x + 1) * 0x101010);
+    Framebuffer dst = make_fb(8, 3);
+    BlendMode modes[] = {BLEND_NONE, BLEND_ALPHA};
+    ScaleMode scales[] = {SCALE_NEAREST, SCALE_BILINEAR};
+    for (int m = 0; m < 2; m++)
+        for (int k = 0; k < 2; k++)
+        {
+            /* before the source: every column is the first one */
+            draw_clear(&dst, 0xFF000000);
+            draw_blit(&dst, &src, -4, 0, 2, 3, 0, 0, 4, 3, modes[m], scales[k]);
+            bool before = true;
+            for (int y = 0; y < 3; y++)
+                for (int x = 0; x < 4; x++)
+                    before = before && draw_get_pixel(&dst, x, y) == src.pixels[y * 4];
+            CHECK(before);
+
+            /* after it: every column is the last one */
+            draw_clear(&dst, 0xFF000000);
+            draw_blit(&dst, &src, 6, 0, 2, 3, 0, 0, 4, 3, modes[m], scales[k]);
+            bool after = true;
+            for (int y = 0; y < 3; y++)
+                for (int x = 0; x < 4; x++)
+                    after = after && draw_get_pixel(&dst, x, y) == src.pixels[y * 4 + 3];
+            CHECK(after);
+
+            /* below it and above it: every row is the last or the first (the read is outside the buffer there) */
+            draw_clear(&dst, 0xFF000000);
+            draw_blit(&dst, &src, 0, 5, 4, 2, 0, 0, 4, 3, modes[m], scales[k]);
+            bool low = true;
+            for (int x = 0; x < 4; x++)
+                low = low && draw_get_pixel(&dst, x, 2) == src.pixels[2 * 4 + x];
+            CHECK(low);
+            draw_clear(&dst, 0xFF000000);
+            draw_blit(&dst, &src, 0, -6, 4, 2, 0, 0, 4, 3, modes[m], scales[k]);
+            bool high = true;
+            for (int x = 0; x < 4; x++)
+                high = high && draw_get_pixel(&dst, x, 0) == src.pixels[x];
+            CHECK(high);
+        }
+    free(src.pixels);
+    free(dst.pixels);
+}
+
 /* A size or a clip extent of INT_MAX means "as far as there is": x + w must not wrap round to a negative number
    (which made the rectangle, or the whole clip, empty). */
 static void test_huge_extents(void)
@@ -189,6 +240,7 @@ int main(void)
     test_circle_triangle();
     test_blit();
     test_huge_extents();
+    test_blit_outside_source();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

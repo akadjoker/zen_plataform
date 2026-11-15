@@ -337,17 +337,19 @@ static inline uint32_t src_at(const Framebuffer *src, int x, int y)
     return src->pixels[(size_t)y * src->stride + x];
 }
 
-static uint32_t sample_bilinear(const Framebuffer *src, int fx, int fy)
+static inline int clamp_index(int64_t v, int count)
 {
-    /* fx, fy are 16.16 fixed-point source coordinates */
-    int x0 = fx >> 16, y0 = fy >> 16;
-    int tx = (fx >> 8) & 0xFF, ty = (fy >> 8) & 0xFF;
-    int x1 = x0 + 1 < src->width ? x0 + 1 : x0;
-    int y1 = y0 + 1 < src->height ? y0 + 1 : y0;
-    if (x0 < 0)
-        x0 = 0;
-    if (y0 < 0)
-        y0 = 0;
+    return v < 0 ? 0 : v >= count ? count - 1 : (int)v;
+}
+
+static uint32_t sample_bilinear(const Framebuffer *src, int64_t fx, int64_t fy)
+{
+    /* fx, fy are 16.16 fixed-point source coordinates. A coordinate outside the source reads its nearest edge (as the
+       nearest-neighbour path does), for the neighbour texel too: x0 + 1 on a texel before the source was not checked. */
+    int64_t ix = fx >> 16, iy = fy >> 16;
+    int tx = (int)((fx >> 8) & 0xFF), ty = (int)((fy >> 8) & 0xFF);
+    int x0 = clamp_index(ix, src->width), x1 = clamp_index(ix + 1, src->width);
+    int y0 = clamp_index(iy, src->height), y1 = clamp_index(iy + 1, src->height);
 
     uint32_t p00 = src_at(src, x0, y0), p10 = src_at(src, x1, y0);
     uint32_t p01 = src_at(src, x0, y1), p11 = src_at(src, x1, y1);
@@ -373,42 +375,31 @@ void draw_blit(Framebuffer *dst, const Framebuffer *src,
     if (!dst || !dst->pixels || !src || !src->pixels || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
         return;
 
-    int stepx = (int)(((long)sw << 16) / dw);
-    int stepy = (int)(((long)sh << 16) / dh);
+    /* 64 bits for the fixed-point coordinates: a source rectangle at 32768 or more, or a negative one (a left shift of a
+       negative number is undefined), does not fit 16.16 in an int */
+    int64_t stepx = ((int64_t)sw * 65536) / dw;
+    int64_t stepy = ((int64_t)sh * 65536) / dh;
 
     for (int j = 0; j < dh; j++)
     {
-        int oy = dy + j;
+        int64_t oy = (int64_t)dy + j;
         if (oy < 0 || oy >= dst->height)
             continue;
-        int fy = (sy << 16) + j * stepy + (scale == SCALE_BILINEAR ? stepy / 2 - 32768 : 0);
+        int64_t fy = (int64_t)sy * 65536 + j * stepy + (scale == SCALE_BILINEAR ? stepy / 2 - 32768 : 0);
 
         for (int i = 0; i < dw; i++)
         {
-            int ox = dx + i;
+            int64_t ox = (int64_t)dx + i;
             if (ox < 0 || ox >= dst->width)
                 continue;
-            int fx = (sx << 16) + i * stepx + (scale == SCALE_BILINEAR ? stepx / 2 - 32768 : 0);
+            int64_t fx = (int64_t)sx * 65536 + i * stepx + (scale == SCALE_BILINEAR ? stepx / 2 - 32768 : 0);
 
             uint32_t c;
             if (scale == SCALE_BILINEAR)
-            {
                 c = sample_bilinear(src, fx, fy);
-            }
             else
-            {
-                int srcx = fx >> 16, srcy = fy >> 16;
-                if (srcx < 0)
-                    srcx = 0;
-                if (srcy < 0)
-                    srcy = 0;
-                if (srcx >= src->width)
-                    srcx = src->width - 1;
-                if (srcy >= src->height)
-                    srcy = src->height - 1;
-                c = src_at(src, srcx, srcy);
-            }
-            draw_pixel(dst, ox, oy, c, blend);
+                c = src_at(src, clamp_index(fx >> 16, src->width), clamp_index(fy >> 16, src->height));
+            draw_pixel(dst, (int)ox, (int)oy, c, blend);
         }
     }
 }
