@@ -128,7 +128,10 @@ IoStream *io_platform_open_file(const char *path, int flags)
         win32_error("cannot open", path);
         return NULL;
     }
-    if (GetFileType(h) == FILE_TYPE_UNKNOWN || (GetFileAttributesW(wide) & FILE_ATTRIBUTE_DIRECTORY))
+    /* INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF, which has the directory bit: it says "no attributes" (a pipe or a device opened
+       through CreateFileW, a file gone since), not "a directory" */
+    DWORD attributes = GetFileAttributesW(wide);
+    if (GetFileType(h) == FILE_TYPE_UNKNOWN || (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)))
     {
         CloseHandle(h);
         error_set("cannot open '%s': is a directory", path);
