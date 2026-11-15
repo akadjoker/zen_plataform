@@ -108,6 +108,16 @@ static void pump_once(PlatformWindow *w)
     }
 }
 
+/* Waits until everything the test sent has reached the window's own connection, not for a time: the first round trip
+   (on the test's connection) says the server has made all of its events, the second (on the window's) that they have
+   been read from the socket, in order, into the queue the next frame empties. On a loaded machine a pause of so many
+   milliseconds is no promise of that. */
+static void delivered(PlatformWindow *w)
+{
+    XSync(g_dpy, False);
+    XSync((Display *)window_native_handle(w, NATIVE_DISPLAY), False);
+}
+
 /* Lets the server's events reach the window: a few frames, the log collecting. */
 static void settle(PlatformWindow *w)
 {
@@ -432,8 +442,7 @@ static void test_order(PlatformWindow *w)
         btn(1, false);
         ptr_in(222, 133);
         ptr_in(233, 144);
-        XSync(g_dpy, False);
-        time_sleep(100);
+        delivered(w);
         pump_once(w); /* one frame holds all of it */
         for (int i = 0; i < g_n; i++)
             if (g_log[i].type == EVENT_MOUSE_BUTTON && !g_log[i].flag)
@@ -527,8 +536,7 @@ static void test_click_inside_one_frame(PlatformWindow *w)
     clear_log();
     btn(1, true);
     btn(1, false); /* both are in the queue when the frame begins */
-    XSync(g_dpy, False);
-    time_sleep(20);
+    delivered(w);
     window_begin_frame(w);
     bool pressed = mouse_button_pressed(w, MOUSE_LEFT);
     bool down = mouse_button_down(w, MOUSE_LEFT);
@@ -565,8 +573,7 @@ static void test_nested_loop(PlatformWindow *main_w)
     settle(main_w);
     clear_log();
     btn(1, true);
-    XSync(g_dpy, False);
-    time_sleep(20);
+    delivered(main_w);
     window_begin_frame(main_w);
     CHECK(mouse_button_down(main_w, MOUSE_LEFT));
     for (int i = 0; i < 6000; i++) /* a long modal: more motion than the deferred list holds */
