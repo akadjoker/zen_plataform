@@ -13,6 +13,7 @@
 #include <string.h>
 
 static int g_pass, g_fail;
+static bool g_platform_down; /* a re-init failed: nothing that needs the platform can run */
 
 #define CHECK(cond)                                                \
     do                                                             \
@@ -154,6 +155,7 @@ static void test_cycles(void)
         if (!platform_init())
         {
             CHECK(false);
+            g_platform_down = true;
             return;
         }
     }
@@ -177,6 +179,7 @@ static void test_cycles(void)
         if (!platform_init())
         {
             CHECK(false);
+            g_platform_down = true;
             return;
         }
     }
@@ -245,11 +248,19 @@ int main(void)
         printf("skip: no display\n");
         return 77;
     }
+    /* An X server resets itself when its last client goes, and a connection attempted while it does is refused. The
+       cycles below close the platform's connection and open it again at once, which worked only when the server was
+       quick (a loaded machine failed it at the first cycle, and the later sections ran on a platform that was not up).
+       A connection of the test's own keeps the server from resetting. */
+    Display *keep = XOpenDisplay(NULL);
     test_resize_storm();
     test_close_twice();
     test_cycles();
-    test_failed_creates();
+    if (!g_platform_down)
+        test_failed_creates();
     platform_shutdown();
+    if (keep)
+        XCloseDisplay(keep);
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
