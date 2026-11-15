@@ -68,6 +68,9 @@ void framebuffer_free(Framebuffer *fb)
 
 /* ---- color helpers ---- */
 
+/* Source over destination, the result opaque. Each channel is (s*a + d*(255-a) + 127) / 255, with the division by 255
+   done as (y + 1 + (y >> 8)) >> 8, exact for every y up to 65534 (test_draw2d checks all of them): red and blue go
+   through together in the two 16-bit halves of one word, green on its own. Three divisions fewer per pixel. */
 static inline uint32_t blend_over(uint32_t dst, uint32_t src)
 {
     uint32_t sa = src >> 24;
@@ -76,12 +79,11 @@ static inline uint32_t blend_over(uint32_t dst, uint32_t src)
     if (sa == 0)
         return dst;
     uint32_t ia = 255 - sa;
-    uint32_t sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
-    uint32_t dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
-    uint32_t r = (sr * sa + dr * ia + 127) / 255;
-    uint32_t g = (sg * sa + dg * ia + 127) / 255;
-    uint32_t b = (sb * sa + db * ia + 127) / 255;
-    return 0xFF000000u | (r << 16) | (g << 8) | b;
+    uint32_t rb = (src & 0x00FF00FFu) * sa + (dst & 0x00FF00FFu) * ia + 0x007F007Fu;
+    rb = ((rb + ((rb >> 8) & 0x00FF00FFu) + 0x00010001u) >> 8) & 0x00FF00FFu;
+    uint32_t g = ((src >> 8) & 0xFF) * sa + ((dst >> 8) & 0xFF) * ia + 127;
+    g = (g + 1 + (g >> 8)) >> 8;
+    return 0xFF000000u | rb | (g << 8);
 }
 
 static long isqrt_l(long v)

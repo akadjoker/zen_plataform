@@ -148,6 +148,41 @@ static void test_blit(void)
     free(db.pixels);
 }
 
+/* The alpha blend against the plain formula, for every source alpha, every source channel value and every destination
+   channel value (green and blue take a different value of the same sweep, so each of them meets every combination
+   too): (s*a + d*(255-a) + 127) / 255 in each channel, the result opaque. The blend does the divisions without
+   dividing, and this is what says it still rounds the same. */
+static void test_blend_exact(void)
+{
+    Framebuffer fb = make_fb(1, 1);
+    int wrong = 0;
+    for (uint32_t a = 0; a < 256; a++)
+        for (uint32_t sc = 0; sc < 256; sc++)
+            for (uint32_t dc = 0; dc < 256; dc++)
+            {
+                uint32_t sr = sc, sg = (sc * 3) & 255, sb = (sc * 7 + 1) & 255;
+                uint32_t dr = dc, dg = (dc * 5) & 255, db = (dc * 11 + 3) & 255;
+                uint32_t src = a << 24 | sr << 16 | sg << 8 | sb;
+                fb.pixels[0] = 0xFF000000u | dr << 16 | dg << 8 | db;
+                draw_pixel(&fb, 0, 0, src, BLEND_ALPHA);
+                uint32_t want;
+                if (a == 255)
+                    want = src;
+                else if (a == 0)
+                    want = 0xFF000000u | dr << 16 | dg << 8 | db;
+                else
+                {
+                    uint32_t ia = 255 - a;
+                    want = 0xFF000000u | ((sr * a + dr * ia + 127) / 255) << 16 | ((sg * a + dg * ia + 127) / 255) << 8 |
+                           ((sb * a + db * ia + 127) / 255);
+                }
+                if (fb.pixels[0] != want)
+                    wrong++;
+            }
+    CHECK(wrong == 0);
+    free(fb.pixels);
+}
+
 /* A source rectangle that reaches outside the source reads the nearest edge of it, as the nearest-neighbour path
    always did. The bilinear path used to read the neighbour texel without checking: before the source (a negative
    rectangle) or after it (a rectangle longer than the source), outside the pixels and in the next or the previous row. */
@@ -236,6 +271,7 @@ int main(void)
 {
     test_clear_pixel();
     test_blend();
+    test_blend_exact();
     test_rect_line();
     test_circle_triangle();
     test_blit();
