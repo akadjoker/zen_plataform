@@ -140,6 +140,13 @@ IoStream *io_platform_open_file(const char *path, int flags)
     return s;
 }
 
+unsigned long long io_platform_unique(void)
+{
+    static volatile LONG64 counter;
+    unsigned long long n = (unsigned long long)InterlockedIncrement64(&counter);
+    return ((unsigned long long)GetCurrentProcessId() << 32) ^ n;
+}
+
 bool io_platform_replace_file(const char *from, const char *to)
 {
     wchar_t wfrom[PATH_CAP], wto[PATH_CAP];

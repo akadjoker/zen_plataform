@@ -2,7 +2,11 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 
 static int g_pass, g_fail;
 
@@ -216,6 +220,72 @@ static void test_load_save(void)
     CHECK(!io_save_file(ROOT "/n.bin", NULL, 3));
 }
 
+#if !defined(_WIN32)
+/* Saves of one path from several threads at once (two instances of a program do the same across processes): each
+   save has a temporary file of its own, so none fails for want of the file another one renamed, the result is one
+   whole payload and not a mix, and nothing is left behind. */
+#define RACE_THREADS 4
+#define RACE_ROUNDS 40
+#define RACE_SIZE (512 * 1024)
+
+static int g_race_failed[RACE_THREADS];
+static volatile int g_race_go;
+
+static void *race_worker(void *arg)
+{
+    int id = (int)(intptr_t)arg;
+    unsigned char *payload = malloc(RACE_SIZE);
+    memset(payload, 'A' + id, RACE_SIZE);
+    while (!__atomic_load_n(&g_race_go, __ATOMIC_SEQ_CST))
+    {
+    }
+    for (int i = 0; i < RACE_ROUNDS; i++)
+        if (!io_save_file(ROOT "/race/shared.dat", payload, RACE_SIZE))
+            g_race_failed[id]++;
+    free(payload);
+    return NULL;
+}
+
+static bool count_entry(const char *path, PathType type, void *user)
+{
+    (void)path;
+    (void)type;
+    (*(int *)user)++;
+    return true;
+}
+
+static void test_concurrent_save(void)
+{
+    CHECK(dir_make(ROOT "/race"));
+    pthread_t threads[RACE_THREADS];
+    for (intptr_t i = 0; i < RACE_THREADS; i++)
+        pthread_create(&threads[i], NULL, race_worker, (void *)i);
+    __atomic_store_n(&g_race_go, 1, __ATOMIC_SEQ_CST);
+    for (int i = 0; i < RACE_THREADS; i++)
+        pthread_join(threads[i], NULL);
+    int failed = 0;
+    for (int i = 0; i < RACE_THREADS; i++)
+        failed += g_race_failed[i];
+    printf("  concurrent saves: %d of %d failed\n", failed, RACE_THREADS * RACE_ROUNDS);
+    CHECK(failed == 0);
+
+    size_t n = 0;
+    unsigned char *data = io_load_file(ROOT "/race/shared.dat", &n);
+    CHECK(data != NULL && n == RACE_SIZE);
+    bool whole = data != NULL && n == RACE_SIZE && data[0] >= 'A' && data[0] < 'A' + RACE_THREADS;
+    for (size_t i = 1; whole && i < n; i++)
+        whole = data[i] == data[0];
+    CHECK(whole);
+    fs_free(data);
+
+    int entries = 0;
+    CHECK(fs_enumerate_directory(ROOT "/race", false, count_entry, &entries));
+    CHECK(entries == 1); /* shared.dat, and no temporary file left */
+    remove(ROOT "/race/shared.dat");
+    remove(ROOT "/race");
+}
+#endif
+
 /* procfs reports a size of 0 for files that do hold text: the size alone cannot say a file is empty. */
 static void test_unsized_files(void)
 {
@@ -275,6 +345,9 @@ int main(void)
     test_file_modes();
     test_open_errors();
     test_load_save();
+#if !defined(_WIN32)
+    test_concurrent_save();
+#endif
     test_unsized_files();
     test_assets();
 

@@ -44,6 +44,10 @@ typedef enum
 
 int io_parse_mode(const char *mode);
 
+/* A number no other call in this process, and no other process on the machine, returns at the same time: for the name
+   of a temporary file. */
+unsigned long long io_platform_unique(void);
+
 IoStream *io_platform_open_file(const char *path, int flags);
 bool io_platform_replace_file(const char *from, const char *to);
 bool io_platform_remove_file(const char *path);

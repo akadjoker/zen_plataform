@@ -147,6 +147,13 @@ IoStream *io_platform_open_file(const char *path, int flags)
     return s;
 }
 
+unsigned long long io_platform_unique(void)
+{
+    static unsigned long long counter;
+    unsigned long long n = __atomic_add_fetch(&counter, 1, __ATOMIC_SEQ_CST);
+    return ((unsigned long long)getpid() << 32) ^ n;
+}
+
 static void sync_parent_dir(const char *path)
 {
     char dir[4096];
