@@ -259,7 +259,8 @@ bool zui_knob(UiContext *ui, const char *label, float *value, float min, float m
         zui_request_cursor(ui, CURSOR_HAND);
 
     float frac = max > min ? (*value - min) / (max - min) : 0.0f;
-    if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
 
     /* body: filled circle (round-rect with radius = half) + ring */
     UiRect body = zui_rect(cx - radius, cy - radius, radius * 2, radius * 2);

@@ -735,6 +735,7 @@ static void test_theme_presets(PlatformWindow *w, UiContext *ui)
 
 static void test_push_pop_color(PlatformWindow *w, UiContext *ui)
 {
+    (void)w;
     UiStyle *sty = zui_style(ui);
     UiColor old_acc = sty->colors[UI_COL_ACCENT];
 
@@ -757,6 +758,7 @@ static void test_push_pop_color(PlatformWindow *w, UiContext *ui)
 
 static void test_state_store(PlatformWindow *w, UiContext *ui)
 {
+    (void)w;
     ZuiId id = zui_id(ui, "test_state");
 
     int *iv = zui_state_int(ui, id, 42);
@@ -785,7 +787,7 @@ static void test_state_store(PlatformWindow *w, UiContext *ui)
 
 static void test_id_push_pop(PlatformWindow *w, UiContext *ui)
 {
-    ZuiId base = zui_id(ui, "parent");
+    (void)w;
     zui_push_id(ui, "child");
     ZuiId child = zui_id(ui, "item");
     zui_pop_id(ui);
@@ -827,6 +829,7 @@ static void test_font_creation(void)
 
 static void test_id_label_rules(PlatformWindow *w, UiContext *ui)
 {
+    (void)w;
     ZuiId a = zui_id(ui, "Save");
     CHECK(a != 0);
 

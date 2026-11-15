@@ -135,30 +135,6 @@ static uint32_t store_hash(ZuiId id)
 
 #define TOMBSTONE ((ZuiId)0xFFFFFFFFu)
 
-static int store_find(UiContext *ui, ZuiId id, bool want_empty)
-{
-    uint32_t h = store_hash(id);
-    for (int i = 0; i < UI_STORE_SIZE; ++i)
-    {
-        int slot = (int)((h + (uint32_t)i) % (uint32_t)UI_STORE_SIZE);
-        if (ui->store[slot].tag == 0 || ui->store[slot].id == TOMBSTONE)
-        {
-            if (want_empty && ui->store[slot].tag == 0)
-                return slot;
-            if (!want_empty && ui->store[slot].id == id)
-                return -1; /* not found, but this is the tombstone case */
-            if (ui->store[slot].tag == 0)
-                return -1; /* true empty */
-            /* tombstone: keep probing */
-            if (ui->store[slot].id == TOMBSTONE)
-                continue;
-        }
-        if (ui->store[slot].id == id)
-            return slot;
-    }
-    return -1;
-}
-
 static int store_find_or_insert(UiContext *ui, ZuiId id)
 {
     uint32_t h = store_hash(id);
