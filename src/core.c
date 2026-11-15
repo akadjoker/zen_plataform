@@ -448,17 +448,26 @@ static uint64_t now_nanos(void)
 #endif
 }
 
+/* Whether platform_init has succeeded and platform_shutdown has not been called since. */
+static bool g_ready;
+
 bool platform_init(void)
 {
+    if (g_ready)
+        return true; /* a second call would open the display again and lose the first */
     g_time_base = now_nanos();
     if (!backend_init())
         return false;
     gamepad_init();
+    g_ready = true;
     return true;
 }
 
 void platform_shutdown(void)
 {
+    if (!g_ready)
+        return; /* never up, failed to come up, or already down: there is nothing to take down */
+    g_ready = false;
     gamepad_shutdown();
     backend_shutdown();
 }
@@ -467,6 +476,12 @@ PlatformWindow *window_create(const WindowConfig *cfg)
 {
     if (!cfg)
         return NULL;
+    if (!g_ready)
+    {
+        /* the backends use their connection to the system, which is not there before platform_init succeeds */
+        error_set("the platform is not initialized (platform_init has not succeeded)");
+        return NULL;
+    }
     const GLConfig *gl = &cfg->gl;
     if (gl->profile < GL_PROFILE_DEFAULT || gl->profile > GL_PROFILE_ES || gl->major < 0 ||
         gl->minor < 0 || gl->msaa < 0)

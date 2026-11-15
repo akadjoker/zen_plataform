@@ -241,6 +241,31 @@ static void test_failed_creates(void)
     }
 }
 
+/* The platform is down (after platform_shutdown, as after a platform_init that failed): a window cannot be made, and
+   saying so is an error, not a crash on a connection that is gone; shutting down again, and starting twice, are
+   harmless. */
+static void test_without_platform(void)
+{
+    WindowConfig cfg = {.title = "nothing", .width = 80, .height = 60, .x = WINDOW_POS_UNDEFINED, .y = WINDOW_POS_UNDEFINED};
+    platform_clear_error();
+    CHECK(window_create(&cfg) == NULL);
+    CHECK(strstr(platform_get_error(), "not initialized") != NULL);
+    cfg.render = RENDER_PIXELS;
+    CHECK(window_create(&cfg) == NULL);
+    platform_shutdown(); /* a second shutdown */
+    platform_shutdown();
+
+    CHECK(platform_init());
+    const int fds = open_fds();
+    CHECK(platform_init()); /* already up: no second connection */
+    CHECK(open_fds() == fds);
+    PlatformWindow *w = window_create(&cfg);
+    CHECK(w != NULL);
+    if (w)
+        window_destroy(w);
+    platform_shutdown();
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -259,6 +284,7 @@ int main(void)
     if (!g_platform_down)
         test_failed_creates();
     platform_shutdown();
+    test_without_platform();
     if (keep)
         XCloseDisplay(keep);
     printf("%d passed, %d failed\n", g_pass, g_fail);
