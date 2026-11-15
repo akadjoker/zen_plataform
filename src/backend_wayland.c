@@ -858,8 +858,14 @@ static void keyboard_keymap(void *data, struct wl_keyboard *kb, uint32_t format,
     close(fd);
     if (text == MAP_FAILED)
         return;
+    /* The size is what the compositor says; the protocol does not say the text ends with a NUL (most send one, counted in the
+       size). xkb_keymap_new_from_string reads until it finds one, which past the end of an exact-size mapping is another
+       mapping or a fault, so the text is given to xkb with its length, less the NUL when there is one. */
+    size_t length = size;
+    if (length > 0 && text[length - 1] == '\0')
+        length--;
     struct xkb_keymap *keymap =
-        xkb_keymap_new_from_string(g.xkb, text, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+        xkb_keymap_new_from_buffer(g.xkb, text, length, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
     munmap(text, size);
     if (!keymap)
         return;

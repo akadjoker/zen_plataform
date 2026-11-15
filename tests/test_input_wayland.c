@@ -65,6 +65,7 @@ static struct
     uint32_t serial;
     struct xkb_context *xkb;
     struct xkb_keymap *keymap;
+    bool bare; /* send the keymap with no NUL, padded to whole pages */
     struct xkb_state *state;
 
     /* the last wl_pointer.set_cursor, and what the cursor surface showed with it */
@@ -366,12 +367,24 @@ static void pointer_gone(struct wl_resource *r)
         S.pointer = NULL;
 }
 
+/* The protocol does not say the keymap ends with a NUL: with S.bare it is sent without one, its size a whole number of
+   pages (padded with newlines, which xkb ignores), so that nothing follows it in the client's mapping either. */
 static void send_keymap(void)
 {
     if (!S.keyboard || !S.keymap)
         return;
     char *text = xkb_keymap_get_as_string(S.keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
     size_t size = strlen(text) + 1;
+    if (S.bare)
+    {
+        const size_t page = 4096;
+        size = (strlen(text) + page - 1) / page * page;
+        char *padded = malloc(size);
+        memset(padded, '\n', size);
+        memcpy(padded, text, strlen(text));
+        free(text);
+        text = padded;
+    }
     int fd = memfd_create("keymap", MFD_CLOEXEC);
     if (fd >= 0 && write(fd, text, size) == (ssize_t)size)
         wl_keyboard_send_keymap(S.keyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)size);
@@ -522,6 +535,7 @@ static void run_cmd(const Cmd *c)
     switch (c->type)
     {
     case CMD_LAYOUT:
+        S.bare = c->b != 0;
         set_layout(c->a);
         break;
     case CMD_KB_ENTER:
@@ -931,6 +945,19 @@ static void test_layout(PlatformWindow *w)
     const Rec *first = nth(EVENT_KEY, 0);
     CHECK(first && first->scancode == EV_Q + 8); /* the position is the scancode */
 
+    cmd(CMD_LAYOUT, 0, 0, 0, 0);
+    cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+    CHECK(settle(w));
+
+    /* the same layout sent as a keymap with no NUL at the end and a size of whole pages: the client must read it by its
+       size, not by looking for a NUL past the end of its mapping */
+    reset();
+    cmd(CMD_LAYOUT, 1, 1, 0, 0);
+    cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+    tap(EV_Q);
+    CHECK(settle(w));
+    CHECK(count_key(KEY_A, true, false) == 1);
+    CHECK(count_char('a') == 1);
     cmd(CMD_LAYOUT, 0, 0, 0, 0);
     cmd(CMD_KB_ENTER, 0, 0, 0, 0);
     CHECK(settle(w));
