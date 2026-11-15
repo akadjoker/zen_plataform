@@ -33,7 +33,8 @@ typedef struct
 #define UI_MAX_CONTAINERS 8
 #define UI_MAX_COLOR_STACK 32
 #define UI_ID_STACK_MAX   32
-#define UI_STORE_SIZE     64
+#define UI_STORE_BLOCK    64    /* entries of the state store are allocated in blocks of this many, and never move */
+#define UI_STORE_MAX      65536 /* the most entries the store keeps; state for ids past that is not kept */
 
 typedef enum { ROW_DYNAMIC, ROW_STATIC, ROW_CUSTOM } RowMode;
 
@@ -86,6 +87,23 @@ typedef struct
     UiDialogState result;
     char          out[1024];     /* chosen path when OK */
 } UiDialog;
+
+/* tag: 0 = nothing set yet, 1 = int, 2 = float, 3 = ptr */
+typedef struct
+{
+    ZuiId   id;
+    int     vi;
+    float   vf;
+    void   *vp;
+    uint8_t tag;
+} UiStoreEntry;
+
+/* A slot of the store's index keeps the id beside the entry, so a lookup reads one place and not two. */
+typedef struct
+{
+    ZuiId         id;
+    UiStoreEntry *entry;
+} UiStoreSlot;
 
 struct UiContext
 {
@@ -151,9 +169,14 @@ struct UiContext
     ZuiId id_stack[UI_ID_STACK_MAX];
     int   id_sp;
 
-    /* generic id-keyed state store, open-addressed hash */
-    struct { ZuiId id; uint32_t key; int vi; float vf; void *vp; uint8_t tag; } store[UI_STORE_SIZE];
-    /* tag: 0=empty, 1=int, 2=float, 3=ptr */
+    /* generic id-keyed state store: the entries live in blocks that never move (zui_state_* hand out pointers into them,
+       and a widget holds several at once), found through an open-addressed index that grows with them */
+    UiStoreEntry **store_blocks;
+    int            store_blocks_n;
+    int            store_count;
+    UiStoreSlot   *store_index; /* the id and entry of each slot, entry NULL = empty; a power of two long, at most half full */
+    int            store_index_cap;
+    UiStoreEntry   store_spill; /* what a call gets when the store is full or out of memory: a fresh entry each time */
 };
 
 /* ---- command buffer (ui_core.c) ---------------------------------------- */
@@ -193,6 +216,7 @@ int16_t ui_popup_open(UiContext *ui, UiRect rect);
 
 /* ---- file dialog (ui_dialog.c) ----------------------------------------- */
 void ui_dialog_free(UiContext *ui); /* release the dialog's cached entries */
+void ui_state_free(UiContext *ui);  /* release the state store (ui_state.c) */
 
 /* Vertically center text of height `th` in a cell of height `h`. */
 static inline int ui_text_baseline_y(int cell_y, int h, int th)

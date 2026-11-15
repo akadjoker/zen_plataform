@@ -184,6 +184,7 @@ void zui_destroy(UiContext *ui)
     if (!ui)
         return;
     ui_dialog_free(ui);
+    ui_state_free(ui);
     ui_dl_free(&ui->dl);
     free(ui);
 }

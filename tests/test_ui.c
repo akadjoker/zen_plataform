@@ -246,6 +246,56 @@ static void test_text_arena_survives_growth(void)
     window_destroy(w);
 }
 
+/* ------------------------------------------------------------------ the state store -- */
+
+/* zui_state_int and the others keep a value for each widget id across frames. The store held 64 entries, and from the 65th
+   id on every new one was handed slot 0, the state of whichever widget came first: two tree nodes past the 64th opened
+   and closed together, a menu's box height was another widget's. The entries now grow, and the pointers handed out stay
+   where they are while more ids are added (a widget holds several at once). */
+static void test_state_store_grows(void)
+{
+    UiContext *ui = zui_create();
+    CHECK(ui != NULL);
+    if (!ui)
+        return;
+    enum { N = 1500 };
+    int *first = zui_state_int(ui, 12345, 7);
+    CHECK(first != NULL && *first == 7);
+    int bad = 0;
+    for (int i = 0; i < N; i++)
+    {
+        int *iv = zui_state_int(ui, 100000u + (uint32_t)i * 37u, -1);
+        if (*iv != -1)
+            bad++; /* a new id starts at its default, not at what another widget left */
+        *iv = i;
+        float *fv = zui_state_float(ui, 900000u + (uint32_t)i, 0.5f);
+        if (*fv != 0.5f)
+            bad++;
+        *fv = (float)i * 0.25f;
+        zui_state_set_ptr(ui, 5000000u + (uint32_t)i, (void *)(uintptr_t)(0x1000 + i));
+    }
+    for (int i = 0; i < N; i++)
+    {
+        if (*zui_state_int(ui, 100000u + (uint32_t)i * 37u, -1) != i)
+            bad++;
+        if (*zui_state_float(ui, 900000u + (uint32_t)i, 0.5f) != (float)i * 0.25f)
+            bad++;
+        if (*(void **)zui_state_ptr(ui, 5000000u + (uint32_t)i) != (void *)(uintptr_t)(0x1000 + i))
+            bad++;
+    }
+    if (bad)
+        printf("  %d of %d state values are wrong\n", bad, 3 * N);
+    CHECK(bad == 0);
+    CHECK(*first == 7 && zui_state_int(ui, 12345, 0) == first); /* the entry did not move while 4500 more were added */
+    *first = 99;
+    CHECK(*zui_state_int(ui, 12345, 0) == 99);
+    /* ids that are special for a hash table: 0 and the largest */
+    *zui_state_int(ui, 0, 1) = 10;
+    *zui_state_int(ui, 0xFFFFFFFFu, 2) = 20;
+    CHECK(*zui_state_int(ui, 0, 1) == 10 && *zui_state_int(ui, 0xFFFFFFFFu, 2) == 20);
+    zui_destroy(ui);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -266,6 +316,7 @@ int main(void)
 
     test_font_load_refuses_bad_files();
     test_text_arena_survives_growth();
+    test_state_store_grows();
 
     platform_shutdown();
     printf("%d checks passed, %d failed\n", g_pass, g_fail);
