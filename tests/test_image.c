@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int g_pass, g_fail;
 
@@ -66,6 +67,30 @@ static void test_bmp_roundtrip(void)
     remove(TMP);
 }
 
+/* A BMP whose height is -2147483648: the file says top-down and the height is the negated value, which does not fit
+   an int (undefined behaviour; with UBSan halting, a failure of the test). It is a file to refuse, not to crash on. */
+static void test_bmp_height_int_min(void)
+{
+    Framebuffer a;
+    CHECK(framebuffer_alloc(&a, 3, 2));
+    CHECK(framebuffer_save_bmp(&a, TMP));
+    framebuffer_free(&a);
+
+    size_t size = 0;
+    uint8_t *data = file_read(TMP, &size);
+    CHECK(data != NULL && size > 54);
+    if (data)
+    {
+        const uint8_t min[4] = {0x00, 0x00, 0x00, 0x80}; /* little-endian INT_MIN */
+        memcpy(data + 22, min, 4);
+        CHECK(file_write(TMP, data, size));
+        fs_free(data);
+        Framebuffer b;
+        CHECK(!framebuffer_load_bmp(&b, TMP));
+    }
+    remove(TMP);
+}
+
 static void test_bad_input(void)
 {
     Framebuffer fb;
@@ -78,6 +103,7 @@ int main(void)
     test_from_pixels();
     test_bmp_roundtrip();
     test_bad_input();
+    test_bmp_height_int_min();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

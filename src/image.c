@@ -57,6 +57,8 @@ bool framebuffer_load_bmp(Framebuffer *fb, const char *path)
     uint32_t compression = rd_u32(data + 30);
 
     bool top_down = rawh < 0;
+    if (rawh == INT32_MIN) /* its negation does not fit an int */
+        goto done;
     int h = top_down ? -rawh : rawh;
     if (w <= 0 || h <= 0 || compression != 0 || (bpp != 24 && bpp != 32))
         goto done;
