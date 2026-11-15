@@ -113,6 +113,36 @@ static void deco_bind(struct wl_client *c, void *data, uint32_t version, uint32_
 }
 #endif
 
+/* Clients the compositor has seen come and go. The compositor's thread frees a client's objects when it notices the
+   connection closed, which is some time after the client's last call: ending it before that leaves the client being
+   made, or not yet unmade, and its memory is what LeakSanitizer then reports (the compositor's, not the library's: it
+   failed 6 runs of 40). */
+static int g_clients_made, g_clients_gone;
+
+static void client_gone(struct wl_listener *l, void *data)
+{
+    (void)data;
+    wl_list_remove(&l->link);
+    free(l);
+    count(&g_clients_gone);
+}
+
+static void client_made(struct wl_listener *l, void *data)
+{
+    (void)l;
+    count(&g_clients_made);
+    struct wl_client *client = data;
+    /* one listener per client, kept until the client is destroyed */
+    struct wl_listener *own = calloc(1, sizeof *own);
+    if (own)
+    {
+        own->notify = client_gone;
+        wl_client_add_destroy_listener(client, own);
+    }
+    else
+        count(&g_clients_gone);
+}
+
 static void *server_main(void *arg)
 {
     (void)arg;
@@ -137,6 +167,8 @@ static bool start_compositor(void)
     snprintf(name, sizeof name, "zen-shutdown-%d", (int)getpid());
     if (wl_display_add_socket(g_display, name) != 0 || wl_display_init_shm(g_display) != 0)
         return false;
+    static struct wl_listener made = {.notify = client_made};
+    wl_display_add_client_created_listener(g_display, &made);
     wl_global_create(g_display, &wl_compositor_interface, 4, NULL, compositor_bind);
     wl_global_create(g_display, &xdg_wm_base_interface, 5, NULL, wm_base_bind);
     wl_global_create(g_display, &wl_subcompositor_interface, 1, NULL, subcompositor_bind);
@@ -173,6 +205,11 @@ int main(void)
         platform_shutdown();
     }
     CHECK(counted(&g_binds) == cycles);
+
+    /* the compositor has to have seen the last connection close before it is stopped */
+    for (int waited = 0; waited < 2000 && counted(&g_clients_gone) < counted(&g_clients_made); waited++)
+        usleep(1000);
+    CHECK(counted(&g_clients_gone) == counted(&g_clients_made));
 
     wl_display_terminate(g_display);
     pthread_join(g_thread, NULL);
