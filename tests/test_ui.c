@@ -5,6 +5,7 @@
 #include "platform.h"
 #include "backend_fake.h"
 #include "zen_ui.h"
+#include "ui/ui_utf8.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -296,6 +297,67 @@ static void test_state_store_grows(void)
     zui_destroy(ui);
 }
 
+/* ------------------------------------------------------------------ utf-8 -- */
+
+/* Every code point that can be encoded comes back from the decoder whole, from a buffer of exactly its length (a read
+   past the end is the sanitizer's to find); bytes that are not UTF-8 give U+FFFD and advance at least one byte, so a run of
+   text always ends. */
+static void test_utf8(void)
+{
+    int bad = 0;
+    for (uint32_t cp = 0; cp <= 0x10FFFF; cp += (cp < 0x800 ? 1 : 7))
+    {
+        if (cp >= 0xD800 && cp <= 0xDFFF)
+            continue;
+        char enc[4];
+        int n = ui_utf8_encode(cp, enc);
+        char *exact = malloc((size_t)n);
+        memcpy(exact, enc, (size_t)n);
+        uint32_t back = 0;
+        int used = ui_utf8_decode(exact, n, &back);
+        if (used != n || back != cp)
+            bad++;
+        if (n > 1) /* one byte short: a replacement for the part, never a read past the end */
+        {
+            used = ui_utf8_decode(exact, n - 1, &back);
+            if (used != 1 || back != UI_UTF8_REPLACEMENT)
+                bad++;
+        }
+        free(exact);
+    }
+    CHECK(bad == 0);
+
+    static const struct
+    {
+        const char *bytes;
+        int len;
+        int used;
+    } broken[] = {
+        {"\x80", 1, 1},              /* a continuation with no start */
+        {"\xC0\x80", 2, 2},          /* overlong NUL */
+        {"\xC1\xBF", 2, 2},          /* overlong 7F */
+        {"\xE0\x80\x80", 3, 3},      /* overlong */
+        {"\xED\xA0\x80", 3, 3},      /* a surrogate */
+        {"\xF4\x90\x80\x80", 4, 4},  /* above U+10FFFF */
+        {"\xF8\x88\x80\x80\x80", 5, 1}, /* five bytes: not UTF-8 */
+        {"\xFF", 1, 1},
+        {"\xE2\x82", 2, 1},          /* cut short */
+        {"\xE2\x28\xA1", 3, 1},      /* a start and a byte that is not a continuation */
+    };
+    for (size_t i = 0; i < sizeof broken / sizeof broken[0]; i++)
+    {
+        uint32_t cp = 0;
+        int used = ui_utf8_decode(broken[i].bytes, broken[i].len, &cp);
+        if (cp != UI_UTF8_REPLACEMENT || used != broken[i].used)
+            printf("  broken sequence %zu: U+%04X, %d bytes used (wanted U+FFFD, %d)\n", i, (unsigned)cp, used, broken[i].used);
+        CHECK(cp == UI_UTF8_REPLACEMENT && used == broken[i].used);
+    }
+    uint32_t cp = 7;
+    CHECK(ui_utf8_decode("", 0, &cp) == 0 && cp == 0);
+    CHECK(ui_utf8_count("a\xC3\xA9\xE2\x82\xAC", 6) == 3);
+    CHECK(ui_utf8_count("\xFF\xFF", 2) == 2);
+}
+
 /* ------------------------------------------------------------------ the file dialog -- */
 
 /* One frame of the dialog, over a window the test feeds with the fake backend. Returns what zui_dialog says. */
@@ -486,6 +548,7 @@ int main(void)
     test_text_arena_survives_growth();
     test_state_store_grows();
     test_dialog_flow();
+    test_utf8();
 
     platform_shutdown();
     printf("%d checks passed, %d failed\n", g_pass, g_fail);
