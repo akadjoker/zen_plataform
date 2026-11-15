@@ -86,4 +86,14 @@ else()
 
     add_executable(batchtest batchtest.c)
     target_link_libraries(batchtest PRIVATE zen_2d platform ${MATH_LIB} OpenGL::GL)
+
+    # X11 only: input latency and the cost of a frame's pump, with the server's pointer and keyboard driven by XTest
+    if(PLATFORM_BACKEND_X11)
+        find_library(XTEST_LIB Xtst)
+        find_path(XTEST_INCLUDE X11/extensions/XTest.h)
+        if(XTEST_LIB AND XTEST_INCLUDE)
+            add_executable(bench_input_x11 bench_input_x11.c)
+            target_link_libraries(bench_input_x11 PRIVATE platform ${XTEST_LIB} Threads::Threads)
+        endif()
+    endif()
 endif()
