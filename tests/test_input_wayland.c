@@ -605,11 +605,21 @@ static void run_cmd(const Cmd *c)
     }
 }
 
+/* What the client has already sent is read before a command is carried out. The commands come through a pipe and the
+   client's requests through its socket, and when both are ready the loop may take either first: the configure that
+   ends a settle could be answered before a request the client sent earlier was read, and the test would look at the
+   compositor's counters too soon (a few runs in 30 on a loaded machine). */
 static int on_cmd(int fd, uint32_t mask, void *data)
 {
+    static bool draining;
     Cmd c;
     (void)mask;
     (void)data;
+    if (draining) /* the dispatch below reports this pipe again: not now */
+        return 0;
+    draining = true;
+    wl_event_loop_dispatch(wl_display_get_event_loop(S.display), 0);
+    draining = false;
     while (read(fd, &c, sizeof c) == (ssize_t)sizeof c)
         run_cmd(&c);
     return 0;
@@ -752,6 +762,10 @@ static void pump(PlatformWindow *w, int ms)
    else uses comes back, since the connection keeps the order. */
 static bool round_trip(PlatformWindow *w)
 {
+    /* A request the client made while handling the last events (the cursor it sets on an enter) sits in its output
+       buffer until the next dispatch writes it out: one frame first, so that it is on the socket before the marker
+       is asked for, and the compositor reads it first. */
+    frame(w);
     int size = ++marker;
     cmd(CMD_CONFIGURE, size, size - 100, 4, 0);
     for (int t = 0; t < 3000; t += 2)
