@@ -310,6 +310,45 @@ static void test_locks(PlatformWindow *w)
     CHECK((key_mods(w) & (KEYMOD_CAPS_LOCK | KEYMOD_NUM_LOCK)) == (mods & (KEYMOD_CAPS_LOCK | KEYMOD_NUM_LOCK)));
 }
 
+/* X errors, counted instead of ending the program as Xlib's own handler does. */
+static int g_x_errors;
+static int g_last_error_request;
+
+static int count_x_error(Display *d, XErrorEvent *e)
+{
+    (void)d;
+    g_x_errors++;
+    g_last_error_request = e->request_code;
+    return 0;
+}
+
+/* window_focus on a window that is not on screen (hidden, or not mapped yet) is a request the server refuses with
+   BadMatch, and Xlib's default handler answers an error by ending the whole program. It has to be a no-op, and a
+   window that is shown again must still take the focus. */
+static void test_focus_hidden(PlatformWindow *w)
+{
+    XErrorHandler previous = XSetErrorHandler(count_x_error);
+    window_hide(w);
+    settle(w);
+    CHECK(!window_is_visible(w));
+    g_x_errors = 0;
+    window_focus(w);
+    XSync(g_dpy, False);
+    printf("  focus on a hidden window: %d X errors (request %d)\n", g_x_errors, g_last_error_request);
+    CHECK(g_x_errors == 0);
+    settle(w);
+
+    g_x_errors = 0;
+    window_show(w);
+    window_focus(w); /* in the same breath as the show */
+    XSync(g_dpy, False);
+    CHECK(g_x_errors == 0);
+    settle(w);
+    CHECK(window_is_visible(w));
+    CHECK(window_is_focused(w));
+    XSetErrorHandler(previous);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -331,6 +370,7 @@ int main(void)
     test_kinds(w);
     test_hit_test(w);
     test_cursor_image(w);
+    test_focus_hidden(w);
     window_destroy(w);
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);

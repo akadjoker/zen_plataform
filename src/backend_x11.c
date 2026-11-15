@@ -2629,7 +2629,13 @@ void backend_hide(BackendWindow *b)
 void backend_focus(BackendWindow *b)
 {
     XRaiseWindow(g.dpy, b->win);
+    /* The server refuses to give the focus to a window that is not on screen (hidden, or its map not done yet) with
+       BadMatch, and Xlib's default answer to an error is to end the program. Such a request is only a request: the
+       error is let go, and the round trip is what makes sure it comes while the handler is in place. */
+    XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
     XSetInputFocus(g.dpy, b->win, RevertToParent, CurrentTime);
+    XSync(g.dpy, False);
+    XSetErrorHandler(previous);
 }
 
 void backend_request_attention(BackendWindow *b)
