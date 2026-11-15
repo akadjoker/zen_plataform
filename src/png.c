@@ -27,7 +27,9 @@
 
 /* ---- encoder ---- */
 
-static uint32_t g_crc_table[256];
+/* CRC-32 by slicing-by-8: eight bytes per step through eight tables, instead of one byte through one (the IDAT chunk is
+   the whole image, and its CRC was most of the time of the encoder). */
+static uint32_t g_crc_table[8][256];
 static bool g_crc_ready;
 
 static void crc_init(void)
@@ -37,15 +39,30 @@ static void crc_init(void)
         uint32_t c = n;
         for (int k = 0; k < 8; k++)
             c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-        g_crc_table[n] = c;
+        g_crc_table[0][n] = c;
     }
+    for (uint32_t n = 0; n < 256; n++)
+        for (int t = 1; t < 8; t++)
+        {
+            uint32_t c = g_crc_table[t - 1][n];
+            g_crc_table[t][n] = (c >> 8) ^ g_crc_table[0][c & 0xFF];
+        }
     g_crc_ready = true;
 }
 
 static uint32_t crc_update(uint32_t crc, const uint8_t *p, size_t n)
 {
-    for (size_t i = 0; i < n; i++)
-        crc = g_crc_table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    for (; n >= 8; p += 8, n -= 8)
+    {
+        uint32_t lo = (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+        uint32_t hi = (uint32_t)p[4] | (uint32_t)p[5] << 8 | (uint32_t)p[6] << 16 | (uint32_t)p[7] << 24;
+        lo ^= crc;
+        crc = g_crc_table[7][lo & 0xFF] ^ g_crc_table[6][(lo >> 8) & 0xFF] ^ g_crc_table[5][(lo >> 16) & 0xFF] ^
+              g_crc_table[4][lo >> 24] ^ g_crc_table[3][hi & 0xFF] ^ g_crc_table[2][(hi >> 8) & 0xFF] ^
+              g_crc_table[1][(hi >> 16) & 0xFF] ^ g_crc_table[0][hi >> 24];
+    }
+    for (; n; n--)
+        crc = g_crc_table[0][(crc ^ *p++) & 0xFF] ^ (crc >> 8);
     return crc;
 }
 
@@ -67,6 +84,21 @@ static uint8_t *put_chunk(uint8_t *out, const char type[4], const uint8_t *data,
     uint32_t crc = crc_update(0xFFFFFFFFu, out + 4, 4 + len) ^ 0xFFFFFFFFu;
     put_be32(out + 8 + len, crc);
     return out + 12 + len;
+}
+
+/* One scanline of the raw stream: the filter byte 0, then R G B A of each 0xAARRGGBB pixel. */
+static void fill_line(uint8_t *line, const uint32_t *pixels, size_t w)
+{
+    line[0] = 0;
+    for (size_t px = 0; px < w; px++)
+    {
+        uint32_t c = pixels[px];
+        uint8_t *o = line + 1 + px * 4;
+        o[0] = (uint8_t)(c >> 16);
+        o[1] = (uint8_t)(c >> 8);
+        o[2] = (uint8_t)c;
+        o[3] = (uint8_t)(c >> 24);
+    }
 }
 
 uint8_t *png_encode(const Framebuffer *fb, size_t *out_size)
@@ -93,13 +125,22 @@ uint8_t *png_encode(const Framebuffer *fb, size_t *out_size)
         return NULL;
     }
 
-    /* zlib stream: stored blocks over the filtered scanlines, then Adler-32. */
+    /* zlib stream: stored blocks over the filtered scanlines, then Adler-32. One scanline at a time is turned into
+       its bytes (the filter byte 0, then R G B A of each pixel) and the blocks take their bytes from it. */
     uint8_t *zp = z;
     *zp++ = 0x78;
     *zp++ = 0x01;
     uint32_t a = 1, b = 0;
-    size_t left = raw;
+    uint8_t *line = malloc(row);
+    if (!line)
+    {
+        free(z);
+        free(file);
+        return NULL;
+    }
     size_t y = 0, x = 0; /* scanline and byte within it, of the raw stream */
+    size_t left = raw;
+    fill_line(line, fb->pixels, w);
     while (left)
     {
         size_t n = left > 65535 ? 65535 : left;
@@ -108,42 +149,36 @@ uint8_t *png_encode(const Framebuffer *fb, size_t *out_size)
         *zp++ = (uint8_t)(n >> 8);
         *zp++ = (uint8_t)(~n & 0xFF);
         *zp++ = (uint8_t)((~n >> 8) & 0xFF);
-        for (size_t i = 0; i < n; i++)
+        left -= n;
+        while (n)
         {
-            uint8_t v;
-            if (x == 0)
-                v = 0; /* filter: none */
-            else
+            size_t take = row - x < n ? row - x : n;
+            memcpy(zp, line + x, take);
+            /* Adler-32 with the two sums reduced once per 5552 bytes: they cannot overflow 32 bits before that */
+            for (const uint8_t *p = line + x; take;)
             {
-                size_t px = (x - 1) / 4;
-                uint32_t c = fb->pixels[y * (size_t)fb->stride + px];
-                switch ((x - 1) % 4)
+                size_t k = take < 5552 ? take : 5552;
+                take -= k;
+                n -= k;
+                zp += k;
+                x += k;
+                while (k--)
                 {
-                case 0:
-                    v = (uint8_t)(c >> 16);
-                    break;
-                case 1:
-                    v = (uint8_t)(c >> 8);
-                    break;
-                case 2:
-                    v = (uint8_t)c;
-                    break;
-                default:
-                    v = (uint8_t)(c >> 24);
-                    break;
+                    a += *p++;
+                    b += a;
                 }
+                a %= 65521u;
+                b %= 65521u;
             }
-            *zp++ = v;
-            a = (a + v) % 65521u;
-            b = (b + a) % 65521u;
-            if (++x == row)
+            if (x == row)
             {
                 x = 0;
-                y++;
+                if (++y < h)
+                    fill_line(line, fb->pixels + y * (size_t)fb->stride, w);
             }
         }
-        left -= n;
     }
+    free(line);
     put_be32(zp, (b << 16) | a);
     zp += 4;
 

@@ -107,6 +107,69 @@ static uint32_t next_pixel(uint32_t *seed)
     return *seed; /* every channel, alpha included, is exercised */
 }
 
+/* The checksums of the PNG the clipboard holds, worked out the slow, plain way: the CRC-32 of every chunk bit by bit, and
+   the Adler-32 of the zlib stream of the IDAT chunk (stored blocks) byte by byte. The decoder does not look at either,
+   so a round trip cannot say they are right. */
+static uint32_t slow_crc(const uint8_t *p, size_t n)
+{
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++)
+    {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++)
+            c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+    }
+    return ~c;
+}
+
+static uint32_t be32(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+static bool png_checksums_ok(const uint8_t *png, size_t n)
+{
+    bool saw_idat = false, saw_iend = false;
+    size_t at = 8;
+    while (at + 12 <= n)
+    {
+        uint32_t len = be32(png + at);
+        if (at + 12 + (size_t)len > n || slow_crc(png + at + 4, 4 + (size_t)len) != be32(png + at + 8 + len))
+            return false;
+        const uint8_t *data = png + at + 8;
+        if (memcmp(png + at + 4, "IDAT", 4) == 0)
+        {
+            saw_idat = true;
+            /* zlib header (2), stored blocks (5 bytes of header each), Adler-32 (4) */
+            size_t z = 2;
+            uint32_t a = 1, b = 0;
+            bool last = false;
+            while (!last)
+            {
+                if (z + 5 > len || (data[z] & 6) != 0)
+                    return false;
+                last = data[z] & 1;
+                uint32_t blen = data[z + 1] | (uint32_t)data[z + 2] << 8;
+                if ((uint32_t)(data[z + 3] | data[z + 4] << 8) != (~blen & 0xFFFFu) || z + 5 + blen + 4 > len)
+                    return false;
+                z += 5;
+                for (uint32_t i = 0; i < blen; i++)
+                {
+                    a = (a + data[z + i]) % 65521u;
+                    b = (b + a) % 65521u;
+                }
+                z += blen;
+            }
+            if (z + 4 != len || be32(data + z) != (b << 16 | a))
+                return false;
+        }
+        if (memcmp(png + at + 4, "IEND", 4) == 0)
+            saw_iend = true;
+        at += 12 + (size_t)len;
+    }
+    return saw_idat && saw_iend && at == n;
+}
+
 static void check_image_round_trip(int w, int h, uint32_t seed)
 {
     Framebuffer src;
@@ -121,6 +184,7 @@ static void check_image_round_trip(int w, int h, uint32_t seed)
     uint8_t *png = clipboard_get_data(CLIPBOARD_PNG, &n);
     static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
     CHECK(png && n > 8 && memcmp(png, sig, 8) == 0);
+    CHECK(png && png_checksums_ok(png, n));
     fs_free(png);
 
     Framebuffer out = {0};
