@@ -584,6 +584,117 @@ static void test_dead_key(PlatformWindow *w)
     drain(w);
 }
 
+/* The keys that make `ks` on the keyboard now loaded: the keycode, and the modifiers (Shift, AltGr) that bring the level
+   it sits on. Returns false when no key makes it. */
+static bool keys_for(KeySym ks, KeyCode *code, KeyCode mods[2], int *nmods)
+{
+    int min, max;
+    XDisplayKeycodes(g_dpy, &min, &max);
+    for (int kc = min; kc <= max; kc++)
+        for (int level = 0; level < 4; level++)
+            if (XkbKeycodeToKeysym(g_dpy, (KeyCode)kc, 0, level) == ks)
+            {
+                *code = (KeyCode)kc;
+                *nmods = 0;
+                if (level & 1)
+                    mods[(*nmods)++] = XKeysymToKeycode(g_dpy, XK_Shift_L);
+                if (level & 2)
+                    mods[(*nmods)++] = XKeysymToKeycode(g_dpy, XK_ISO_Level3_Shift);
+                return true;
+            }
+    return false;
+}
+
+static bool type_keysym(KeySym ks)
+{
+    KeyCode code, mods[2];
+    int n;
+    if (!keys_for(ks, &code, mods, &n))
+        return false;
+    for (int i = 0; i < n; i++)
+        XTestFakeKeyEvent(g_dpy, mods[i], True, 0);
+    XTestFakeKeyEvent(g_dpy, code, True, 0);
+    XTestFakeKeyEvent(g_dpy, code, False, 0);
+    for (int i = n - 1; i >= 0; i--)
+        XTestFakeKeyEvent(g_dpy, mods[i], False, 0);
+    return true;
+}
+
+/* The owner types Portuguese: the accents of the Portuguese keyboard (dead tilde, acute, grave and circumflex followed by
+   a letter, and the cedilla key) come out as one character each, once, in the order they were typed, and no key event
+   is made for the character they compose. */
+static void test_portuguese_text(PlatformWindow *w)
+{
+    const char *codeset = nl_langinfo(CODESET);
+    if (!XSupportsLocale() || strcmp(codeset, "UTF-8") != 0)
+    {
+        printf("SKIP portuguese: the locale is not UTF-8 (%s)\n", codeset);
+        return;
+    }
+    if (system("setxkbmap pt 2> /dev/null") != 0)
+    {
+        printf("SKIP portuguese: setxkbmap pt did not work\n");
+        return;
+    }
+    XSync(g_dpy, False);
+    drain(w);
+    static const struct
+    {
+        KeySym keys[2];
+        uint32_t result;
+    } typed[] = {
+        {{XK_a, 0}, 'a'},
+        {{XK_dead_tilde, XK_a}, 0xE3},      /* ã */
+        {{XK_dead_acute, XK_e}, 0xE9},      /* é */
+        {{XK_dead_grave, XK_a}, 0xE0},      /* à */
+        {{XK_dead_circumflex, XK_e}, 0xEA}, /* ê */
+        {{XK_ccedilla, 0}, 0xE7},           /* ç */
+        {{XK_dead_tilde, XK_o}, 0xF5},      /* õ */
+        {{XK_dead_diaeresis, XK_u}, 0xFC},  /* ü */
+        {{XK_dead_acute, XK_A}, 0xC1},      /* Á */
+        {{XK_o, 0}, 'o'},
+    };
+    uint32_t want[16];
+    int nwant = 0;
+    bool all_keys = true;
+    for (size_t i = 0; i < sizeof typed / sizeof typed[0]; i++)
+    {
+        for (int k = 0; k < 2 && typed[i].keys[k]; k++)
+            all_keys &= type_keysym(typed[i].keys[k]);
+        want[nwant++] = typed[i].result;
+    }
+    XSync(g_dpy, False);
+    CHECK(all_keys);
+    uint32_t got[32];
+    int ngot = 0;
+    Event ev;
+    for (int i = 0; i < 60; i++)
+    {
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+            if (ev.type == EVENT_CHAR && ngot < 32)
+                got[ngot++] = ev.data.codepoint;
+        time_sleep(4);
+    }
+    bool same = ngot == nwant;
+    for (int i = 0; same && i < nwant; i++)
+        same = got[i] == want[i];
+    if (!same)
+    {
+        printf("  typed %d Portuguese characters, got %d:", nwant, ngot);
+        for (int i = 0; i < ngot; i++)
+            printf(" U+%04X", (unsigned)got[i]);
+        printf("\n  expected:");
+        for (int i = 0; i < nwant; i++)
+            printf(" U+%04X", (unsigned)want[i]);
+        printf("\n");
+    }
+    CHECK(same);
+    CHECK(system("setxkbmap us 2> /dev/null") == 0);
+    XSync(g_dpy, False);
+    drain(w);
+}
+
 static void test_key_sweep(PlatformWindow *w)
 {
     static const struct
@@ -1100,6 +1211,91 @@ static void test_mouse_captured_focus(PlatformWindow *w)
     drain(w);
 }
 
+/* A slow frame behind a fast mouse: thousands of moves and, among them, a click, keys and wheel steps. The list of events
+   of a frame holds 256, and the moves are what it folds; what a program needs from the frame is all there: every button and
+   key edge once and in order, every wheel step, the last position, the moves' deltas adding up. */
+static void test_storm_keeps_edges(PlatformWindow *w)
+{
+    static const KeySym keys[] = {XK_a, XK_s, XK_d, XK_f, XK_g};
+    const int moves = 4000;
+    window_set_position(w, 100, 100);
+    drain(w);
+    pointer_to(10, 10);
+    drain(w);
+    int last_x = 0, last_y = 0;
+    for (int i = 0; i < moves; i++)
+    {
+        last_x = 2 + (i * 7) % 58; /* inside the window, which is 64 by 64 */
+        last_y = 2 + (i * 3) % 58;
+        int rx, ry;
+        Window child;
+        XTranslateCoordinates(g_dpy, g_win, DefaultRootWindow(g_dpy), last_x, last_y, &rx, &ry, &child);
+        XTestFakeMotionEvent(g_dpy, -1, rx, ry, 0);
+        if (i == moves / 4)
+            XTestFakeButtonEvent(g_dpy, 1, True, 0);
+        if (i == 3 * moves / 4)
+            XTestFakeButtonEvent(g_dpy, 1, False, 0);
+        if (i % 400 == 0)
+        {
+            KeyCode code = XKeysymToKeycode(g_dpy, keys[(i / 400) % 5]);
+            XTestFakeKeyEvent(g_dpy, code, True, 0);
+            XTestFakeKeyEvent(g_dpy, code, False, 0);
+            XTestFakeButtonEvent(g_dpy, 4, True, 0);
+            XTestFakeButtonEvent(g_dpy, 4, False, 0);
+        }
+        if (i % 500 == 0)
+            XFlush(g_dpy); /* the server works while the test is still sending */
+    }
+    XSync(g_dpy, False);
+    XSync((Display *)window_native_handle(w, NATIVE_DISPLAY), False);
+
+    window_begin_frame(w);
+    int downs = 0, ups = 0, key_downs = 0, key_ups = 0, wheel = 0, nmoves = 0, order_ok = 1, in_order_x = -1, in_order_y = -1;
+    int press_pos = -1;
+    Event ev;
+    for (int n = 0; poll_event(w, &ev); n++)
+    {
+        switch (ev.type)
+        {
+        case EVENT_MOUSE_BUTTON:
+            if (ev.data.mouse.down)
+                downs++, press_pos = n;
+            else
+                ups++, order_ok &= press_pos >= 0 && n > press_pos;
+            break;
+        case EVENT_KEY:
+            if (ev.data.key.down)
+                key_downs++;
+            else
+                key_ups++;
+            break;
+        case EVENT_MOUSE_WHEEL:
+            wheel += (int)ev.data.wheel.y;
+            break;
+        case EVENT_MOUSE_MOVE:
+            nmoves++;
+            in_order_x = ev.data.mouse.x;
+            in_order_y = ev.data.mouse.y;
+            break;
+        default:
+            break;
+        }
+    }
+    const int steps = (moves + 399) / 400;
+    printf("  one frame with %d moves: %d move events, %d button down %d up, %d key down %d up, wheel %d of %d\n", moves,
+           nmoves, downs, ups, key_downs, key_ups, wheel, steps);
+    CHECK(downs == 1 && ups == 1 && order_ok);
+    CHECK(key_downs == steps && key_ups == steps);
+    CHECK(wheel == steps);
+    CHECK(mouse_wheel(w) == (float)steps);
+    CHECK(in_order_x == last_x && in_order_y == last_y);
+    CHECK(mouse_x(w) == last_x && mouse_y(w) == last_y);
+    CHECK(nmoves <= 256);
+    CHECK(mouse_button_pressed(w, MOUSE_LEFT)); /* press and release in one frame: the state still shows the click ... */
+    drain(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT)); /* ... and lets go of it in the next */
+}
+
 static void test_mouse_captured(PlatformWindow *w)
 {
     pointer_to(20, 20);
@@ -1257,6 +1453,7 @@ int main(void)
             test_same_frame(w);
             test_text_once(w);
             test_dead_key(w);
+            test_portuguese_text(w);
             test_grab_keeps_keys(w);
             test_key_sweep(w);
             test_keys_together(w);
@@ -1268,6 +1465,7 @@ int main(void)
             test_held_through_changes(w);
             test_many_and_long(w);
             test_mouse_drag_and_bursts(w);
+            test_storm_keeps_edges(w);
             test_mouse_captured_focus(w);
             XDestroyWindow(g_dpy, g_other);
         }
