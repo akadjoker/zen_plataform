@@ -37,6 +37,12 @@ input method, the session in use untouched:
 tests/run_x11_isolated.sh build/tests/test_input_x11 build/tests/test_x11_window
 ```
 
+`tools/check.sh` is the one command that says whether the tree is good: the tests in a Release build and in an ASan + UBSan
+build, the threaded tests under ThreadSanitizer, and a MinGW cross-compile with `-Wall -Wextra` (compile only), one line per
+stage and a non-zero exit when one fails. Every test it starts goes through `tools/xvfb_run.sh` (an invisible Xvfb, no Wayland
+and no session of yours), and so should anything else you run from here: `tools/xvfb_run.sh build/tests/test_io`.
+`docs/SUSPEITAS.md` lists what looks wrong and is not proved.
+
 On Windows, from a Visual Studio developer prompt:
 
 ```sh
