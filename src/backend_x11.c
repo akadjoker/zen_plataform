@@ -152,6 +152,7 @@ struct BackendWindow
     bool kc_down[256];
     int kc_key[256];
     double kc_gone[256]; /* when the server was first seen not holding the key, 0 while it does */
+    double stuck_next;   /* the earliest time sync_stuck_keys asks the server again */
     struct
     {
         int type;
@@ -2210,6 +2211,10 @@ static void handle_xi_touch(BackendWindow *b, const XIDeviceEvent *de)
    after the server has said so for STUCK_KEY_GRACE: an input method re-sends key
    events itself, and a synthetic event (XSendEvent) the server never held at all. */
 #define STUCK_KEY_GRACE 0.3
+/* The question costs two round trips (XQueryKeymap and XkbGetState), and the frame waits for both answers; while a key
+   is held (a game's W, a held arrow) it used to be asked every frame. A third of the grace is as often as it can matter:
+   a lost release is believed 0.3 s after the server first says so, and is then found within 0.1 s of that. */
+#define STUCK_KEY_INTERVAL 0.1
 
 static void sync_stuck_keys(BackendWindow *b)
 {
@@ -2220,11 +2225,15 @@ static void sync_stuck_keys(BackendWindow *b)
         any = b->kc_down[kc];
     if (!any || XPending(g.dpy))
         return;
+    double asked = time_seconds();
+    if (asked < b->stuck_next)
+        return;
 
     char keymap[32];
     XQueryKeymap(g.dpy, keymap);
     if (XPending(g.dpy)) /* something came in during the round trip: look again next frame */
         return;
+    b->stuck_next = asked + STUCK_KEY_INTERVAL;
 
     unsigned mods = 0;
     XkbStateRec st;

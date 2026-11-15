@@ -365,6 +365,50 @@ static void drain(PlatformWindow *w)
     }
 }
 
+/* What a frame costs the server. An idle frame sends no request at all. A key held down is the case that used to cost
+   two round trips (XQueryKeymap and XkbGetState, to find a release that was lost) every frame, and the program waited
+   for the server's answer to both each time; the check for a lost release now runs a few times a second, which is as
+   quick as it ever found one (it waits 0.3 s before it believes the server). The number of requests the window's own
+   connection sent is the count: XNextRequest. */
+static void test_requests_per_frame(PlatformWindow *w)
+{
+    Display *wd = window_native_handle(w, NATIVE_DISPLAY);
+    KeyCode a = XKeysymToKeycode(g_dpy, XK_a);
+    XAutoRepeatOff(g_dpy); /* a repeat is an event, and a frame with an event waiting does not ask the server anything */
+    XSync(g_dpy, False);
+    drain(w);
+
+    unsigned long before = XNextRequest(wd);
+    for (int i = 0; i < 20; i++)
+    {
+        window_begin_frame(w);
+        time_sleep(4);
+    }
+    CHECK(XNextRequest(wd) == before); /* an idle frame sends nothing */
+
+    fake_key(g_dpy, a, true);
+    CHECK(wait_pressed(w, KEY_A));
+    drain(w);
+    double t0 = time_seconds();
+    before = XNextRequest(wd);
+    for (int i = 0; i < 40; i++)
+    {
+        window_begin_frame(w);
+        time_sleep(12);
+    }
+    double elapsed = time_seconds() - t0;
+    unsigned long used = XNextRequest(wd) - before;
+    /* two requests each time the check runs, which is once in 0.1 s at most (and once in a frame at most) */
+    double allowed = 2.0 * (elapsed / 0.1 + 2.0);
+    printf("  a key held for %.2f s, 40 frames: %lu requests (at most %.0f)\n", elapsed, used, allowed);
+    CHECK((double)used <= allowed);
+    CHECK(key_down(w, KEY_A));
+    fake_key(g_dpy, a, false);
+    CHECK(wait_released(w, KEY_A));
+    XAutoRepeatOn(g_dpy);
+    XSync(g_dpy, False);
+}
+
 static void test_same_frame(PlatformWindow *w)
 {
     static const KeySym keys[] = {XK_a, XK_s, XK_d, XK_Up, XK_Left, XK_space, XK_Shift_L, XK_Return};
@@ -1209,6 +1253,7 @@ int main(void)
             XMapWindow(g_dpy, g_other);
             XSync(g_dpy, False);
             test_real_keys(w);
+            test_requests_per_frame(w);
             test_same_frame(w);
             test_text_once(w);
             test_dead_key(w);
