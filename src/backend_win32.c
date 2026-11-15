@@ -1009,16 +1009,22 @@ static void handle_drop(BackendWindow *b, HDROP drop)
     UINT stored = 0;
     for (UINT i = 0; paths && i < count; i++)
     {
-        wchar_t wide[MAX_PATH * 4];
-        char utf8[MAX_PATH * 4 * 3];
-        if (DragQueryFileW(drop, i, wide, (UINT)(sizeof wide / sizeof wide[0])) == 0)
+        /* The length first (in characters, without the NUL): a buffer of a fixed size cut a longer path short, silently. */
+        UINT len = DragQueryFileW(drop, i, NULL, 0);
+        if (len == 0)
             continue;
-        if (!win32_narrow(wide, utf8, sizeof utf8))
-            continue;
-        win32_slashes(utf8);
-        paths[stored] = _strdup(utf8);
-        if (paths[stored])
-            stored++;
+        wchar_t *wide = malloc(((size_t)len + 1) * sizeof *wide);
+        const size_t utf8_cap = (size_t)len * 3 + 1; /* UTF-16 to UTF-8 takes at most three bytes for each wchar_t */
+        char *utf8 = malloc(utf8_cap);
+        if (wide && utf8 && DragQueryFileW(drop, i, wide, len + 1) != 0 && win32_narrow(wide, utf8, utf8_cap))
+        {
+            win32_slashes(utf8);
+            paths[stored] = _strdup(utf8);
+            if (paths[stored])
+                stored++;
+        }
+        free(wide);
+        free(utf8);
     }
     if (stored && b->pumping && b->core)
     {
@@ -2554,17 +2560,26 @@ static void *clip_hdrop_as_uris(size_t *size)
         return NULL;
     for (UINT i = 0; i < n; i++)
     {
-        wchar_t wide[MAX_PATH * 2];
-        if (!DragQueryFileW(drop, i, wide, sizeof wide / sizeof wide[0]))
+        UINT wl = DragQueryFileW(drop, i, NULL, 0); /* the length first: a fixed buffer cut a longer path short */
+        if (wl == 0)
             continue;
-        char utf8[MAX_PATH * 4];
-        int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof utf8, NULL, NULL);
+        wchar_t *wide = malloc(((size_t)wl + 1) * sizeof *wide);
+        const size_t utf8_cap = (size_t)wl * 3 + 1;
+        char *utf8 = malloc(utf8_cap);
+        int len = 0;
+        if (wide && utf8 && DragQueryFileW(drop, i, wide, wl + 1))
+            len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, (int)utf8_cap, NULL, NULL);
+        free(wide);
         if (len <= 1)
+        {
+            free(utf8);
             continue;
+        }
         size_t need = used + 8 + (size_t)(len - 1) * 3 + 3;
         char *grown = realloc(out, need);
         if (!grown)
         {
+            free(utf8);
             free(out);
             return NULL;
         }
@@ -2584,6 +2599,7 @@ static void *clip_hdrop_as_uris(size_t *size)
         }
         out[used++] = '\r';
         out[used++] = '\n';
+        free(utf8);
     }
     out[used] = '\0';
     *size = used;
