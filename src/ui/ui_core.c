@@ -6,6 +6,8 @@
  * stubs (ui_widgets.c, ui_render_*.c).
  */
 #include "ui_internal.h"
+#include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,19 +46,39 @@ UiCmd *ui_dl_push(UiContext *ui, UiCmdType type)
     return c;
 }
 
+/* The commands point into the arena (UiCmd text.str, valid until the next zui_begin), so when the arena grows and moves
+   every text command made so far is moved with it: a pointer into the block that realloc freed is a use after free. */
 const char *ui_dl_intern(UiContext *ui, const char *str, int len)
 {
     UiDrawList *dl = &ui->dl;
     if (len < 0)
         len = (int)strlen(str);
+    if (len > INT_MAX - 1 || dl->text_len > INT_MAX - 1 - len)
+        return ""; /* an arena of 2 GiB is not a frame of labels */
     if (dl->text_len + len + 1 > dl->text_cap)
     {
-        int ncap = dl->text_cap ? dl->text_cap * 2 : 1024;
+        int ncap = dl->text_cap ? dl->text_cap : 1024;
         while (ncap < dl->text_len + len + 1)
+        {
+            if (ncap > INT_MAX / 2)
+                return "";
             ncap *= 2;
+        }
+        const uintptr_t old_base = (uintptr_t)dl->text_arena; /* kept as a number: the pointer is dead after realloc */
+        const int used = dl->text_len;
         char *n = (char *)realloc(dl->text_arena, (size_t)ncap);
         if (!n)
             return "";
+        if ((uintptr_t)n != old_base)
+            for (int i = 0; i < dl->count; ++i)
+            {
+                UiCmd *c = &dl->cmds[i];
+                if (c->type != UI_CMD_TEXT)
+                    continue;
+                const uintptr_t at = (uintptr_t)c->u.text.str;
+                if (at >= old_base && at - old_base < (uintptr_t)used)
+                    c->u.text.str = n + (at - old_base);
+            }
         dl->text_arena = n;
         dl->text_cap = ncap;
     }

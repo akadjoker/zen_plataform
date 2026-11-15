@@ -184,8 +184,76 @@ static void test_font_load_refuses_bad_files(void)
     fs_free(good);
 }
 
+/* ------------------------------------------------------------------ the text of a frame -- */
+
+/* The text of a frame's labels is copied into one arena that grows as the frame needs it, and the commands point into it
+   ("the str pointers stay valid until the next zui_begin", zen_ui.h). When the arena grew it was reallocated, and the
+   commands made before that kept pointing into the block that was freed: the label drawn from them was garbage (or a
+   use after free). More than 1 KiB of text in one frame is an ordinary window. */
+static PlatformWindow *make_window(void)
+{
+    WindowConfig cfg = {.title = "test_ui", .width = 400, .height = 300, .x = WINDOW_POS_UNDEFINED, .y = WINDOW_POS_UNDEFINED,
+                        .render = RENDER_PIXELS};
+    return window_create(&cfg);
+}
+
+static void test_text_arena_survives_growth(void)
+{
+    PlatformWindow *w = make_window();
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    UiFont *font = zui_font_builtin(1);
+    UiContext *ui = zui_create();
+    CHECK(font != NULL && ui != NULL);
+    if (!font || !ui)
+        return;
+    zui_set_font(ui, font);
+
+    enum { LABELS = 300 };
+    char text[LABELS][48];
+    for (int i = 0; i < LABELS; i++)
+        snprintf(text[i], sizeof text[i], "Label number %d, with some padding text", i);
+
+    for (int frame = 0; frame < 3; frame++) /* the first frame grows the arena, the next ones reuse it */
+    {
+        window_begin_frame(w);
+        zui_begin(ui, w);
+        for (int i = 0; i < LABELS; i++)
+            zui_label(ui, text[i]);
+        zui_end(ui);
+        const UiDrawList *dl = zui_draw_list(ui);
+        int texts = 0, wrong = 0, outside = 0;
+        for (int i = 0; i < dl->count; i++)
+        {
+            const UiCmd *c = &dl->cmds[i];
+            if (c->type != UI_CMD_TEXT)
+                continue;
+            /* what each command says, and that it points into the arena the frame ends with (a stale pointer is not there) */
+            if (texts < LABELS && (c->u.text.len != (int)strlen(text[texts]) || strncmp(c->u.text.str, text[texts], (size_t)c->u.text.len) != 0))
+                wrong++;
+            if (c->u.text.str < dl->text_arena || c->u.text.str + c->u.text.len >= dl->text_arena + dl->text_len)
+                outside++;
+            texts++;
+        }
+        if (wrong || outside || texts != LABELS)
+            printf("  frame %d: %d text commands of %d, %d say the wrong thing, %d point outside the arena\n", frame, texts, LABELS, wrong,
+                   outside);
+        CHECK(texts == LABELS && wrong == 0 && outside == 0);
+    }
+    zui_destroy(ui);
+    zui_font_free(font);
+    window_destroy(w);
+}
+
 int main(void)
 {
+    if (!platform_init())
+    {
+        printf("platform_init failed\n");
+        return 1;
+    }
+
     UiFont *builtin = zui_font_builtin(3);
     CHECK(builtin != NULL);
     test_render_text_matches_reference(builtin, "builtin 5x7 x3");
@@ -197,7 +265,9 @@ int main(void)
     zui_font_free(builtin);
 
     test_font_load_refuses_bad_files();
+    test_text_arena_survives_growth();
 
+    platform_shutdown();
     printf("%d checks passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
