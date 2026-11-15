@@ -25,5 +25,7 @@ else
     trap 'exit 130' INT TERM
 fi
 
-env -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR XDG_DATA_HOME="$X" XDG_CONFIG_HOME="$X/cfg" \
+# ZP_PRIVATE_X tells a test that the X server it finds is the throw-away one: a test that changes the keyboard layout
+# (test_input_x11, setxkbmap) runs only then, never on the display of whoever is working.
+env -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR XDG_DATA_HOME="$X" XDG_CONFIG_HOME="$X/cfg" ZP_PRIVATE_X=1 \
     xvfb-run -a -s "-screen 0 1280x800x24" "$@"

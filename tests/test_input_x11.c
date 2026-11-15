@@ -631,6 +631,11 @@ static void test_portuguese_text(PlatformWindow *w)
         printf("SKIP portuguese: the locale is not UTF-8 (%s)\n", codeset);
         return;
     }
+    if (!getenv("ZP_PRIVATE_X")) /* set by tools/xvfb_run.sh: setxkbmap changes the layout of the whole server */
+    {
+        printf("SKIP portuguese: not on a private X server (run through tools/xvfb_run.sh)\n");
+        return;
+    }
     if (system("setxkbmap pt 2> /dev/null") != 0)
     {
         printf("SKIP portuguese: setxkbmap pt did not work\n");
