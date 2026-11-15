@@ -63,14 +63,15 @@ static int64_t mem_size(IoStream *s)
 
 static int64_t mem_seek(IoStream *s, int64_t offset, IoWhence whence)
 {
-    int64_t base = whence == IO_SEEK_SET ? 0 : whence == IO_SEEK_CUR ? (int64_t)s->u.mem.pos
-                                                                     : (int64_t)s->u.mem.size;
-    int64_t pos = base + offset;
-    if (pos < 0 || pos > (int64_t)s->u.mem.size)
+    int64_t size = (int64_t)s->u.mem.size;
+    int64_t base = whence == IO_SEEK_SET ? 0 : whence == IO_SEEK_CUR ? (int64_t)s->u.mem.pos : size;
+    /* tested before the sum: base + offset overflows for an offset near INT64_MAX or INT64_MIN */
+    if ((offset > 0 && offset > size - base) || (offset < 0 && offset < -base))
     {
         error_set("seek out of range");
         return -1;
     }
+    int64_t pos = base + offset;
     s->u.mem.pos = (size_t)pos;
     return pos;
 }

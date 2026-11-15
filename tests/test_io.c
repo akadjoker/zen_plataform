@@ -68,6 +68,27 @@ static void count_release(void *mem)
     free(mem);
 }
 
+/* Seeking by an offset that does not fit once added to the base is an error, not an overflow of the sum (undefined
+   behaviour; with UBSan halting, a failure of the test). */
+static void test_memory_seek_extremes(void)
+{
+    static const char data[] = "0123456789";
+    IoStream *s = io_open_memory(data, 10);
+    CHECK(s != NULL);
+    if (!s)
+        return;
+    CHECK(io_seek(s, 4, IO_SEEK_SET) == 4);
+    CHECK(io_seek(s, INT64_MAX, IO_SEEK_END) == -1);
+    CHECK(io_seek(s, INT64_MAX, IO_SEEK_CUR) == -1);
+    CHECK(io_seek(s, INT64_MAX, IO_SEEK_SET) == -1);
+    CHECK(io_seek(s, INT64_MIN, IO_SEEK_END) == -1);
+    CHECK(io_seek(s, INT64_MIN, IO_SEEK_CUR) == -1);
+    CHECK(io_seek(s, INT64_MIN, IO_SEEK_SET) == -1);
+    CHECK(io_tell(s) == 4); /* a refused seek leaves the position alone */
+    CHECK(io_seek(s, 0, IO_SEEK_END) == 10);
+    io_close(s);
+}
+
 static void test_memory_owned(void)
 {
     char buf[16];
@@ -249,6 +270,7 @@ int main(void)
     dir_make(ROOT);
 
     test_memory();
+    test_memory_seek_extremes();
     test_memory_owned();
     test_file_modes();
     test_open_errors();
