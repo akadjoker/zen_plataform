@@ -134,9 +134,12 @@ static void test_never_polled(void)
 {
     /* children that end while nobody asks about them are waited for by the next call into the library */
     const char *quick[] = {"-c", "exit 0"};
+    /* these outlive the loop that starts them (a slow build, the sanitizers: each spawn reaps the ones that ended
+       before it, and would leave none to count), then end together */
+    const char *brief[] = {"-c", "sleep 0.5"};
     for (int i = 0; i < 12; i++)
-        CHECK(process_spawn("/bin/sh", quick, 2, false) > 0);
-    sleep_ms(300);
+        CHECK(process_spawn("/bin/sh", brief, 2, false) > 0);
+    sleep_ms(1000);
     CHECK(zombies() >= 8); /* they are there, in the state of waiting to be reaped */
     int64_t last = process_spawn("/bin/sh", quick, 2, false);
     CHECK(last > 0);
