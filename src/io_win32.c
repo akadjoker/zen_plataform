@@ -140,6 +140,12 @@ IoStream *io_platform_open_file(const char *path, int flags)
     return s;
 }
 
+void io_platform_copy_mode(IoStream *s, const char *like)
+{
+    (void)s;
+    (void)like;
+}
+
 unsigned long long io_platform_unique(void)
 {
     static volatile LONG64 counter;

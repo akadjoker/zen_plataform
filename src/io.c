@@ -358,6 +358,7 @@ bool io_save_file(const char *path, const void *data, size_t size)
     IoStream *s = io_platform_open_file(tmp, IO_MODE_WRITE | IO_MODE_CREATE | IO_MODE_TRUNCATE);
     if (!s)
         return false;
+    io_platform_copy_mode(s, path); /* before any data: a file that was 0600 does not turn 0644 with the new content in it */
     bool ok = io_write(s, data, size) == size && io_flush(s);
     if (!io_close(s))
         ok = false;

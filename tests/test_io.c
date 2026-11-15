@@ -6,6 +6,8 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
 
 static int g_pass, g_fail;
@@ -221,6 +223,32 @@ static void test_load_save(void)
 }
 
 #if !defined(_WIN32)
+/* Replacing a file keeps its permissions: a file that was private (0600) must not become readable by others because
+   the program saved it again. A file that is new gets what the umask says, as before. */
+static unsigned file_mode(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? (unsigned)(st.st_mode & 07777) : 0xFFFFu;
+}
+
+static void test_save_keeps_mode(void)
+{
+    umask(022);
+    CHECK(io_save_file(ROOT "/mode.dat", "one", 3));
+    CHECK(file_mode(ROOT "/mode.dat") == 0644);
+    chmod(ROOT "/mode.dat", 0600);
+    CHECK(io_save_file(ROOT "/mode.dat", "two", 3));
+    CHECK(file_mode(ROOT "/mode.dat") == 0600);
+    chmod(ROOT "/mode.dat", 0640);
+    CHECK(io_save_file(ROOT "/mode.dat", "three", 5));
+    CHECK(file_mode(ROOT "/mode.dat") == 0640);
+    size_t n = 0;
+    char *back = io_load_file(ROOT "/mode.dat", &n);
+    CHECK(back && n == 5 && strcmp(back, "three") == 0);
+    fs_free(back);
+    remove(ROOT "/mode.dat");
+}
+
 /* Saves of one path from several threads at once (two instances of a program do the same across processes): each
    save has a temporary file of its own, so none fails for want of the file another one renamed, the result is one
    whole payload and not a mix, and nothing is left behind. */
@@ -347,6 +375,7 @@ int main(void)
     test_load_save();
 #if !defined(_WIN32)
     test_concurrent_save();
+    test_save_keeps_mode();
 #endif
     test_unsized_files();
     test_assets();

@@ -49,6 +49,9 @@ int io_parse_mode(const char *mode);
 unsigned long long io_platform_unique(void);
 
 IoStream *io_platform_open_file(const char *path, int flags);
+/* Gives the open file s the permissions the file at `like` has (nothing when there is none, or where permissions are not
+   a file's own). For the temporary file of a save, so that replacing a file does not widen who can read it. */
+void io_platform_copy_mode(IoStream *s, const char *like);
 bool io_platform_replace_file(const char *from, const char *to);
 bool io_platform_remove_file(const char *path);
 

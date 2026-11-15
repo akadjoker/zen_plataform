@@ -147,6 +147,13 @@ IoStream *io_platform_open_file(const char *path, int flags)
     return s;
 }
 
+void io_platform_copy_mode(IoStream *s, const char *like)
+{
+    struct stat st;
+    if (stat(like, &st) == 0 && S_ISREG(st.st_mode))
+        fchmod(s->u.fd, st.st_mode & 07777); /* a failure leaves the mode the umask gave: nothing to report */
+}
+
 unsigned long long io_platform_unique(void)
 {
     static unsigned long long counter;
