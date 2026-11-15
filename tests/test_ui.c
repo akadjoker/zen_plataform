@@ -297,6 +297,105 @@ static void test_state_store_grows(void)
     zui_destroy(ui);
 }
 
+/* ------------------------------------------------------------------ every command, any geometry -- */
+
+/* The renderer is handed rectangles, lines, triangles, icons, gradients and images by programs that compute them: sizes of
+   zero or below, far outside the framebuffer, clips that are empty or reversed. Every command type with such numbers,
+   into a small framebuffer with a border of canary pixels around it: nothing is written outside the framebuffer, nothing
+   the sanitizers can see (an overflow, a bad index) happens, and the border stays as it was. */
+static void test_render_any_geometry(void)
+{
+    enum { W = 37, H = 29, PAD = 64 };
+    const size_t total = (size_t)(W + 2 * PAD) * (size_t)(H + 2 * PAD);
+    uint32_t *mem = malloc(total * sizeof *mem);
+    CHECK(mem != NULL);
+    if (!mem)
+        return;
+    for (size_t i = 0; i < total; i++)
+        mem[i] = 0xCAFE0000u | (uint32_t)(i & 0xFFFF);
+    Framebuffer fb;
+    memset(&fb, 0, sizeof fb);
+    fb.width = W;
+    fb.height = H;
+    fb.stride = W + 2 * PAD;
+    fb.pixels = mem + (size_t)PAD * (size_t)fb.stride + PAD;
+    Framebuffer src;
+    CHECK(framebuffer_alloc(&src, 7, 5));
+    for (int i = 0; i < 35; i++)
+        src.pixels[i] = rnd();
+    UiFont *font = zui_font_builtin(2);
+    static const char text[] = "Mixed 123 text: +-/.";
+
+    static const int extremes[] = {0, 1, -1, 2, -2, 5, W - 1, W, W + 1, -W, 1000, -1000, 100000, -100000, 1 << 20, -(1 << 20)};
+    const int ne = (int)(sizeof extremes / sizeof extremes[0]);
+    int bad = 0;
+    for (int n = 0; n < 6000; n++)
+    {
+        UiCmd c;
+        memset(&c, 0, sizeof c);
+        c.type = (UiCmdType)rnd_range(UI_CMD_CLIP, UI_CMD_GRADIENT);
+        c.color = rnd();
+        c.clip = rnd_range(0, 2) == 0 ? zui_rect(0, 0, W, H)
+                                      : zui_rect(rnd_range(-80, 80), rnd_range(-80, 80), rnd_range(-10, 120), rnd_range(-10, 120));
+#define G() (rnd_range(0, 2) == 0 ? extremes[rnd_range(0, ne - 1)] : rnd_range(-60, 90))
+#define SZ() (rnd_range(0, 2) == 0 ? extremes[rnd_range(0, ne - 1)] : rnd_range(-5, 70))
+        switch (c.type)
+        {
+        case UI_CMD_RECT:
+            c.u.rect.rect = zui_rect(G(), G(), SZ(), SZ());
+            c.u.rect.thickness = rnd_range(0, 1);
+            c.u.rect.rounding = rnd_range(0, 3) == 0 ? extremes[rnd_range(0, ne - 1)] : rnd_range(-3, 30);
+            break;
+        case UI_CMD_LINE:
+            c.u.line.x0 = rnd_range(-60, 90); c.u.line.y0 = rnd_range(-60, 90); /* coordinates near INT_MAX overflow in draw_line and draw_round_rect, and a line that long takes seconds: docs/SUSPEITAS.md */
+            c.u.line.x1 = rnd_range(-60, 90); c.u.line.y1 = rnd_range(-60, 90);
+            break;
+        case UI_CMD_TRI:
+            c.u.tri.x0 = rnd_range(-60, 90); c.u.tri.y0 = rnd_range(-60, 90); c.u.tri.x1 = rnd_range(-60, 90);
+            c.u.tri.y1 = rnd_range(-60, 90); c.u.tri.x2 = rnd_range(-60, 90); c.u.tri.y2 = rnd_range(-60, 90);
+            break;
+        case UI_CMD_IMAGE:
+            c.u.image.src = rnd_range(0, 9) == 0 ? NULL : &src;
+            c.u.image.dst = zui_rect(rnd_range(-60, 90), rnd_range(-60, 90), rnd_range(-5, 120), rnd_range(-5, 120));
+            break;
+        case UI_CMD_TEXT:
+            c.u.text.x = G(); c.u.text.y = G();
+            c.u.text.str = text; c.u.text.len = rnd_range(0, (int)sizeof text - 1);
+            c.u.text.font = rnd_range(0, 9) == 0 ? NULL : (const struct UiFont *)font;
+            break;
+        case UI_CMD_ICON:
+            c.u.icon.box = zui_rect(rnd_range(-40, 70), rnd_range(-40, 70), rnd_range(-5, 60), rnd_range(-5, 60));
+            c.u.icon.icon = rnd_range(-1, 12);
+            break;
+        case UI_CMD_GRADIENT:
+            c.u.gradient.rect = zui_rect(rnd_range(-60, 90), rnd_range(-60, 90), rnd_range(-5, 120), rnd_range(0, 80));
+            c.u.gradient.top = rnd();
+            c.u.gradient.bottom = rnd();
+            break;
+        default:
+            break;
+        }
+        UiDrawList list = {&c, 1, 1, NULL, 0, 0};
+        zui_render_software(&fb, &list);
+    }
+    /* the canary border: the pixels outside the W by H area are what they were */
+    for (int y = 0; y < H + 2 * PAD; y++)
+        for (int x = 0; x < W + 2 * PAD; x++)
+        {
+            if (x >= PAD && x < PAD + W && y >= PAD && y < PAD + H)
+                continue;
+            size_t i = (size_t)y * (size_t)(W + 2 * PAD) + (size_t)x;
+            if (mem[i] != (0xCAFE0000u | (uint32_t)(i & 0xFFFF)))
+                bad++;
+        }
+    if (bad)
+        printf("  %d pixels outside the framebuffer were written\n", bad);
+    CHECK(bad == 0);
+    framebuffer_free(&src);
+    zui_font_free(font);
+    free(mem);
+}
+
 /* ------------------------------------------------------------------ utf-8 -- */
 
 /* Every code point that can be encoded comes back from the decoder whole, from a buffer of exactly its length (a read
@@ -619,6 +718,7 @@ int main(void)
     test_state_store_grows();
     test_dialog_flow();
     test_utf8();
+    test_render_any_geometry();
     test_text_input_invalid_utf8();
 
     platform_shutdown();

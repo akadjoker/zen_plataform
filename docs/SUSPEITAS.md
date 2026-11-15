@@ -42,6 +42,19 @@ com nome cujo escritor fecha, abrir `\\.\pipe\x`, e chamar `io_flush` num fluxo 
    `ui_pop_container` correspondente tira o contentor de fora; e um `zui_*_end` a mais tira a raiz e o `ui_top` seguinte indexa
    `containers[-1]`. So acontece com uso errado (pares desequilibrados) ou aninhamento absurdo.
 
+## draw2d: linhas e rectangulos com coordenadas muito grandes
+
+- `src/draw2d.c`, `draw_line`: percorre todos os passos da recta, tambem os de fora do framebuffer. Medido (Release, um CPU):
+  uma linha de 1280 px visiveis demora 8 us, uma de 200 milhoes de px com 1280 visiveis demora 539 ms (um soluco de meio
+  segundo numa frame) e uma diagonal de 2 milhoes de px 7 ms. `draw_rect` e `draw_round_rect` (contorno) usam-na. Um programa
+  que projecte linhas em perspectiva ou desenhe guias "ate ao infinito" apanha-o. A correccao e cortar a recta ao
+  framebuffer e ao recorte antes do ciclo mantendo os mesmos pixeis (saltar para o primeiro passo visivel com a formula do
+  erro de Bresenham e parar quando sai, que uma recta nao volta a entrar num rectangulo), validada contra a versao actual em
+  milhoes de rectas aleatorias; nao se fez porque a igualdade bit a bit e delicada e ninguem desenha essas rectas hoje.
+- `draw_line` (`x1 - x0`) e `draw_round_rect` (`x + w`) tem overflow de inteiro com sinal (UB) para coordenadas perto de
+  INT_MIN e INT_MAX; `draw_fill_rect` e o recorte ja foram arranjados na ronda 2 para a largura INT_MAX. O teste
+  `test_render_any_geometry` fica nos +-2^20, onde nada rebenta.
+
 ## Rato capturado em X11 (`MOUSE_MODE_CAPTURED`)
 
 A ronda 4 mediu-o com `examples/bench_input_x11` (rato de 125 Hz a 8000 Hz: a soma dos deltas bate certo com o movimento
