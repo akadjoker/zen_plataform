@@ -140,6 +140,13 @@ IoStream *io_platform_open_file(const char *path, int flags)
     return s;
 }
 
+const char *io_platform_save_target(const char *path, char *buf, size_t cap)
+{
+    (void)buf;
+    (void)cap;
+    return path;
+}
+
 void io_platform_copy_mode(IoStream *s, const char *like)
 {
     (void)s;

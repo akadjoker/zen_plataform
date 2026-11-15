@@ -49,6 +49,9 @@ int io_parse_mode(const char *mode);
 unsigned long long io_platform_unique(void);
 
 IoStream *io_platform_open_file(const char *path, int flags);
+/* The file a save has to replace: `path` itself, or, when it is a symbolic link, the file the link leads to (written to
+   buf), so that saving through a link does not turn the link into a regular file. NULL, with the error set, for a loop of links. */
+const char *io_platform_save_target(const char *path, char *buf, size_t cap);
 /* Gives the open file s the permissions the file at `like` has (nothing when there is none, or where permissions are not
    a file's own). For the temporary file of a save, so that replacing a file does not widen who can read it. */
 void io_platform_copy_mode(IoStream *s, const char *like);

@@ -147,6 +147,39 @@ IoStream *io_platform_open_file(const char *path, int flags)
     return s;
 }
 
+#define LINK_DEPTH_MAX 40 /* the kernel's own limit on a chain of links */
+
+const char *io_platform_save_target(const char *path, char *buf, size_t cap)
+{
+    const char *cur = path;
+    for (int depth = 0; depth < LINK_DEPTH_MAX; depth++)
+    {
+        struct stat st;
+        if (lstat(cur, &st) != 0 || !S_ISLNK(st.st_mode))
+            return cur;
+        char link[4096], next[4096];
+        ssize_t n = readlink(cur, link, sizeof link - 1);
+        if (n <= 0)
+            return cur;
+        link[n] = '\0';
+        if (link[0] == '/')
+            snprintf(next, sizeof next, "%s", link);
+        else
+        {
+            char dir[4096];
+            path_directory(cur, dir, sizeof dir);
+            if (!path_join(next, sizeof next, dir, link))
+                return cur;
+        }
+        if (strlen(next) >= cap)
+            return cur;
+        memcpy(buf, next, strlen(next) + 1);
+        cur = buf;
+    }
+    error_set("cannot save '%s': %s", path, strerror(ELOOP)); /* a loop of links */
+    return NULL;
+}
+
 void io_platform_copy_mode(IoStream *s, const char *like)
 {
     struct stat st;

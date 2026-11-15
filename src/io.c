@@ -349,6 +349,10 @@ bool io_save_file(const char *path, const void *data, size_t size)
     if (!path)
         return false;
 #endif
+    char target[PATH_CAP];
+    path = io_platform_save_target(path, target, sizeof target);
+    if (!path)
+        return false;
     /* A name of its own for each save. With one fixed "path.tmp", two saves of the same path (two threads, or two
        instances of the program) wrote into the same file, and the one that renamed it first left the other with
        nothing to rename: its save failed. */

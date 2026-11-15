@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 #endif
 
 static int g_pass, g_fail;
@@ -249,6 +250,76 @@ static void test_save_keeps_mode(void)
     remove(ROOT "/mode.dat");
 }
 
+/* Saving to a symbolic link writes the file it leads to and leaves the link a link (a settings file kept in a synced
+   folder, or in a dotfiles repository, and linked from where the program looks): it used to be replaced by a regular
+   file, and the real one was never written again. */
+static bool count_entry(const char *path, PathType type, void *user);
+
+static bool is_link(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+}
+
+static void test_save_through_link(void)
+{
+    CHECK(dir_make(ROOT "/lk/real"));
+    CHECK(dir_make(ROOT "/lk/other"));
+    CHECK(io_save_file(ROOT "/lk/real/target.txt", "old", 3));
+    /* a link in the same folder, one with a relative path through "..", a link to a link, and one to a file that is
+       not there yet */
+    CHECK(symlink("real/target.txt", ROOT "/lk/direct") == 0);
+    CHECK(symlink("../real/target.txt", ROOT "/lk/other/up") == 0);
+    CHECK(symlink("direct", ROOT "/lk/chain") == 0);
+    CHECK(symlink("real/new.txt", ROOT "/lk/dangling") == 0);
+
+    CHECK(io_save_file(ROOT "/lk/direct", "via direct", 10));
+    CHECK(is_link(ROOT "/lk/direct"));
+    size_t n = 0;
+    char *t = io_load_file(ROOT "/lk/real/target.txt", &n);
+    CHECK(t && n == 10 && strcmp(t, "via direct") == 0);
+    fs_free(t);
+
+    CHECK(io_save_file(ROOT "/lk/other/up", "via up", 6));
+    CHECK(is_link(ROOT "/lk/other/up"));
+    t = io_load_file(ROOT "/lk/real/target.txt", &n);
+    CHECK(t && n == 6 && strcmp(t, "via up") == 0);
+    fs_free(t);
+
+    CHECK(io_save_file(ROOT "/lk/chain", "via chain", 9));
+    CHECK(is_link(ROOT "/lk/chain") && is_link(ROOT "/lk/direct"));
+    t = io_load_file(ROOT "/lk/real/target.txt", &n);
+    CHECK(t && n == 9 && strcmp(t, "via chain") == 0);
+    fs_free(t);
+
+    CHECK(io_save_file(ROOT "/lk/dangling", "made", 4));
+    CHECK(is_link(ROOT "/lk/dangling"));
+    t = io_load_file(ROOT "/lk/real/new.txt", &n);
+    CHECK(t && n == 4 && strcmp(t, "made") == 0);
+    fs_free(t);
+
+    /* nothing is left in either folder but what belongs there */
+    int entries = 0;
+    CHECK(fs_enumerate_directory(ROOT "/lk/real", false, count_entry, &entries));
+    CHECK(entries == 2); /* target.txt and new.txt */
+
+    CHECK(symlink("loop2", ROOT "/lk/loop1") == 0);
+    CHECK(symlink("loop1", ROOT "/lk/loop2") == 0);
+    CHECK(!io_save_file(ROOT "/lk/loop1", "x", 1)); /* a loop of links: an error, not a hang */
+
+    remove(ROOT "/lk/loop1");
+    remove(ROOT "/lk/loop2");
+    remove(ROOT "/lk/dangling");
+    remove(ROOT "/lk/chain");
+    remove(ROOT "/lk/direct");
+    remove(ROOT "/lk/other/up");
+    remove(ROOT "/lk/real/target.txt");
+    remove(ROOT "/lk/real/new.txt");
+    remove(ROOT "/lk/real");
+    remove(ROOT "/lk/other");
+    remove(ROOT "/lk");
+}
+
 /* Saves of one path from several threads at once (two instances of a program do the same across processes): each
    save has a temporary file of its own, so none fails for want of the file another one renamed, the result is one
    whole payload and not a mix, and nothing is left behind. */
@@ -376,6 +447,7 @@ int main(void)
 #if !defined(_WIN32)
     test_concurrent_save();
     test_save_keeps_mode();
+    test_save_through_link();
 #endif
     test_unsized_files();
     test_assets();
