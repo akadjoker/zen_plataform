@@ -332,28 +332,27 @@ void draw_fill_triangle(Framebuffer *fb, int x0, int y0, int x1, int y1, int x2,
 
 /* ---- blit ---- */
 
-static inline uint32_t src_at(const Framebuffer *src, int x, int y)
-{
-    return src->pixels[(size_t)y * src->stride + x];
-}
-
 static inline int clamp_index(int64_t v, int count)
 {
     return v < 0 ? 0 : v >= count ? count - 1 : (int)v;
 }
 
-static uint32_t sample_bilinear(const Framebuffer *src, int64_t fx, int64_t fy)
+/* Two texels of a row mixed by tx (0..255), channel by channel. */
+static inline uint32_t mix_row(uint32_t p0, uint32_t p1, int tx)
 {
-    /* fx, fy are 16.16 fixed-point source coordinates. A coordinate outside the source reads its nearest edge (as the
-       nearest-neighbour path does), for the neighbour texel too: x0 + 1 on a texel before the source was not checked. */
-    int64_t ix = fx >> 16, iy = fy >> 16;
-    int tx = (int)((fx >> 8) & 0xFF), ty = (int)((fy >> 8) & 0xFF);
-    int x0 = clamp_index(ix, src->width), x1 = clamp_index(ix + 1, src->width);
-    int y0 = clamp_index(iy, src->height), y1 = clamp_index(iy + 1, src->height);
+    uint32_t out = 0;
+    for (int s = 0; s < 32; s += 8)
+    {
+        int c0 = (p0 >> s) & 0xFF, c1 = (p1 >> s) & 0xFF;
+        int v = c0 + (((c1 - c0) * tx) >> 8);
+        out |= (uint32_t)(v & 0xFF) << s;
+    }
+    return out;
+}
 
-    uint32_t p00 = src_at(src, x0, y0), p10 = src_at(src, x1, y0);
-    uint32_t p01 = src_at(src, x0, y1), p11 = src_at(src, x1, y1);
-
+/* The four texels around a point: two rows mixed by tx, then by ty. */
+static inline uint32_t mix_quad(uint32_t p00, uint32_t p10, uint32_t p01, uint32_t p11, int tx, int ty)
+{
     uint32_t out = 0;
     for (int s = 0; s < 32; s += 8)
     {
@@ -376,30 +375,80 @@ void draw_blit(Framebuffer *dst, const Framebuffer *src,
         return;
 
     /* 64 bits for the fixed-point coordinates: a source rectangle at 32768 or more, or a negative one (a left shift of a
-       negative number is undefined), does not fit 16.16 in an int */
-    int64_t stepx = ((int64_t)sw * 65536) / dw;
-    int64_t stepy = ((int64_t)sh * 65536) / dh;
+       negative number is undefined), does not fit 16.16 in an int. A coordinate outside the source reads its nearest
+       edge, in both scale modes, the neighbour texel of the bilinear one included. */
+    const int64_t stepx = ((int64_t)sw * 65536) / dw;
+    const int64_t stepy = ((int64_t)sh * 65536) / dh;
+    const bool bilinear = scale == SCALE_BILINEAR, alpha = blend == BLEND_ALPHA;
 
-    for (int j = 0; j < dh; j++)
+    /* The destination pixels this call can touch: inside the framebuffer and, when it is on, the scissor (the tests
+       draw_pixel made for each one). Columns i0..i1 and rows j0..j1 of the destination rectangle. */
+    int64_t i0 = dx < 0 ? -(int64_t)dx : 0, i1 = dw;
+    int64_t j0 = dy < 0 ? -(int64_t)dy : 0, j1 = dh;
+    if (i1 > dst->width - (int64_t)dx)
+        i1 = dst->width - (int64_t)dx;
+    if (j1 > dst->height - (int64_t)dy)
+        j1 = dst->height - (int64_t)dy;
+    if (g_clip.on)
     {
-        int64_t oy = (int64_t)dy + j;
-        if (oy < 0 || oy >= dst->height)
-            continue;
-        int64_t fy = (int64_t)sy * 65536 + j * stepy + (scale == SCALE_BILINEAR ? stepy / 2 - 32768 : 0);
+        if (i0 < (int64_t)g_clip.x - dx)
+            i0 = (int64_t)g_clip.x - dx;
+        if (i1 > (int64_t)g_clip.x + g_clip.w - dx)
+            i1 = (int64_t)g_clip.x + g_clip.w - dx;
+        if (j0 < (int64_t)g_clip.y - dy)
+            j0 = (int64_t)g_clip.y - dy;
+        if (j1 > (int64_t)g_clip.y + g_clip.h - dy)
+            j1 = (int64_t)g_clip.y + g_clip.h - dy;
+    }
+    if (i0 >= i1 || j0 >= j1)
+        return;
 
-        for (int i = 0; i < dw; i++)
+    const int64_t xoff = bilinear ? stepx / 2 - 32768 : 0;
+    const int64_t yoff = bilinear ? stepy / 2 - 32768 : 0;
+    const int64_t fx0 = (int64_t)sx * 65536 + i0 * stepx + xoff;
+    /* One destination pixel per source texel across, and every one of them inside the source: no mixing along the row
+       (the weight tx is 0) and no clamping, so a row is a plain copy. The common case: an image drawn at its size. */
+    const bool unit_x = stepx == 65536 && xoff == 0 && (int64_t)sx + i0 >= 0 && (int64_t)sx + i1 <= src->width;
+
+    for (int64_t j = j0; j < j1; j++)
+    {
+        uint32_t *drow = dst->pixels + (size_t)(dy + j) * dst->stride;
+        uint32_t *out = drow + (dx + i0);
+        const int64_t fy = (int64_t)sy * 65536 + j * stepy + yoff;
+        const int64_t iy = fy >> 16;
+        const uint32_t *r0 = src->pixels + (size_t)clamp_index(iy, src->height) * src->stride;
+        const uint32_t *r1 = src->pixels + (size_t)clamp_index(iy + 1, src->height) * src->stride;
+        const int ty = (int)((fy >> 8) & 0xFF);
+        int64_t fx = fx0;
+
+        if (unit_x && (!bilinear || ty == 0))
         {
-            int64_t ox = (int64_t)dx + i;
-            if (ox < 0 || ox >= dst->width)
-                continue;
-            int64_t fx = (int64_t)sx * 65536 + i * stepx + (scale == SCALE_BILINEAR ? stepx / 2 - 32768 : 0);
-
-            uint32_t c;
-            if (scale == SCALE_BILINEAR)
-                c = sample_bilinear(src, fx, fy);
+            const uint32_t *in = r0 + (sx + i0);
+            if (alpha)
+                for (int64_t k = 0; k < i1 - i0; k++)
+                    out[k] = blend_over(out[k], in[k]);
             else
-                c = src_at(src, clamp_index(fx >> 16, src->width), clamp_index(fy >> 16, src->height));
-            draw_pixel(dst, (int)ox, (int)oy, c, blend);
+                for (int64_t k = 0; k < i1 - i0; k++)
+                    out[k] = in[k];
+            continue;
+        }
+
+        for (int64_t i = i0; i < i1; i++, fx += stepx, out++)
+        {
+            uint32_t c;
+            if (!bilinear)
+                c = r0[clamp_index(fx >> 16, src->width)];
+            else
+            {
+                const int64_t ix = fx >> 16;
+                const int tx = (int)((fx >> 8) & 0xFF);
+                const int x0 = clamp_index(ix, src->width), x1 = clamp_index(ix + 1, src->width);
+                if (ty == 0) /* on a texel row: the second row has a weight of 0, and the whole mix is the first */
+                    c = tx == 0 ? r0[x0] : mix_row(r0[x0], r0[x1], tx);
+                else
+                    c = mix_quad(r0[x0], r0[x1], r1[x0], r1[x1], tx, ty);
+            }
+            *out = alpha ? blend_over(*out, c) : c;
         }
     }
 }
