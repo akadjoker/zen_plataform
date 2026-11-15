@@ -100,6 +100,27 @@ static void test_kill(void)
     CHECK(process_exit_code(id) != -1);
 }
 
+#if !defined(_WIN32)
+/* process_kill sends SIGKILL, which a child can neither ignore nor catch, and which also ends a child that is stopped:
+   one that ignores every other signal, and one that stopped itself, are both gone when the call returns. The call
+   waits for the child with the table's lock held, so these must not leave it hung. */
+static void test_kill_stubborn(void)
+{
+    const char *deaf[] = {"-c", "trap '' TERM INT HUP QUIT USR1 USR2 PIPE ALRM; while :; do sleep 1; done"};
+    const char *stopped[] = {"-c", "kill -STOP $$; sleep 30"};
+    int64_t a = process_spawn(SHELL, deaf, 2, false);
+    int64_t b = process_spawn(SHELL, stopped, 2, false);
+    CHECK(a > 0 && b > 0);
+    SLEEP_MS(200); /* the shell has set its traps and stopped itself */
+    CHECK(process_is_running(a) && process_is_running(b));
+    CHECK(process_kill(a));
+    CHECK(!process_is_running(a));
+    CHECK(process_kill(b));
+    CHECK(!process_is_running(b));
+    CHECK(process_exit_code(a) != -1 && process_exit_code(b) != -1);
+}
+#endif
+
 /* An exit code of 259 is STILL_ACTIVE to GetExitCodeProcess: it must not read as a process that never ends. The
    same child is a plain exit code elsewhere. */
 static void test_exit_code_259(void)
@@ -145,6 +166,9 @@ int main(void)
     test_exit_code();
     test_arguments();
     test_kill();
+#if !defined(_WIN32)
+    test_kill_stubborn();
+#endif
     test_exit_code_259();
     test_failures();
     printf("test_process: %d passed, %d failed\n", g_pass, g_fail);
