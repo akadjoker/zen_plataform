@@ -33,7 +33,9 @@ typedef struct
 #define UI_MAX_CONTAINERS 8
 #define UI_MAX_COLOR_STACK 32
 #define UI_ID_STACK_MAX   32
-#define UI_STORE_BLOCK    64    /* entries of the state store are allocated in blocks of this many, and never move */
+#define UI_STORE_FIRST    64    /* the slots of the table inside the context (a power of two): the whole store before */
+#define UI_STORE_FIRST_USE 40   /* the ids put in it: about five eighths full, so a miss ends after a probe or two */
+#define UI_STORE_BLOCK    64    /* the entries after those are allocated in blocks of this many, and never move */
 #define UI_STORE_MAX      65536 /* the most entries the store keeps; state for ids past that is not kept */
 
 typedef enum { ROW_DYNAMIC, ROW_STATIC, ROW_CUSTOM } RowMode;
@@ -169,12 +171,16 @@ struct UiContext
     ZuiId id_stack[UI_ID_STACK_MAX];
     int   id_sp;
 
-    /* generic id-keyed state store: the entries live in blocks that never move (zui_state_* hand out pointers into them,
-       and a widget holds several at once), found through an open-addressed index that grows with them */
+    /* generic id-keyed state store. The first ids (up to UI_STORE_FIRST_USE) live in a small open-addressed table inside the
+       context, the same one the store always had: the common case, a window of a few dozen widgets, reads nothing else.
+       The ids after them live in blocks of entries that never move, found through an index that grows. zui_state_* hand out
+       pointers into the entries and a widget holds several at once, so no entry ever moves. */
+    UiStoreEntry   store_first[UI_STORE_FIRST];
+    int            store_first_n;               /* the ids in store_first */
     UiStoreEntry **store_blocks;
     int            store_blocks_n;
-    int            store_count;
-    UiStoreSlot   *store_index; /* the id and entry of each slot, entry NULL = empty; a power of two long, at most half full */
+    int            store_count;                 /* the ids in the blocks */
+    UiStoreSlot   *store_index;                 /* the ids in the blocks; a power of two long, at most half full */
     int            store_index_cap;
     UiStoreEntry   store_spill; /* what a call gets when the store is full or out of memory: a fresh entry each time */
 };
