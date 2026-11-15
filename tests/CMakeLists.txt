@@ -258,4 +258,10 @@ foreach(t ${ZEN_ALL_TESTS})
     if(NOT existing)
         set_tests_properties(${t} PROPERTIES TIMEOUT 120)
     endif()
+    # UBSan only prints and carries on by default, and the test then passes with undefined behaviour in it. With the
+    # sanitizers on, a report ends the test with a failure. test_crash is left out: its children dereference a null
+    # pointer on purpose, to die of SIGSEGV.
+    if(PLATFORM_SANITIZE AND NOT t STREQUAL "test_crash")
+        set_property(TEST ${t} APPEND PROPERTY ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    endif()
 endforeach()
