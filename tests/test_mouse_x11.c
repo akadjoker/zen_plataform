@@ -712,6 +712,83 @@ static void test_captured_nested(PlatformWindow *main_w)
         pump_once(main_w);
 }
 
+/* The captured mouse while the main window is not pumped and its deferred list overflows: the virtual pointer must
+   still move by exactly what the real pointer did. The pump of the main window ends by sending the pointer back to
+   the centre; the echo of that warp is the first event of the next frame and is not motion (it tells the window
+   where the pointer is now). Compacting the list must not throw that echo away, or the first real motion is
+   measured from the position before the warp. */
+static void test_captured_overflow(PlatformWindow *main_w)
+{
+    WindowConfig cfg = {.title = "mouse_modal3", .width = 120, .height = 90, .x = 900, .y = 100, .render = RENDER_PIXELS};
+    PlatformWindow *modal = window_create(&cfg);
+    CHECK(modal != NULL);
+    if (!modal)
+        return;
+    Display *lib = window_native_handle(main_w, NATIVE_DISPLAY); /* the window's own connection */
+    reset(main_w);
+    for (int i = 0; i < 10; i++)
+    {
+        window_begin_frame(modal);
+        window_begin_frame(main_w);
+        time_sleep(5);
+    }
+    ptr_in(100, 80);
+    settle(main_w);
+    mouse_set_mode(main_w, MOUSE_MODE_CAPTURED);
+    settle(main_w);
+    settle(main_w);
+    CHECK(pointer_grabbed_by_someone());
+
+    const int cx = WIN_X + WIN_W / 2, cy = WIN_Y + WIN_H / 2;
+    /* one frame sees the pointer 40,25 off the centre and then warps it back: the echo is in the server's reply */
+    ptr_to(cx + 40, cy + 25);
+    XSync(g_dpy, False);
+    XSync(lib, False);
+    window_begin_frame(main_w);
+    int before_x, before_y;
+    mouse_position(main_w, &before_x, &before_y);
+    XSync(lib, False); /* the warp has been done by the server, its echo waits in the queue */
+
+    /* from now on only the modal window is pumped: the main window collects more motion than its list holds */
+    int fx = 0, fy = 0;
+    for (int i = 0; i < 6000; i++)
+    {
+        fx = 20 + (i * 7) % 250;
+        fy = 20 + (i * 3) % 150;
+        if (WIN_X + fx == cx && WIN_Y + fy == cy)
+            fx++;
+        ptr_in(fx, fy);
+        if (i % 500 == 0)
+        {
+            XSync(g_dpy, False);
+            window_begin_frame(modal);
+        }
+    }
+    XSync(g_dpy, False);
+    for (int i = 0; i < 5; i++)
+    {
+        window_begin_frame(modal);
+        time_sleep(2);
+    }
+    for (int i = 0; i < 12; i++)
+    {
+        pump_once(main_w);
+        time_sleep(2);
+    }
+    int after_x, after_y;
+    mouse_position(main_w, &after_x, &after_y);
+    int want_x = before_x + (WIN_X + fx - cx), want_y = before_y + (WIN_Y + fy - cy);
+    printf("  e: captured, list overflowed: virtual pointer %d,%d -> %d,%d, the real pointer moved by %d,%d: expected %d,%d\n",
+           before_x, before_y, after_x, after_y, WIN_X + fx - cx, WIN_Y + fy - cy, want_x, want_y);
+    CHECK(after_x == want_x && after_y == want_y);
+
+    mouse_set_mode(main_w, MOUSE_MODE_NORMAL);
+    settle(main_w);
+    window_destroy(modal);
+    for (int i = 0; i < 5; i++)
+        pump_once(main_w);
+}
+
 /* ---- the window manager takes a press of the title bar and never gives the release back ---- */
 
 static HitTestResult hit_title(PlatformWindow *w, int x, int y, void *user)
@@ -893,6 +970,7 @@ int main(void)
     RUN("oneframe", test_click_inside_one_frame);
     RUN("nested", test_nested_loop);
     RUN("capnested", test_captured_nested);
+    RUN("capoverflow", test_captured_overflow);
     RUN("hit", test_hit_press_taken_by_wm);
     RUN("captured", test_captured);
     RUN("capbutton", test_captured_button_position);

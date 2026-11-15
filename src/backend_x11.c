@@ -2082,9 +2082,25 @@ typedef struct PendingX
    (edges, the frame's event list) in step with its own begin_frame. */
 #define PENDING_MAX 4096
 
+static bool pending_is_motion(const PendingX *it)
+{
+    return !it->is_touch && !it->im_taken && it->ev.type == MotionNotify;
+}
+
+/* The echo of the warp that sends a captured pointer back to the centre (see MotionNotify in process_event): not
+   motion, but the place the pointer is at now. */
+static bool pending_is_warp_echo(const BackendWindow *owner, const PendingX *it)
+{
+    return pending_is_motion(it) && it->ev.xmotion.x == owner->warp_x && it->ev.xmotion.y == owner->warp_y;
+}
+
 /* A window nobody pumps for a while (the one under a nested modal loop) still gets the pointer's motion over it, a
    lot of it. When the list is full, a motion directly followed by another motion says nothing the next one does not,
-   so those go; every button, key, focus and crossing event stays, in order. Returns how many were removed. */
+   so those go; every button, key, focus and crossing event stays, in order. Returns how many were removed.
+   The captured mouse measures each motion from the one before it, so a motion can only go when the next one measures
+   from the same place: the echo of a warp stays, and so does the motion before it (the pointer was moved from there
+   by the warp, and what it travelled up to there counts). Without that the first real motion after the echo would be
+   measured from before the warp and the virtual pointer would be off by the distance the warp covered. */
 static int pending_compact(BackendWindow *owner)
 {
     int kept = 0;
@@ -2092,8 +2108,8 @@ static int pending_compact(BackendWindow *owner)
     {
         const PendingX *it = &owner->pending[i];
         const PendingX *next = i + 1 < owner->pending_n ? &owner->pending[i + 1] : NULL;
-        if (!it->is_touch && !it->im_taken && it->ev.type == MotionNotify && next && !next->is_touch &&
-            !next->im_taken && next->ev.type == MotionNotify)
+        if (pending_is_motion(it) && next && pending_is_motion(next) && !pending_is_warp_echo(owner, it) &&
+            !pending_is_warp_echo(owner, next))
             continue;
         owner->pending[kept++] = *it;
     }
