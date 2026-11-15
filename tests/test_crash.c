@@ -78,7 +78,14 @@ static void overflow(volatile int depth)
     block[1] = block[0];
 }
 
-// kind: 0 invalid memory access, 1 abort, 2 stack overflow
+static int overflow_in_thread(void *user)
+{
+    (void)user;
+    overflow(0);
+    return 0;
+}
+
+// kind: 0 invalid memory access, 1 abort, 2 stack overflow, 3 stack overflow in a thread made by thread_create
 static void run_child(const char *path, int kind, int *signal_seen, char **report)
 {
     remove(path);
@@ -92,8 +99,10 @@ static void run_child(const char *path, int kind, int *signal_seen, char **repor
             *(volatile int *)0 = 1;
         else if (kind == 1)
             abort();
-        else
+        else if (kind == 2)
             overflow(0);
+        else
+            thread_join(thread_create(overflow_in_thread, NULL, "overflow"));
         _exit(4);
     }
     int status = 0;
@@ -131,6 +140,13 @@ static void test_crash_reports(void)
     run_child(path, 2, &sig, &report);
     CHECK(sig == SIGSEGV);
     CHECK(report != NULL && strstr(report, "signal 11 (SIGSEGV") != NULL); /* written from the alternate stack */
+    free(report);
+
+    /* sigaltstack is per thread: a thread of the library's own that runs out of stack needs a stack for the handler
+       too, or the kernel cannot run it and the process dies with no report */
+    run_child(path, 3, &sig, &report);
+    CHECK(sig == SIGSEGV);
+    CHECK(report != NULL && strstr(report, "signal 11 (SIGSEGV") != NULL);
     free(report);
     remove(path);
 }

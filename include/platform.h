@@ -520,8 +520,9 @@ extern "C"
        `extra` writes (may be NULL), and a backtrace of the crashing thread where the C library
        has one. The folder of `path` has to exist. path and header are copied; a second call
        replaces the first. The handlers run on a stack of their own for the thread that calls
-       this, so a stack overflow there is reported too. Returns false, and does nothing, where
-       this is not supported (Windows, the web). */
+       this and for every thread thread_create starts after it, so a stack overflow there is
+       reported too (a thread made some other way has none: sigaltstack is per thread).
+       Returns false, and does nothing, where this is not supported (Windows, the web). */
     PLATFORM_API bool crash_handler_install(const char *path, const char *header, CrashCallback extra, void *user);
     /* Puts the handlers that were there before back. */
     PLATFORM_API void crash_handler_remove(void);

@@ -14,6 +14,7 @@
 #endif
 
 #include "platform.h"
+#include "crash_internal.h"
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 
@@ -23,6 +24,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -44,7 +46,7 @@ static char g_path[CRASH_PATH_MAX];
 static char g_header[CRASH_HEADER_MAX];
 static CrashCallback g_extra;
 static void *g_user;
-static bool g_installed;
+static atomic_int g_installed; /* read by every thread the library starts */
 static struct sigaction g_previous[CRASH_SIGNALS];
 static char g_stack[CRASH_STACK_BYTES];
 /* g_busy is taken with one atomic exchange: of the threads that crash at the same time exactly one gets 0 back and
@@ -177,7 +179,7 @@ bool crash_handler_install(const char *path, const char *header, CrashCallback e
 {
     if (!path || !path[0] || strlen(path) >= CRASH_PATH_MAX)
         return false;
-    if (g_installed)
+    if (atomic_load(&g_installed))
         crash_handler_remove();
     strncpy(g_path, path, CRASH_PATH_MAX - 1);
     g_path[CRASH_PATH_MAX - 1] = 0;
@@ -208,17 +210,54 @@ bool crash_handler_install(const char *path, const char *header, CrashCallback e
     action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     for (int i = 0; i < CRASH_SIGNALS; i++)
         sigaction(g_signals[i], &action, &g_previous[i]);
-    g_installed = true;
+    atomic_store(&g_installed, 1);
     return true;
 }
 
 void crash_handler_remove(void)
 {
-    if (!g_installed)
+    if (!atomic_load(&g_installed))
         return;
     for (int i = 0; i < CRASH_SIGNALS; i++)
         sigaction(g_signals[i], &g_previous[i], NULL);
-    g_installed = false;
+    atomic_store(&g_installed, 0);
+}
+
+/* sigaltstack is per thread: g_stack serves the thread that installed the handlers, and any other thread that runs
+   out of its stack has nowhere to run the handler, so the kernel kills the process with no report. The threads
+   thread_create starts get a stack of their own here (not g_stack: two threads on one stack would trample each other). */
+static _Thread_local char *t_stack;
+
+void crash_thread_enter(void)
+{
+    if (!atomic_load(&g_installed))
+        return;
+    stack_t current;
+    if (sigaltstack(NULL, &current) == 0 && !(current.ss_flags & SS_DISABLE))
+        return; /* it has one already */
+    char *memory = (char *)malloc(CRASH_STACK_BYTES);
+    if (!memory)
+        return;
+    stack_t stack;
+    memset(&stack, 0, sizeof(stack));
+    stack.ss_sp = memory;
+    stack.ss_size = CRASH_STACK_BYTES;
+    if (sigaltstack(&stack, NULL) == 0)
+        t_stack = memory;
+    else
+        free(memory);
+}
+
+void crash_thread_leave(void)
+{
+    if (!t_stack)
+        return;
+    stack_t off;
+    memset(&off, 0, sizeof(off));
+    off.ss_flags = SS_DISABLE;
+    sigaltstack(&off, NULL);
+    free(t_stack);
+    t_stack = NULL;
 }
 
 #else /* Windows and the web: nothing is installed */

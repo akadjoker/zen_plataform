@@ -59,7 +59,7 @@ add_unit_test(test_fsys ${FS_SRC})
 add_unit_test(test_xinput_map src/gamepad.c src/gamepad_stub.c)
 add_unit_test(test_library src/library.c ${FS_SRC})
 add_unit_test(test_preedit src/preedit.c)
-add_unit_test(test_crash src/crash.c)
+add_unit_test(test_crash src/crash.c src/thread.c src/error.c src/log.c)
 if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(test_crash PRIVATE Threads::Threads)
@@ -239,6 +239,7 @@ add_fake_ext_test(test_thread
     ${FS_SRC}
     src/gamepad.c
     src/gamepad_stub.c
+    src/crash.c
     src/thread.c)
 if(NOT WIN32)
     find_package(Threads REQUIRED)

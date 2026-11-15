@@ -8,6 +8,7 @@
 
 #include "platform.h"
 #include "error_internal.h"
+#include "crash_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -218,7 +219,9 @@ static void *trampoline(void *p)
     if (t->name[0])
         pthread_setname_np(pthread_self(), t->name);
 #endif
+    crash_thread_enter();
     t->result = t->fn(t->user);
+    crash_thread_leave();
     if (XCHG(&t->state, T_FINISHED) == T_DETACHED)
         free(t);
     return NULL;
