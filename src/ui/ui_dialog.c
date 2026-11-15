@@ -187,8 +187,14 @@ static void dlg_confirm(UiContext *ui, UiDialog *d, const char *name_or_null)
     if (d->kind == ZUI_DIALOG_PICK_FOLDER)
         n = snprintf(d->out, sizeof d->out, "%s", d->dir);
     else
-        n = snprintf(d->out, sizeof d->out, "%s/%s", d->dir,
-                     name_or_null ? name_or_null : d->filename);
+    {
+        const char *name = name_or_null ? name_or_null : d->filename;
+        /* No file chosen (nothing selected in an open, no name typed in a save): the dialog stays open. It used to answer
+           OK with the path of the folder and a "/" after it, which a program then opened or saved as if it were a file. */
+        if (!name[0])
+            return;
+        n = snprintf(d->out, sizeof d->out, "%s/%s", d->dir, name);
+    }
     if (n < 0 || (size_t)n >= sizeof d->out)
     {
         d->out[0] = '\0';

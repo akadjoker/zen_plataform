@@ -296,6 +296,174 @@ static void test_state_store_grows(void)
     zui_destroy(ui);
 }
 
+/* ------------------------------------------------------------------ the file dialog -- */
+
+/* One frame of the dialog, over a window the test feeds with the fake backend. Returns what zui_dialog says. */
+static UiDialogState dialog_frame(PlatformWindow *w, UiContext *ui, char *out, int cap)
+{
+    window_begin_frame(w);
+    zui_begin(ui, w);
+    UiDialogState st = zui_dialog(ui, out, cap);
+    zui_end(ui);
+    return st;
+}
+
+/* the text commands of the last frame, in drawing order */
+static int text_pos(UiContext *ui, const char *text, int *x, int *y)
+{
+    const UiDrawList *dl = zui_draw_list(ui);
+    for (int i = 0; i < dl->count; i++)
+        if (dl->cmds[i].type == UI_CMD_TEXT && dl->cmds[i].u.text.len == (int)strlen(text) &&
+            strncmp(dl->cmds[i].u.text.str, text, (size_t)dl->cmds[i].u.text.len) == 0)
+        {
+            *x = dl->cmds[i].u.text.x + 4;
+            *y = dl->cmds[i].u.text.y + 4;
+            return 1;
+        }
+    return 0;
+}
+
+static int text_index(UiContext *ui, const char *text) /* order among the text commands, -1 when it is not drawn */
+{
+    const UiDrawList *dl = zui_draw_list(ui);
+    int n = 0;
+    for (int i = 0; i < dl->count; i++)
+        if (dl->cmds[i].type == UI_CMD_TEXT)
+        {
+            if (dl->cmds[i].u.text.len == (int)strlen(text) && strncmp(dl->cmds[i].u.text.str, text, (size_t)dl->cmds[i].u.text.len) == 0)
+                return n;
+            n++;
+        }
+    return -1;
+}
+
+static void click_at(PlatformWindow *w, UiContext *ui, int x, int y, UiDialogState *st, char *out, int cap)
+{
+    fake_mouse_move(w, x, y);
+    dialog_frame(w, ui, out, cap); /* hover */
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_move(w, x, y);
+    dialog_frame(w, ui, out, cap); /* press */
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    fake_mouse_move(w, x, y);
+    *st = dialog_frame(w, ui, out, cap); /* release: the click */
+}
+
+#define DLG_ROOT "test_ui_dialog_tmp"
+
+static void test_dialog_flow(void)
+{
+    remove(DLG_ROOT "/sub/inner.txt");
+    remove(DLG_ROOT "/sub");
+    CHECK(dir_make(DLG_ROOT "/sub"));
+    CHECK(io_save_file(DLG_ROOT "/b.txt", "bbbb", 4));
+    CHECK(io_save_file(DLG_ROOT "/A.txt", "a", 1));
+    CHECK(io_save_file(DLG_ROOT "/c.png", "png", 3));
+    CHECK(io_save_file(DLG_ROOT "/sub/inner.txt", "i", 1));
+
+    PlatformWindow *w = make_window();
+    CHECK(w != NULL);
+    UiContext *ui = zui_create();
+    UiFont *font = zui_font_builtin(1);
+    CHECK(ui && font && w);
+    if (!ui || !font || !w)
+        return;
+    zui_set_font(ui, font);
+    char out[1024] = "";
+    UiDialogState st;
+
+    /* open: the folder's entries, the folder first, then by name without regard to the case, and the filter hides c.png */
+    UiDialogConfig cfg = {.kind = ZUI_DIALOG_OPEN_FILE, .title = "Open", .filter = ".txt", .start_dir = DLG_ROOT};
+    zui_dialog_open(ui, &cfg);
+    st = dialog_frame(w, ui, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_RUNNING);
+    int sub = text_index(ui, "sub"), a = text_index(ui, "A.txt"), b = text_index(ui, "b.txt");
+    CHECK(sub >= 0 && a > sub && b > a);
+    CHECK(text_index(ui, "c.png") < 0);
+
+    /* a click on the name selects it, a second click on it soon after opens it: the path comes back */
+    int x, y;
+    CHECK(text_pos(ui, "b.txt", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_RUNNING);
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_OK);
+    CHECK(strcmp(out, DLG_ROOT "/b.txt") == 0);
+
+    /* Escape cancels */
+    zui_dialog_open(ui, &cfg);
+    dialog_frame(w, ui, out, sizeof out);
+    fake_key(w, KEY_ESCAPE, true, false);
+    st = dialog_frame(w, ui, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_CANCEL);
+
+    /* a folder opens on a double click, and "Subir" goes back up */
+    fake_key(w, KEY_ESCAPE, false, false);
+    zui_dialog_open(ui, &cfg);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_pos(ui, "sub", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    dialog_frame(w, ui, out, sizeof out);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_index(ui, "inner.txt") >= 0);
+    CHECK(text_index(ui, "b.txt") < 0);
+    CHECK(text_pos(ui, "Subir", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    dialog_frame(w, ui, out, sizeof out);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_index(ui, "b.txt") >= 0);
+
+    /* "Abrir" with nothing chosen does not answer OK with the path of the folder (an open that opens a folder as if it were
+       the file), and with a file chosen it does; a save with no name is no save either */
+    CHECK(text_pos(ui, "Abrir", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    if (st != ZUI_DIALOG_RUNNING)
+        printf("  Abrir with nothing chosen answered %d with \"%s\"\n", (int)st, out);
+    CHECK(st == ZUI_DIALOG_RUNNING);
+    CHECK(text_pos(ui, "A.txt", &x, &y));
+    int fx = x, fy = y;
+    click_at(w, ui, fx, fy, &st, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_RUNNING);
+    CHECK(text_pos(ui, "Abrir", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_OK && strcmp(out, DLG_ROOT "/A.txt") == 0);
+
+    UiDialogConfig save = {.kind = ZUI_DIALOG_SAVE_FILE, .title = "Save", .filter = NULL, .start_dir = DLG_ROOT};
+    zui_dialog_open(ui, &save);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_pos(ui, "Guardar", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    if (st != ZUI_DIALOG_RUNNING)
+        printf("  Guardar with no name answered %d with \"%s\"\n", (int)st, out);
+    CHECK(st == ZUI_DIALOG_RUNNING);
+
+    /* a folder can be picked as it stands */
+    UiDialogConfig pick = {.kind = ZUI_DIALOG_PICK_FOLDER, .title = "Pick", .filter = NULL, .start_dir = DLG_ROOT};
+    zui_dialog_open(ui, &pick);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_pos(ui, "Escolher", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_OK && strcmp(out, DLG_ROOT) == 0);
+
+    /* Cancelar */
+    zui_dialog_open(ui, &cfg);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_pos(ui, "Cancelar", &x, &y));
+    click_at(w, ui, x, y, &st, out, sizeof out);
+    CHECK(st == ZUI_DIALOG_CANCEL);
+
+    zui_destroy(ui);
+    zui_font_free(font);
+    window_destroy(w);
+    remove(DLG_ROOT "/sub/inner.txt");
+    remove(DLG_ROOT "/sub");
+    remove(DLG_ROOT "/b.txt");
+    remove(DLG_ROOT "/A.txt");
+    remove(DLG_ROOT "/c.png");
+    remove(DLG_ROOT);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -317,6 +485,7 @@ int main(void)
     test_font_load_refuses_bad_files();
     test_text_arena_survives_growth();
     test_state_store_grows();
+    test_dialog_flow();
 
     platform_shutdown();
     printf("%d checks passed, %d failed\n", g_pass, g_fail);
