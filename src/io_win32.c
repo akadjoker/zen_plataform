@@ -49,6 +49,11 @@ static size_t h_read(IoStream *s, void *dst, size_t n)
         DWORD got = 0;
         if (!ReadFile(handle_of(s), p + done, want, &got, NULL))
         {
+            if (GetLastError() == ERROR_BROKEN_PIPE) /* the other end of a pipe closed: that is the end of the data */
+            {
+                s->eof = true;
+                break;
+            }
             win32_error("read failed", NULL);
             break;
         }
