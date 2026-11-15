@@ -212,8 +212,8 @@ function(add_fake_ext_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-# Full widget test in both PIXEL and GL mode
-add_fake_ext_test(test_widgets
+# zen_ui compiled into a test directly: the toolkit, the software renderer and the fonts, over the fake backend.
+set(ZEN_UI_TEST_SRC
     ${FS_SRC}
     src/gamepad.c
     src/gamepad_stub.c
@@ -228,6 +228,13 @@ add_fake_ext_test(test_widgets
     src/ui/stb_impl.c
     src/ui/ui_utf8.c
     src/ui/ui_dialog.c)
+
+# Full widget test in both PIXEL and GL mode
+add_fake_ext_test(test_widgets ${ZEN_UI_TEST_SRC})
+
+# zen_ui below the widgets: renderer against a reference, fonts, the draw list's text arena, the state store
+add_fake_ext_test(test_ui ${ZEN_UI_TEST_SRC})
+target_compile_definitions(test_ui PRIVATE ZEN_TEST_FONT="${CMAKE_SOURCE_DIR}/src/ui/fonts/DejaVuSans.ttf")
 
 # Clipboard API over the fake backend's in-memory store, PNG encoder and decoder.
 add_fake_ext_test(test_clipboard
@@ -253,6 +260,7 @@ endif()
 # The test also needs libm for stb_truetype math functions (sqrt, floor, etc.)
 if(NOT WIN32)
     target_link_libraries(test_widgets PRIVATE m)
+    target_link_libraries(test_ui PRIVATE m)
 endif()
 
 # A test that hangs must not hold a runner for the default 25 minutes.

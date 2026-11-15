@@ -183,11 +183,14 @@ static void blit_glyph(Framebuffer *fb, const UiGlyph *g, int px, int py, UiColo
     if (x0 >= x1 || y0 >= y1)
         return;
 
+    /* The pointers start at the first pixel that shows (lo_x = px + x0 is not negative), not at px: with px below zero
+       "row start + px" is a pointer before the buffer on the first row, which C does not allow even if it is never used. */
+    const int n = (int)(x1 - x0);
     for (int y = (int)y0; y < (int)y1; ++y)
     {
-        const uint8_t *cov = g->cov + (size_t)y * g->w;
-        uint32_t *row = fb->pixels + (size_t)(py + y) * fb->stride + px;
-        for (int x = (int)x0; x < (int)x1; ++x)
+        const uint8_t *cov = g->cov + (size_t)y * g->w + (size_t)x0;
+        uint32_t *row = fb->pixels + (size_t)(py + y) * fb->stride + (size_t)lo_x;
+        for (int x = 0; x < n; ++x)
         {
             int a = ca == 255 ? cov[x] : cov[x] * ca / 255;
             if (!a)
