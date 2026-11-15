@@ -178,6 +178,11 @@ void io_platform_clean_stale_temps(const char *path)
     (void)path; /* not done here: a temporary left by a save that died stays (docs/SUSPEITAS.md) */
 }
 
+int io_platform_last_stale_scan(void)
+{
+    return 0;
+}
+
 bool io_platform_replace_file(const char *from, const char *to)
 {
     wchar_t wfrom[PATH_CAP], wto[PATH_CAP];

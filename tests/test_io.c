@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "io_internal.h" /* io_platform_last_stale_scan */
 #endif
 
 static int g_pass, g_fail;
@@ -440,9 +441,9 @@ static bool dir_exists_at(const char *path)
 }
 
 #define STALE ROOT "/stale"
-#define MAX_WIPE 64
+#define MAX_WIPE 1024
 
-static char g_wipe[MAX_WIPE][512];
+static char g_wipe[MAX_WIPE][256];
 static int g_wipe_n;
 
 static bool collect_name(const char *path, PathType type, void *user)
@@ -560,8 +561,37 @@ static void test_stale_temps(void)
     CHECK(io_save_file(STALE "_other/c.dat", "c", 1));
     CHECK(!file_exists(elsewhere));
 
+    /* The look at a folder is bounded: a small folder is read whole (its entries, "." and ".." among them), a big one for
+       256 entries and no more, whatever it holds: a save never reads a folder of any size */
+    char fpath[256];
+    wipe_directory(STALE "_small");
+    CHECK(dir_make(STALE "_small"));
+    for (int i = 0; i < 5; i++)
+    {
+        snprintf(fpath, sizeof fpath, STALE "_small/f%d.dat", i);
+        make_file(fpath, "x");
+    }
+    char *small_orphan = temp_path(STALE "_small", "f0.dat", dead, 21);
+    make_file(small_orphan, "orphan");
+    CHECK(io_save_file(STALE "_small/new.dat", "n", 1));
+    CHECK(io_platform_last_stale_scan() == 5 + 1 + 1 + 2 + 0); /* five files, the orphan, the saved one, "." and ".." */
+    CHECK(!file_exists(small_orphan));
+
+    wipe_directory(STALE "_big");
+    CHECK(dir_make(STALE "_big"));
+    for (int i = 0; i < 900; i++)
+    {
+        snprintf(fpath, sizeof fpath, STALE "_big/file%04d.dat", i);
+        make_file(fpath, "x");
+    }
+    CHECK(io_save_file(STALE "_big/new.dat", "n", 1));
+    CHECK(io_platform_last_stale_scan() == 256);
+
     kill(alive, SIGKILL);
     waitpid(alive, &status, 0);
+    free(small_orphan);
+    wipe_directory(STALE "_small");
+    wipe_directory(STALE "_big");
     for (int i = 0; i < nkeep; i++)
         free(keep[i]);
     free(litter);

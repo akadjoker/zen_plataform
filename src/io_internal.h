@@ -63,8 +63,11 @@ void io_platform_copy_mode(IoStream *s, const char *like);
 /* A save that died half way (the process killed, a power cut) leaves its temporary file for ever. After a save of `path`
    has worked this removes, from the folder of `path`, the temporaries of any save whose process no longer exists. It does
    it once for each folder in the life of the process (a program that saves all the time pays for one look at the folder,
-   not one per save). Best effort: nothing to report, nothing set in the error state. Not done on Windows. */
+   not one per save). Best effort: nothing to report, nothing set in the error state. A folder is read for at most
+   256 entries, whatever its size. Not done on Windows. */
 void io_platform_clean_stale_temps(const char *path);
+/* How many directory entries the latest clean-up looked at (at most 256: a save never reads a whole big folder), for tests. */
+int io_platform_last_stale_scan(void);
 bool io_platform_replace_file(const char *from, const char *to);
 bool io_platform_remove_file(const char *path);
 

@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE /* syscall() for the folder read below */
 #define _FILE_OFFSET_BITS 64
 
 #include "io_internal.h"
@@ -256,6 +257,78 @@ static bool temp_owner(const char *name, pid_t *pid)
     return true;
 }
 
+/* What the clean-up does with one name in the folder: a temporary of a save whose process is gone is removed. */
+static void stale_check(const char *dir, const char *name)
+{
+    pid_t owner;
+    if (!temp_owner(name, &owner))
+        return;
+    /* ESRCH is "no such process"; EPERM is a process of somebody else, which is alive. A process id that was given to
+       another program since is alive too, and its leftover stays: the safe side. */
+    if (kill(owner, 0) == 0 || errno != ESRCH)
+        return;
+    char file[4096];
+    if (snprintf(file, sizeof file, "%s%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '/' ? "/" : "", name) < (int)sizeof file)
+        unlink(file);
+}
+
+/* A save must not read a folder of any size: at most this many directory entries are looked at (the "." and ".." count),
+   so the extra time of the first save in a folder has a bound that does not depend on the folder (about 0.04 ms at it on
+   Linux, see the commit that set it). In a folder with more entries than that the leftovers are removed only if they come
+   within the first STALE_SCAN_MAX entries in the order the file system lists them, which in a hashed folder is not the
+   order they were made in; the others stay (docs/SUSPEITAS.md). */
+#define STALE_SCAN_MAX 256
+
+static int g_last_scan; /* entries looked at by the latest scan, for the test (a relaxed atomic: any thread may scan) */
+
+int io_platform_last_stale_scan(void)
+{
+    return __atomic_load_n(&g_last_scan, __ATOMIC_RELAXED);
+}
+
+#if defined(__linux__)
+/* readdir asks the kernel for 32 KiB of entries at a time (about a thousand names), so counting entries after the fact
+   still costs the kernel the whole first buffer: 0.3 ms in a big folder, and several disk blocks when it is cold. The
+   kernel's own call is asked for 4 KiB, a hundred names or so, and stops as soon as STALE_SCAN_MAX are in. */
+#include <sys/syscall.h>
+
+struct zs_dirent64
+{
+    uint64_t d_ino;
+    int64_t d_off;
+    uint16_t d_reclen;
+    uint8_t d_type;
+    char d_name[];
+};
+
+void io_platform_clean_stale_temps(const char *path)
+{
+    char dir[4096];
+    path_directory(path, dir, sizeof dir);
+    if (!first_save_in(dir))
+        return;
+    int fd = open(dir[0] ? dir : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    char buf[4096] __attribute__((aligned(8)));
+    int looked = 0;
+    while (looked < STALE_SCAN_MAX)
+    {
+        long got = syscall(SYS_getdents64, fd, buf, sizeof buf);
+        if (got <= 0)
+            break;
+        for (long pos = 0; pos < got && looked < STALE_SCAN_MAX;)
+        {
+            const struct zs_dirent64 *e = (const struct zs_dirent64 *)(buf + pos);
+            looked++;
+            stale_check(dir, e->d_name);
+            pos += e->d_reclen;
+        }
+    }
+    __atomic_store_n(&g_last_scan, looked, __ATOMIC_RELAXED);
+    close(fd);
+}
+#else
 void io_platform_clean_stale_temps(const char *path)
 {
     char dir[4096];
@@ -266,21 +339,16 @@ void io_platform_clean_stale_temps(const char *path)
     if (!d)
         return;
     struct dirent *e;
-    while ((e = readdir(d)))
+    int looked = 0;
+    while (looked < STALE_SCAN_MAX && (e = readdir(d)))
     {
-        pid_t owner;
-        if (!temp_owner(e->d_name, &owner))
-            continue;
-        /* ESRCH is "no such process"; EPERM is a process of somebody else, which is alive. A process id that was
-           given to another program since is alive too, and its leftover stays: the safe side. */
-        if (kill(owner, 0) == 0 || errno != ESRCH)
-            continue;
-        char file[4096];
-        if (snprintf(file, sizeof file, "%s%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '/' ? "/" : "", e->d_name) < (int)sizeof file)
-            unlink(file);
+        looked++;
+        stale_check(dir, e->d_name);
     }
+    __atomic_store_n(&g_last_scan, looked, __ATOMIC_RELAXED);
     closedir(d);
 }
+#endif
 
 static void sync_parent_dir(const char *path)
 {

@@ -84,5 +84,9 @@ real, sem saltos), mas ha uma perda que se prova com o mesmo programa:
   mesmo programa nao veem os pids um do outro: um pode apagar o temporario de uma gravacao do outro que ainda decorre (essa
   gravacao falha com "cannot rename", o ficheiro antigo fica intacto). Nao se provou porque exige dois espacos de pids; a
   defesa seria olhar tambem para a data de modificacao do temporario.
+- A pasta le-se no maximo 256 entradas (`STALE_SCAN_MAX`, o "." e o ".." contam), para que a primeira gravacao numa pasta
+  gigante nao a leia toda: numa pasta com mais de 256 entradas so se limpam os temporarios que caiam nas primeiras 256 pela
+  ordem em que o sistema de ficheiros lista, que numa pasta com indice por hash nao e a ordem de criacao; os outros ficam.
+  Falta uma forma de continuar a leitura nas gravacoes seguintes (um DIR* ou um cookie por pasta) se isso importar.
 - Os temporarios do nome da ronda 3 (`caminho.<hex>.tmp`, sem a marca `.zsave-`) nao se limpam: nao se distinguem de um
   ficheiro de outro programa.
