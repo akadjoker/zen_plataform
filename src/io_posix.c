@@ -3,11 +3,15 @@
 #include "io_internal.h"
 #include "error_internal.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #ifndef O_CLOEXEC
@@ -192,6 +196,90 @@ unsigned long long io_platform_unique(void)
     static unsigned long long counter;
     unsigned long long n = __atomic_add_fetch(&counter, 1, __ATOMIC_SEQ_CST);
     return ((unsigned long long)getpid() << 32) ^ n;
+}
+
+/* The folders looked at already (a 64-bit hash of each, FNV-1a), in a table that never evicts: a folder is looked at
+   once in the life of the process, and when 1024 folders have been seen it stops looking at new ones (a program that
+   saves in more than a thousand folders is not the one this is for, and a bounded cost is worth more than the leftovers
+   of the later ones). Every access is atomic: two threads saving in a new folder at once do not both look at it, and
+   nothing is torn. A hash that collides with another folder's means that folder is not looked at. */
+#define SEEN_DIRS 1024 /* a power of two */
+
+static bool first_save_in(const char *dir)
+{
+    static unsigned long long seen[SEEN_DIRS];
+    unsigned long long h = 1469598103934665603ull;
+    for (const unsigned char *p = (const unsigned char *)dir; *p; p++)
+        h = (h ^ *p) * 1099511628211ull;
+    if (h == 0)
+        h = 1; /* 0 is the empty slot */
+    unsigned slot = (unsigned)h & (SEEN_DIRS - 1);
+    for (int i = 0; i < SEEN_DIRS; i++, slot = (slot + 1) & (SEEN_DIRS - 1))
+    {
+        unsigned long long cur = __atomic_load_n(&seen[slot], __ATOMIC_RELAXED);
+        if (cur == h)
+            return false;
+        if (cur == 0)
+        {
+            if (__atomic_compare_exchange_n(&seen[slot], &cur, h, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                return true;
+            if (cur == h) /* the same folder, taken by another thread a moment ago */
+                return false;
+        }
+    }
+    return false;
+}
+
+/* Is `name` "<anything>" TEMP_MARK "<hex>.tmp", the name io_save_file gives its temporary, with the process id of the
+   save in the upper 32 bits of the number? The number is lower-case hex without leading zeros, as "%llx" writes it, and has
+   at least nine digits (a process id of 1 or more); anything else is somebody else's file. The mark is what tells the
+   file of a save from a file that merely ends in ".<hex>.tmp". */
+static bool temp_owner(const char *name, pid_t *pid)
+{
+    const char *at = NULL; /* the last mark: the file that was saved may have the mark in its own name */
+    for (const char *q = name; (q = strstr(q, IO_TEMP_MARK)) != NULL; q++)
+        at = q;
+    if (!at || at == name)
+        return false;
+    const char *p = at + strlen(IO_TEMP_MARK);
+    const char *first = p;
+    unsigned long long v = 0;
+    for (; (*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'); p++)
+        v = (v << 4) | (unsigned long long)(*p <= '9' ? *p - '0' : *p - 'a' + 10);
+    long digits = (long)(p - first);
+    if (digits < 9 || digits > 16 || *first == '0' || strcmp(p, ".tmp") != 0)
+        return false;
+    unsigned long long owner = v >> 32;
+    if (owner == 0 || owner > (unsigned long long)INT_MAX)
+        return false;
+    *pid = (pid_t)owner;
+    return true;
+}
+
+void io_platform_clean_stale_temps(const char *path)
+{
+    char dir[4096];
+    path_directory(path, dir, sizeof dir);
+    if (!first_save_in(dir))
+        return;
+    DIR *d = opendir(dir[0] ? dir : ".");
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)))
+    {
+        pid_t owner;
+        if (!temp_owner(e->d_name, &owner))
+            continue;
+        /* ESRCH is "no such process"; EPERM is a process of somebody else, which is alive. A process id that was
+           given to another program since is alive too, and its leftover stays: the safe side. */
+        if (kill(owner, 0) == 0 || errno != ESRCH)
+            continue;
+        char file[4096];
+        if (snprintf(file, sizeof file, "%s%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '/' ? "/" : "", e->d_name) < (int)sizeof file)
+            unlink(file);
+    }
+    closedir(d);
 }
 
 static void sync_parent_dir(const char *path)

@@ -6,8 +6,11 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <pthread.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -383,6 +386,193 @@ static void test_concurrent_save(void)
     remove(ROOT "/race/shared.dat");
     remove(ROOT "/race");
 }
+
+/* A program that dies in the middle of a save leaves "<path>.zsave-<number>.tmp" for ever (the number of
+   io_platform_unique, the process id in its upper half). The first save in a folder removes those of processes that
+   no longer exist, from the whole folder, and nothing else. The child is killed in the middle of a save by the kernel
+   and not by a timed kill: a limit of 64 KiB on the size of a file it writes ends it with SIGXFSZ at the first byte
+   past it. */
+typedef struct
+{
+    int count;      /* files whose name ends in ".tmp" and contains ".zsave-" */
+    int64_t size;   /* the size of the last one found */
+    char last[512]; /* and its path */
+} TempScan;
+
+static bool scan_temps(const char *path, PathType type, void *user)
+{
+    TempScan *t = user;
+    const char *name = path_filename(path);
+    size_t n = strlen(name);
+    if (type == PATH_TYPE_FILE && strstr(name, ".zsave-") != NULL && n > 4 && strcmp(name + n - 4, ".tmp") == 0)
+    {
+        PathInfo info;
+        t->count++;
+        t->size = fs_get_path_info(path, &info) ? info.size : -1;
+        snprintf(t->last, sizeof t->last, "%s", path);
+    }
+    return true;
+}
+
+static void make_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f)
+    {
+        fputs(text, f);
+        fclose(f);
+    }
+}
+
+/* the temporary of a save of `base` by process `pid`, as io_save_file names it, in `dir` */
+static char *temp_path(const char *dir, const char *base, pid_t pid, unsigned n)
+{
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s/%s.zsave-%llx.tmp", dir, base, ((unsigned long long)pid << 32) ^ n);
+    return strdup(buf);
+}
+
+static bool dir_exists_at(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+#define STALE ROOT "/stale"
+#define MAX_WIPE 64
+
+static char g_wipe[MAX_WIPE][512];
+static int g_wipe_n;
+
+static bool collect_name(const char *path, PathType type, void *user)
+{
+    (void)type;
+    (void)user;
+    if (g_wipe_n < MAX_WIPE)
+        snprintf(g_wipe[g_wipe_n++], sizeof g_wipe[0], "%s", path);
+    return true;
+}
+
+static void wipe_directory(const char *dir)
+{
+    g_wipe_n = 0;
+    fs_enumerate_directory(dir, false, collect_name, NULL);
+    for (int i = 0; i < g_wipe_n; i++)
+        fs_remove_path(g_wipe[i]);
+    fs_remove_path(dir);
+}
+
+static void test_stale_temps(void)
+{
+    wipe_directory(STALE);
+    wipe_directory(STALE "_other");
+    CHECK(dir_make(STALE));
+    CHECK(dir_make(STALE "_other"));
+
+    /* the process that dies in the middle of a save */
+    pid_t dead = fork();
+    CHECK(dead >= 0);
+    if (dead == 0)
+    {
+        struct rlimit none = {0, 0}, small = {64 * 1024, 64 * 1024};
+        setrlimit(RLIMIT_CORE, &none); /* no core file of a death that is meant to happen */
+        setrlimit(RLIMIT_FSIZE, &small);
+        signal(SIGXFSZ, SIG_DFL);
+        unsigned char *big = malloc(1 << 20);
+        memset(big, 'x', 1 << 20);
+        io_save_file(STALE "/a.dat", big, 1 << 20); /* dies inside the write */
+        _exit(0);                                   /* only if it did not */
+    }
+    int status = 0;
+    CHECK(waitpid(dead, &status, 0) == dead);
+    CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGXFSZ);
+    TempScan left = {0, 0, ""};
+    CHECK(fs_enumerate_directory(STALE, false, scan_temps, &left));
+    CHECK(left.count == 1 && left.size == 64 * 1024); /* the half-written temporary of the save that died */
+    CHECK(!file_exists(STALE "/a.dat"));              /* and the file itself was never made */
+    char *litter = strdup(left.last);
+
+    /* a process that lives, and names that look nearly like a temporary but are not */
+    pid_t alive = fork();
+    CHECK(alive >= 0);
+    if (alive == 0)
+    {
+        pause();
+        _exit(0);
+    }
+    char *keep[16];
+    int nkeep = 0;
+    char *name;
+#define KEEP(expr)                       \
+    do                                   \
+    {                                    \
+        name = (expr);                   \
+        CHECK(name != NULL);             \
+        make_file(name, "not yours");    \
+        keep[nkeep++] = name;            \
+    } while (0)
+    KEEP(strdup(STALE "/a.dat.tmp"));                          /* the fixed name an old version used */
+    KEEP(strdup(STALE "/a.dat.zsave-1.tmp"));                  /* a short number */
+    KEEP(strdup(STALE "/a.dat.zsave-1234abcd.tmp"));           /* eight digits: process 0 */
+    KEEP(strdup(STALE "/a.dat.zsave-0123456789a.tmp"));        /* a leading zero */
+    KEEP(strdup(STALE "/.zsave-0123456789a.tmp"));             /* no name before the mark */
+    KEEP(temp_path(STALE, "a.dat", getpid(), 6));              /* of this process: another thread's save */
+    KEEP(temp_path(STALE, "a.dat", alive, 7));                 /* of a process that lives */
+    KEEP(strdup(STALE "/a.dat.9999999999.tmp"));               /* without the mark: the name of round 3, it may be anyone's */
+    char *bak = temp_path(STALE, "a.dat", dead, 8);
+    bak = realloc(bak, strlen(bak) + 5);
+    strcat(bak, ".bak");                                       /* something is added after the .tmp */
+    KEEP(bak);
+    char *upper = temp_path(STALE, "a.dat", dead, 0xAB);
+    for (char *c = strstr(upper, ".zsave-") + 7; *c != '.'; c++)
+        if (*c >= 'a' && *c <= 'f')
+            *c = (char)(*c - 'a' + 'A');
+    KEEP(upper);                                               /* upper-case hex is not what "%llx" writes */
+    char *dir_keep = temp_path(STALE, "a.dat", dead, 9);
+    CHECK(dir_make(dir_keep));                                 /* a folder with the name of a temporary is left alone */
+    char *orphan = temp_path(STALE, "a.dat", dead, 10);        /* a temporary of a dead process, made by hand */
+    make_file(orphan, "orphan");
+    char *orphan_b = temp_path(STALE, "b.dat", dead, 11);      /* of another file in the same folder: the folder is cleaned, not the path */
+    make_file(orphan_b, "orphan of b");
+    char *elsewhere = temp_path(STALE "_other", "a.dat", dead, 12); /* in a folder where nothing is saved yet */
+    make_file(elsewhere, "other folder");
+
+    CHECK(file_exists(litter));
+    CHECK(io_save_file(STALE "/a.dat", "fresh", 5));
+    CHECK(!file_exists(litter)); /* what the dead save left is gone, ... */
+    CHECK(!file_exists(orphan) && !file_exists(orphan_b)); /* ... and so are the others of dead processes in the folder */
+    CHECK(file_exists(elsewhere));
+    CHECK(dir_exists_at(dir_keep));
+    for (int i = 0; i < nkeep; i++)
+        CHECK(file_exists(keep[i]));
+    size_t n = 0;
+    char *back = io_load_file(STALE "/a.dat", &n);
+    CHECK(back && n == 5 && memcmp(back, "fresh", 5) == 0);
+    fs_free(back);
+
+    /* a folder is looked at once: what a dead save leaves in it later waits for the next run of the program, and
+       a folder not seen yet is looked at when the first save in it works */
+    char *later = temp_path(STALE, "a.dat", dead, 13);
+    make_file(later, "later");
+    CHECK(io_save_file(STALE "/b.dat", "again", 5));
+    CHECK(file_exists(later));
+    CHECK(io_save_file(STALE "_other/c.dat", "c", 1));
+    CHECK(!file_exists(elsewhere));
+
+    kill(alive, SIGKILL);
+    waitpid(alive, &status, 0);
+    for (int i = 0; i < nkeep; i++)
+        free(keep[i]);
+    free(litter);
+    free(dir_keep);
+    free(orphan);
+    free(orphan_b);
+    free(elsewhere);
+    free(later);
+    wipe_directory(STALE);
+    wipe_directory(STALE "_other");
+}
 #endif
 
 /* procfs reports a size of 0 for files that do hold text: the size alone cannot say a file is empty. */
@@ -448,6 +638,7 @@ int main(void)
     test_concurrent_save();
     test_save_keeps_mode();
     test_save_through_link();
+    test_stale_temps();
 #endif
     test_unsized_files();
     test_assets();

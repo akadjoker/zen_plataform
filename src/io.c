@@ -356,7 +356,7 @@ bool io_save_file(const char *path, const void *data, size_t size)
     /* A name of its own for each save. With one fixed "path.tmp", two saves of the same path (two threads, or two
        instances of the program) wrote into the same file, and the one that renamed it first left the other with
        nothing to rename: its save failed. */
-    if (snprintf(tmp, sizeof tmp, "%s.%llx.tmp", path, io_platform_unique()) >= (int)sizeof tmp)
+    if (snprintf(tmp, sizeof tmp, "%s" IO_TEMP_MARK "%llx.tmp", path, io_platform_unique()) >= (int)sizeof tmp)
         return error_set("path too long");
 
     IoStream *s = io_platform_open_file(tmp, IO_MODE_WRITE | IO_MODE_CREATE | IO_MODE_TRUNCATE);
@@ -367,7 +367,10 @@ bool io_save_file(const char *path, const void *data, size_t size)
     if (!io_close(s))
         ok = false;
     if (ok && io_platform_replace_file(tmp, path))
+    {
+        io_platform_clean_stale_temps(path);
         return true;
+    }
     io_platform_remove_file(tmp);
     return false;
 }
