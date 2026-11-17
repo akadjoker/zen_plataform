@@ -116,6 +116,10 @@ struct BackendWindow
     /* keyboard: which virtual key codes this window has told the program are down */
     bool held[KEYMAP_SIZE];
 
+    /* a drop (EVENT_WINDOW_DROP): the paths of the last one, which the event points to until the next drop or the window's end */
+    char **drop_paths;
+    int drop_count;
+
     /* text input (NSTextInputClient): on by default; the text being composed, as UTF-16 units, and where the program's caret is */
     bool text_input;
     bool composing;
@@ -694,6 +698,54 @@ static void capture_stop(BackendWindow *b)
 }
 
 /* ========================================================================== */
+/*  file drop                                                                 */
+/* ========================================================================== */
+
+static void drop_free(BackendWindow *b)
+{
+    for (int i = 0; i < b->drop_count; i++)
+        free(b->drop_paths[i]);
+    free(b->drop_paths);
+    b->drop_paths = NULL;
+    b->drop_count = 0;
+}
+
+/* The files on a dragging pasteboard, as file URLs (not other kinds of URL). */
+static NSArray *pasteboard_files(NSPasteboard *pb)
+{
+    NSDictionary *only_files = [NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES]
+                                                           forKey:NSPasteboardURLReadingFileURLsOnlyKey];
+    return [pb readObjectsForClasses:[NSArray arrayWithObject:[NSURL class]] options:only_files];
+}
+
+/* A drop of files raises EVENT_WINDOW_DROP with their paths (UTF-8), which stay valid until the next drop. */
+static bool drop_files(BackendWindow *b, NSPasteboard *pb)
+{
+    NSArray *urls = pasteboard_files(pb);
+    NSUInteger n = [urls count];
+    if (n == 0)
+        return false;
+    drop_free(b);
+    b->drop_paths = calloc(n, sizeof *b->drop_paths);
+    if (!b->drop_paths)
+        return false;
+    for (NSUInteger i = 0; i < n; i++)
+    {
+        const char *path = [[urls objectAtIndex:i] fileSystemRepresentation];
+        char *copy = path ? strdup(path) : NULL;
+        if (copy)
+            b->drop_paths[b->drop_count++] = copy;
+    }
+    if (b->drop_count == 0)
+        return false;
+    Event e = {.type = EVENT_WINDOW_DROP};
+    e.data.drop.count = b->drop_count;
+    e.data.drop.paths = (const char **)b->drop_paths;
+    push(b, &e);
+    return true;
+}
+
+/* ========================================================================== */
 /*  cursors                                                                   */
 /* ========================================================================== */
 
@@ -1263,7 +1315,10 @@ static void modal_end(BackendWindow *b)
 {
     self = [super initWithFrame:frame];
     if (self)
+    {
         owner = b;
+        [self registerForDraggedTypes:[NSArray arrayWithObject:NSPasteboardTypeFileURL]];
+    }
     return self;
 }
 
@@ -1454,6 +1509,23 @@ static void modal_end(BackendWindow *b)
 {
     if (owner)
         scroll_event(owner, event);
+}
+
+/* ---- file drop: the view takes files dragged onto it (NSDraggingDestination) ---- */
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
+{
+    return owner && [pasteboard_files([sender draggingPasteboard]) count] ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
+{
+    return owner && [pasteboard_files([sender draggingPasteboard]) count] ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender
+{
+    return owner && drop_files(owner, [sender draggingPasteboard]) ? YES : NO;
 }
 
 /* ---- text input: the NSTextInputClient the input context talks to. The view has no text of its own: what the program
@@ -1878,6 +1950,7 @@ void backend_destroy(BackendWindow *b)
         [b->delegate release];
         [b->window release];
     }
+    drop_free(b);
     free(b->pixels);
     free(b);
 }
@@ -2526,26 +2599,153 @@ void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
     }
 }
 
-/* ---- phase 6: clipboard (and file drop, which has no function here: EVENT_WINDOW_DROP is never raised yet) ---- */
+/* ---- clipboard: the general pasteboard ---- */
 
+/* The pasteboard type of a MIME type: text and PNG have their own, anything else is a type named as the MIME type is. Files
+   (text/uri-list) are not a type of an item but file URLs, written and read as such. */
+static NSPasteboardType clipboard_type(const char *mime)
+{
+    if (strcmp(mime, CLIPBOARD_TEXT) == 0)
+        return NSPasteboardTypeString;
+    if (strcmp(mime, CLIPBOARD_PNG) == 0)
+        return NSPasteboardTypePNG;
+    return [NSString stringWithUTF8String:mime];
+}
+
+/* The URLs of a text/uri-list: one per line, comments (#) and empty lines left out. */
+static void add_uri_list(NSMutableArray *urls, const void *data, size_t size)
+{
+    NSString *text = [[NSString alloc] initWithBytes:data length:size encoding:NSUTF8StringEncoding];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"])
+    {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([trimmed length] == 0 || [trimmed hasPrefix:@"#"])
+            continue;
+        NSURL *url = [NSURL URLWithString:trimmed];
+        if (url)
+            [urls addObject:url];
+    }
+    [text release];
+}
+
+/* Replaces the clipboard: one pasteboard item with every representation of the content that is not files, and the files as the
+   file URLs they are (each a pasteboard item of its own, as the Finder writes them). count 0 clears it. The pasteboard keeps the
+   data itself, so it stays when the program ends. */
 bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
-    (void)items; /* TODO(mac phase 6) */
-    (void)count;
-    return not_yet("the clipboard");
+    bool ok;
+    @autoreleasepool
+    {
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        [pb clearContents];
+        if (count <= 0)
+            return true;
+        NSPasteboardItem *item = [[NSPasteboardItem alloc] init];
+        NSMutableArray *objects = [NSMutableArray array];
+        bool item_used = false;
+        for (int i = 0; i < count; i++)
+        {
+            const ClipboardItem *it = &items[i];
+            if (!it->mime || (!it->data && it->size))
+                continue;
+            if (strcmp(it->mime, CLIPBOARD_URIS) == 0)
+            {
+                add_uri_list(objects, it->data, it->size);
+            }
+            else if (strcmp(it->mime, CLIPBOARD_TEXT) == 0)
+            {
+                NSString *text = [[NSString alloc] initWithBytes:it->data length:it->size encoding:NSUTF8StringEncoding];
+                if (text)
+                {
+                    [item setString:text forType:NSPasteboardTypeString];
+                    item_used = true;
+                }
+                [text release];
+            }
+            else
+            {
+                [item setData:[NSData dataWithBytes:it->data length:it->size] forType:clipboard_type(it->mime)];
+                item_used = true;
+            }
+        }
+        if (item_used)
+            [objects insertObject:item atIndex:0];
+        ok = [objects count] == 0 || [pb writeObjects:objects];
+        [item release];
+    }
+    return ok ? true : error_set("cannot write the clipboard");
 }
+
 bool backend_clipboard_has(const char *mime)
 {
-    (void)mime; /* TODO(mac phase 6) */
-    not_yet("the clipboard");
-    return false;
+    bool has;
+    @autoreleasepool
+    {
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        if (strcmp(mime, CLIPBOARD_URIS) == 0)
+            has = [pasteboard_files(pb) count] > 0;
+        else
+            has = [pb availableTypeFromArray:[NSArray arrayWithObject:clipboard_type(mime)]] != nil;
+    }
+    return has;
 }
+
+/* A copy of the data of a type, with a NUL after it that the size does not count, or NULL when the clipboard has none of that
+   type. Text comes as UTF-8, files as the URIs of the text/uri-list, one per line. */
 void *backend_clipboard_get(const char *mime, size_t *size)
 {
-    (void)mime; /* TODO(mac phase 6) */
-    (void)size;
-    not_yet("the clipboard");
-    return NULL;
+    void *copy = NULL;
+    @autoreleasepool
+    {
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        const void *bytes = NULL;
+        size_t n = 0;
+        NSString *joined = nil;
+        NSData *data = nil;
+        if (strcmp(mime, CLIPBOARD_URIS) == 0)
+        {
+            NSArray *urls = pasteboard_files(pb);
+            if ([urls count])
+            {
+                NSMutableArray *lines = [NSMutableArray array];
+                for (NSURL *url in urls)
+                    [lines addObject:[url absoluteString]];
+                joined = [lines componentsJoinedByString:@"\n"];
+            }
+        }
+        else if (strcmp(mime, CLIPBOARD_TEXT) == 0)
+            joined = [pb stringForType:NSPasteboardTypeString];
+        else
+            data = [pb dataForType:clipboard_type(mime)];
+        if (joined)
+        {
+            bytes = [joined UTF8String];
+            n = bytes ? strlen(bytes) : 0;
+        }
+        else if (data)
+        {
+            bytes = [data bytes];
+            n = [data length];
+        }
+        if (bytes || n == 0)
+        {
+            copy = malloc(n + 1);
+            if (copy)
+            {
+                if (n)
+                    memcpy(copy, bytes, n);
+                ((char *)copy)[n] = '\0';
+                if (size)
+                    *size = n;
+            }
+        }
+        if (!joined && !data)
+        {
+            free(copy);
+            copy = NULL;
+        }
+    }
+    return copy;
 }
 
 /* ---- phase 7: window modes and looks ---- */
