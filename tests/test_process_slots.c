@@ -3,8 +3,11 @@
  * polls, more children than the table holds, and ids that were never handed out. The test includes the library file
  * itself, to put a record in the table by hand where a real pid reuse cannot be arranged.
  */
+/* macOS hides sysctl and its process table behind a strict _POSIX_C_SOURCE, so none is asked for there. */
+#if !defined(__APPLE__)
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#endif
 
 #include "platform.h"
 
@@ -18,6 +21,10 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/proc.h>
+#include <sys/sysctl.h>
+#endif
 
 static pid_t test_fork(void);
 #define fork() test_fork()
@@ -77,6 +84,38 @@ static bool finished(int64_t id)
 }
 
 /* children of this process that have ended and not been waited for */
+#if defined(__APPLE__)
+/* macOS has no /proc: the process table comes from sysctl, the children of this process one by one, and a zombie is a
+   process whose state is SZOMB. -1 when the table cannot be read. */
+static int zombies(void)
+{
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PPID, (int)getpid()};
+    for (int attempt = 0; attempt < 5; attempt++)
+    {
+        size_t size = 0;
+        if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0)
+            return -1;
+        size += 16 * sizeof(struct kinfo_proc); /* a child may appear between the two calls */
+        struct kinfo_proc *list = malloc(size);
+        if (!list)
+            return -1;
+        if (sysctl(mib, 4, list, &size, NULL, 0) != 0)
+        {
+            free(list);
+            if (errno == ENOMEM)
+                continue;
+            return -1;
+        }
+        int n = 0;
+        for (size_t i = 0; i < size / sizeof *list; i++)
+            if (list[i].kp_proc.p_stat == SZOMB)
+                n++;
+        free(list);
+        return n;
+    }
+    return -1;
+}
+#else
 static int zombies(void)
 {
     int n = 0;
@@ -106,6 +145,7 @@ static int zombies(void)
     closedir(d);
     return n;
 }
+#endif
 
 static void test_pid_reuse(void)
 {

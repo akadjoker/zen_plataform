@@ -70,6 +70,11 @@ static void no_core_dump(void)
 #endif
 }
 
+/* The recursion is the point: it runs out of stack on purpose. A compiler that sees it never returns says so. */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winfinite-recursion"
+#endif
 static void overflow(volatile int depth)
 {
     volatile char block[4096];
@@ -77,6 +82,9 @@ static void overflow(volatile int depth)
     overflow(depth + 1);
     block[1] = block[0];
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 static int overflow_in_thread(void *user)
 {
@@ -145,6 +153,7 @@ static void test_crash_reports(void)
     /* sigaltstack is per thread: a thread of the library's own that runs out of stack needs a stack for the handler
        too, or the kernel cannot run it and the process dies with no report */
     run_child(path, 3, &sig, &report);
+    printf("  stack overflow in a thread: the child died of signal %d\n", sig);
     CHECK(sig == SIGSEGV);
     CHECK(report != NULL && strstr(report, "signal 11 (SIGSEGV") != NULL);
     free(report);
