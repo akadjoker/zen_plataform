@@ -72,7 +72,7 @@ static void test_basic(void)
         join_thread(t);
     CHECK(g_other_id != 0 && g_other_id != current_thread_id());
 
-    CHECK(count_cpu() >= 1);
+    CHECK(cpu_count() >= 1);
 }
 
 static void test_mutex_counter(void)

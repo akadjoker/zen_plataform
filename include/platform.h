@@ -502,7 +502,7 @@ extern "C"
     /* false when the time ran out, true when it was signalled (or woke early). */
     PLATFORM_API bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t milliseconds);
 
-    PLATFORM_API int count_cpu(void); /* logical processors, at least 1 */
+    PLATFORM_API int cpu_count(void); /* logical processors, at least 1 */
 
     /* ========================================================================== */
     /*  Child processes                                                           */

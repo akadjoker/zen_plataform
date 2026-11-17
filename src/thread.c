@@ -46,7 +46,7 @@ void signal_cond(PlatformCond *c) { (void)c; }
 void broadcast_cond(PlatformCond *c) { (void)c; }
 void wait_cond(PlatformCond *c, PlatformMutex *m) { (void)c, (void)m; }
 bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms) { (void)c, (void)m, (void)ms; return false; }
-int count_cpu(void) { return 1; }
+int cpu_count(void) { return 1; }
 
 #else
 
@@ -180,7 +180,7 @@ bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
     return SleepConditionVariableCS(&c->cv, &m->cs, ms) != 0;
 }
 
-int count_cpu(void)
+int cpu_count(void)
 {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
@@ -353,7 +353,7 @@ bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
     return pthread_cond_timedwait(&c->c, &m->m, &ts) == 0;
 }
 
-int count_cpu(void)
+int cpu_count(void)
 {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
