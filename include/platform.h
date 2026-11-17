@@ -76,7 +76,12 @@ extern "C"
        no debug. The framebuffer is always RGBA8 with 24-bit depth, 8-bit stencil
        and double buffering. A request the platform cannot satisfy makes
        window_create fail (see platform_get_error); it is never downgraded.
-       debug is ignored on the web. */
+       debug is ignored on the web.
+
+       macOS has two kinds of context: the core profile (a request of 3.2 or later, up to
+       4.1, gives a 4.1 core context, which is what the hardware has) and the legacy one,
+       which is 2.1 (GL_PROFILE_COMPAT with a version of 2.1 or lower). Compatibility
+       above 2.1, core above 4.1, GL_PROFILE_ES and debug contexts fail there. */
     typedef struct
     {
         GLProfile profile;
@@ -137,7 +142,9 @@ extern "C"
         EVENT_WINDOW_DROP,          /* paths are valid only during this event; on the web the files are in
                                        the MEMFS under /drop/<name> (see platform_web_fetch_file) */
 
-        EVENT_KEY,  /* a physical key changed state */
+        EVENT_KEY,  /* a physical key changed state; data.key.scancode is the system's own code for the key
+                       (the X keycode, the Win32 scancode, the macOS virtual key code), also for a key that has
+                       no KEY_* (key is then KEY_NULL) */
         EVENT_CHAR, /* text input, one Unicode codepoint */
         EVENT_MOUSE_MOVE,
         EVENT_MOUSE_BUTTON,
@@ -385,15 +392,18 @@ extern "C"
        programs, buffers, textures) with the context of `w` and has no surface to
        draw to, so the thread can compile and link while the window's thread keeps
        drawing. Create and destroy it on the window's thread, before the window is
-       destroyed. NULL where the backend has no shared contexts (only X11 has them
-       so far) or the context cannot be created: the caller then stays on one
-       thread. */
+       destroyed. NULL where the backend has no shared contexts (X11 and macOS have
+       them) or the context cannot be created: the caller then stays on one thread.
+       On macOS what a worker made reaches the window's context after the worker has
+       called glFlush (or glFinish), and the window's own context is for the thread of
+       the window (an NSOpenGLContext is tied to its view, which is the main thread's). */
     typedef struct GLWorker GLWorker;
     PLATFORM_API GLWorker *gl_worker_create(PlatformWindow *w);
     /* Call on the worker thread: true binds the context to it, false releases it
        before the thread ends. On X11 the connection is locked (XInitThreads), so
-       the window's thread may carry on with its own calls meanwhile; a backend
-       that cannot say so would need the window's thread to wait for the worker. */
+       the window's thread may carry on with its own calls meanwhile, and on macOS the
+       worker's context is a CGL one that has no view and touches nothing of AppKit; a
+       backend that cannot say so would need the window's thread to wait for the worker. */
     PLATFORM_API bool gl_worker_make_current(GLWorker *worker, bool current);
     PLATFORM_API void gl_worker_destroy(GLWorker *worker);
 
@@ -563,7 +573,7 @@ extern "C"
          X11              Display*             Window             GLXContext
          Wayland          wl_display*          wl_surface*        EGLContext
          Win32            HINSTANCE            HWND               HGLRC
-         macOS            NULL                 NSWindow*          NULL (NSOpenGLContext* later)
+         macOS            NULL                 NSWindow*          NSOpenGLContext*
          Android          EGLDisplay           ANativeWindow*     EGLContext
          Web, fake        NULL                 NULL               NULL
 
@@ -789,7 +799,11 @@ extern "C"
     /* Next key from this frame's press queue, in order. 0 when empty. */
     PLATFORM_API int key_get_pressed(PlatformWindow *w);
     /* KEYMOD_* mask of the modifier keys held now, plus the Caps Lock and Num Lock
-       states (on the web, where the browser does not say, the locks read as off). */
+       states (on the web, where the browser does not say, the locks read as off; a Mac
+       has no Num Lock). On macOS the Command keys are the Super keys (KEY_LEFT_SUPER,
+       KEY_RIGHT_SUPER, KEYMOD_SUPER), Option is Alt, and the keys a Mac does not have
+       are the ones in their place: Help for Insert, Clear for Num Lock, F13 to F15 for
+       Print Screen, Scroll Lock and Pause. */
     PLATFORM_API int key_mods(PlatformWindow *w);
     /* Next codepoint from the text-input queue. 0 when empty. Independent of the
        key queue, so it carries layout and composed input correctly. */
@@ -823,7 +837,9 @@ extern "C"
     PLATFORM_API int mouse_y(PlatformWindow *w);
     PLATFORM_API void mouse_position(PlatformWindow *w, int *x, int *y);
     PLATFORM_API void mouse_delta(PlatformWindow *w, int *dx, int *dy); /* vs previous frame */
-    PLATFORM_API float mouse_wheel(PlatformWindow *w);                  /* vertical, this frame */
+    PLATFORM_API float mouse_wheel(PlatformWindow *w);                  /* vertical, this frame; a wheel notch is 1.0, up is positive.
+                                                                           On macOS a trackpad's scroll counts as ten points a notch and
+                                                                           the system's natural scrolling is already in it */
     PLATFORM_API void mouse_wheel_v(PlatformWindow *w, float *x, float *y);
 
     PLATFORM_API void mouse_set_position(PlatformWindow *w, int x, int y);
@@ -831,7 +847,9 @@ extern "C"
 
     /* A cursor from an image: 0xAARRGGBB pixels, width and height from 1 to 256, the
        hot spot (the pixel that points) inside it. NULL on failure (X11 needs
-       libXcursor at run time; not supported on Android and the web). The pixels are
+       libXcursor at run time; not supported on Android and the web). The image is
+       shown pixel for pixel, so on macOS a scale 2 display shows it half its size in
+       points. The pixels are
        copied. mouse_set_cursor_image(w, NULL) goes back to the shape chosen with
        mouse_set_cursor. A cursor may be shared by windows; destroy it after they
        stop using it. */
@@ -842,7 +860,10 @@ extern "C"
     PLATFORM_API void mouse_set_mode(PlatformWindow *w, int mode); /* MOUSE_MODE_* */
     /* Keep receiving mouse motion and buttons while the pointer is outside the window,
        as when dragging out of it (SDL_CaptureMouse). Turn it off when the drag ends.
-       Returns whether the capture is in effect; another program may hold a grab. */
+       Returns whether the capture is in effect; another program may hold a grab. On
+       macOS a drag is followed out of the window by the system anyway, and the capture
+       adds the pointer that moves outside the application with no button down (the
+       clicks outside also go to the application they are over). */
     PLATFORM_API bool mouse_capture(PlatformWindow *w, bool on);
 
     /* ========================================================================== */
