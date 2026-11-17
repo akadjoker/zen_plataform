@@ -348,6 +348,8 @@ static void push_char(BackendWindow *b, uint32_t cp)
         core_push_char(b->core, cp);
         return;
     }
+    if (b->core && b->core->in.text_input_off)
+        return;
     Event e = {.type = EVENT_CHAR};
     e.data.codepoint = cp;
     push(b, &e);
