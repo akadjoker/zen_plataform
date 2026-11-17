@@ -775,16 +775,12 @@ static void test_live_callback(PlatformWindow *w)
 /*  what is not there yet says so                                             */
 /* ========================================================================== */
 
-static bool says_not_implemented(void)
-{
-    return strstr(platform_get_error(), "not implemented on macOS yet") != NULL;
-}
-
 static void test_not_implemented(PlatformWindow *w)
 {
-    /* The GL and pixel windows, the keyboard, the mouse and the cursors are tested in test_gl_cocoa, test_pixels_cocoa and
-       test_input_cocoa; here only that a window of each kind can be made. What is still a stub of a later phase has to say no,
-       and when a phase brings one in, its check here changes. */
+    /* Every phase of the backend is in now: the GL and pixel windows, the keyboard, the mouse and the cursors, text input, the
+       clipboard and drops, the dialogs, the window modes and looks, and the Vulkan surface are tested in test_gl_cocoa,
+       test_pixels_cocoa, test_input_cocoa, test_text_cocoa, test_clipboard_cocoa, test_drop_cocoa, test_dialog_cocoa,
+       test_window_cocoa and test_vulkan_cocoa. Here only that a window of each render mode can be made. */
     WindowConfig gl = {.title = "gl", .width = 100, .height = 100, .render = RENDER_GL};
     PlatformWindow *gw = window_create(&gl);
     CHECK(gw != NULL);
@@ -809,26 +805,8 @@ static void test_not_implemented(PlatformWindow *w)
     CHECK(window_native_handle(w, NATIVE_GL_CONTEXT) == NULL);
     CHECK(gl_proc_address("glClear") != NULL);
     CHECK(gl_worker_create(w) == NULL);
-
-    platform_clear_error();
-    CHECK(!clipboard_set_data(CLIPBOARD_TEXT, "x", 1));
-    CHECK(says_not_implemented());
-    CHECK(clipboard_get()[0] == '\0');
-    CHECK(!clipboard_has_data(CLIPBOARD_TEXT));
-
-    platform_clear_error();
-    CHECK(!vulkan_create_surface(w, (void *)1, NULL, &(uint64_t){0}));
-    CHECK(says_not_implemented());
-    uint32_t n = 99;
-    CHECK(vulkan_instance_extensions(&n) == NULL && n == 0);
-
-    platform_clear_error();
-    window_set_always_on_top(w, true);
-    CHECK(says_not_implemented());
-    platform_clear_error();
-    window_set_mode(w, WINDOW_FULLSCREEN, 0);
-    CHECK(says_not_implemented());
-    CHECK(window_get_mode(w) == WINDOW_WINDOWED); /* it stayed what it was */
+    uint32_t n = 0;
+    CHECK(vulkan_instance_extensions(&n) != NULL && n == 2);
     CHECK((key_mods(w) & ~KEYMOD_CAPS_LOCK) == 0);  /* no modifier is held on the runner (the Caps Lock light is not asked about) */
     window_request_attention(w); /* real: the Dock icon bounces, nothing to check but that it does not crash */
 }

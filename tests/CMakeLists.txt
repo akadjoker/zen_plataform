@@ -219,7 +219,7 @@ if(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
     # OpenGL, the pixel surface, the keyboard and the mouse, and the toolkit's frames: each on a window of its own.
     # What the tests write for a person to look at (the frames of test_ui_cocoa) goes to test-images/ of the build folder.
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test-images)
-    set(COCOA_TESTS test_gl_cocoa test_pixels_cocoa test_input_cocoa test_text_cocoa test_clipboard_cocoa test_drop_cocoa test_dialog_cocoa test_gl_worker_cocoa test_ui_cocoa)
+    set(COCOA_TESTS test_gl_cocoa test_pixels_cocoa test_input_cocoa test_text_cocoa test_clipboard_cocoa test_drop_cocoa test_dialog_cocoa test_window_cocoa test_vulkan_cocoa test_gl_worker_cocoa test_ui_cocoa)
     foreach(t ${COCOA_TESTS})
         add_executable(${t} ${t}.c)
         if(t STREQUAL "test_ui_cocoa")
