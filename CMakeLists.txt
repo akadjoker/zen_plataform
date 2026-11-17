@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 
+# macOS: the oldest system a build runs on. 11.0 is the first one on Apple Silicon, so one target holds for both
+# architectures (below it the compiler raises an arm64 build to it anyway). It has to be set before project().
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+endif()
+
 project(platform LANGUAGES C)
 
 # Static CRT: executables and the library depend on no runtime DLL (vcruntime, ...).
@@ -44,7 +50,17 @@ elseif(ANDROID)
 elseif(WIN32)
     set(BACKEND_SRC src/backend_win32.c)
 elseif(APPLE)
-    message(FATAL_ERROR "No native macOS/iOS backend yet; configure with -DPLATFORM_USE_FAKE=ON for a headless build")
+    # macOS: the one Objective-C file of the library, over AppKit. iOS has no backend (a fake build still works).
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        message(FATAL_ERROR "No native iOS backend; configure with -DPLATFORM_USE_FAKE=ON for a headless build")
+    endif()
+    enable_language(OBJC)
+    set(BACKEND_SRC src/backend_cocoa.m)
+    set(PLATFORM_BACKEND_COCOA ON)
+    # Manual retain/release, not ARC: a BackendWindow is a calloc'ed C struct holding the window, the view and the delegate,
+    # and ARC would need a bridging cast at every use of them (see the comment at the top of the file).
+    # -Wunguarded-availability: an AppKit call newer than the deployment target needs an @available check, or it warns.
+    set_source_files_properties(src/backend_cocoa.m PROPERTIES COMPILE_OPTIONS "-fno-objc-arc;-Wunguarded-availability")
 elseif(UNIX)
     if(PLATFORM_LINUX_BACKEND STREQUAL "wayland")
         include(cmake/wayland.cmake)
@@ -69,7 +85,7 @@ if(EMSCRIPTEN)
     set_property(TARGET platform APPEND PROPERTY INTERFACE_LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/pf_web.js)
 endif()
 set_target_properties(platform PROPERTIES
-    C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
+    C_VISIBILITY_PRESET hidden OBJC_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
 if(NOT BUILD_SHARED_LIBS)
     target_compile_definitions(platform PUBLIC PLATFORM_STATIC)
 endif()
@@ -111,7 +127,8 @@ target_link_libraries(zen_ui PUBLIC platform)
 # zen_2d (r2d): batched 2D engine on GL, and the zen_ui GL renderer. Separate
 # library so the toolkit core never depends on OpenGL. Desktop uses GL 3.3 core
 # via glad (Linux and Windows); web (WebGL2) and Android (GLES3) use the GLES3 path in r2d.c.
-if(NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
+# macOS has no OpenGL context yet (mac phase 3), so the GL renderer waits.
+if(NOT PLATFORM_USE_FAKE AND NOT APPLE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_library(zen_2d src/r2d/r2d.c src/r2d/r2d_ui.c)
     target_include_directories(zen_2d PUBLIC include PRIVATE src/r2d)
     target_compile_features(zen_2d PUBLIC c_std_11)
@@ -174,7 +191,10 @@ elseif(PLATFORM_BACKEND_WAYLAND AND NOT PLATFORM_USE_FAKE)
         target_compile_definitions(platform PRIVATE ZEN_WL_XDG_DECORATION)
     endif()
     target_link_libraries(platform PUBLIC PkgConfig::WAYLAND ${CMAKE_DL_LIBS} Threads::Threads)
-elseif(UNIX AND NOT PLATFORM_USE_FAKE)
+elseif(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
+    # Cocoa is AppKit and Foundation; CoreGraphics has the display and session calls (the monitors, the window server check).
+    target_link_libraries(platform PUBLIC "-framework Cocoa" "-framework CoreGraphics")
+elseif(UNIX AND NOT PLATFORM_USE_FAKE AND NOT APPLE)
     find_package(X11 REQUIRED)
     find_package(Threads REQUIRED)
     target_link_libraries(platform PUBLIC X11 Xrandr GL ${CMAKE_DL_LIBS} Threads::Threads)
@@ -186,7 +206,8 @@ if(PLATFORM_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT ANDROID)
 endif()
 
 option(PLATFORM_BUILD_EXAMPLES "Build examples" ON)
-if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
+# (the examples draw with OpenGL, which macOS does not have yet: mac phase 3)
+if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND NOT APPLE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_subdirectory(examples)
 endif()
 
