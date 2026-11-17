@@ -998,6 +998,117 @@ static void test_two_windows(PlatformWindow *w)
     settle(w);
 }
 
+/* ========================================================================== */
+/*  scale change: a display mode with a different scale, if the display has one  */
+/* ========================================================================== */
+
+static bool set_display_mode(CGDirectDisplayID display, CGDisplayModeRef mode)
+{
+    CGDisplayConfigRef config;
+    if (CGBeginDisplayConfiguration(&config) != kCGErrorSuccess)
+        return false;
+    CGConfigureDisplayWithDisplayMode(config, display, mode, NULL);
+    /* for this program only: the system puts the old mode back when the program ends, whatever happens to it */
+    if (CGCompleteDisplayConfiguration(config, kCGConfigureForAppOnly) != kCGErrorSuccess)
+    {
+        CGCancelDisplayConfiguration(config);
+        return false;
+    }
+    return true;
+}
+
+/* The switch itself and what the window does about it. */
+static void switch_scale(PlatformWindow *w, CGDirectDisplayID display, CGDisplayModeRef current, CGDisplayModeRef other)
+{
+    bool ok;
+    float before = window_content_scale(w);
+    seen_reset();
+    printf("  switching to %zux%zu pixels (scale %.0f -> %.0f)\n", CGDisplayModeGetPixelWidth(other), CGDisplayModeGetPixelHeight(other),
+           (double)before, (double)CGDisplayModeGetPixelWidth(other) / (double)CGDisplayModeGetWidth(other));
+    if (!set_display_mode(display, other))
+    {
+        NOTE("the display mode could not be changed (a session that does not allow it), scale change checks skipped");
+        return;
+    }
+    WAIT_UNTIL(w, window_content_scale(w) != before, 6000, ok);
+    if (!ok)
+    {
+        NOTE("the window's scale did not change in 6 s after the mode did");
+        set_display_mode(display, current);
+        return;
+    }
+    settle(w);
+    float after = window_content_scale(w);
+    int fw, fh, aw, ah;
+    window_get_framebuffer_size(w, &fw, &fh);
+    window_get_size(w, &aw, &ah);
+    printf("  scale %.1f -> %.1f: scale-changed events %d (last %.1f), framebuffer %dx%d for %dx%d points\n", (double)before, (double)after,
+           g_seen.scale_changed, (double)g_seen.scale, fw, fh, aw, ah);
+    CHECK(g_seen.scale_changed >= 1);
+    CHECK(g_seen.scale == after);
+    CHECK(fw == (int)lround((double)aw * (double)after) && fh == (int)lround((double)ah * (double)after));
+    CHECK(g_seen.fb_resize >= 1 && g_seen.fb_w == fw && g_seen.fb_h == fh); /* the pixels were announced */
+    MonitorInfo m;
+    CHECK(monitor_get_info(monitor_from_window(w), &m) && m.content_scale == after);
+
+    /* and back */
+    seen_reset();
+    if (set_display_mode(display, current))
+    {
+        WAIT_UNTIL(w, window_content_scale(w) == before, 6000, ok);
+        CHECK(ok);
+        settle(w);
+        CHECK(g_seen.scale_changed >= 1 && g_seen.scale == before);
+        window_get_framebuffer_size(w, &fw, &fh);
+        window_get_size(w, &aw, &ah);
+        CHECK(fw == (int)lround((double)aw * (double)before) && fh == (int)lround((double)ah * (double)before));
+    }
+}
+
+/* The backing scale factor of a window changes when the display's mode changes (the same event as a move to a screen with
+   another scale: windowDidChangeBackingProperties). The runner's display may offer a mode with other pixels for the same
+   points; if it does, the window is told, and the framebuffer follows. */
+static void test_scale_change(PlatformWindow *w)
+{
+    CGDirectDisplayID display = CGMainDisplayID();
+    CGDisplayModeRef current = CGDisplayCopyDisplayMode(display);
+    if (!current)
+    {
+        NOTE("no current display mode, scale change checks skipped");
+        return;
+    }
+    const void *keys[1] = {kCGDisplayShowDuplicateLowResolutionModes};
+    const void *vals[1] = {kCFBooleanTrue};
+    CFDictionaryRef options = CFDictionaryCreate(NULL, keys, vals, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(display, options);
+    size_t cw = CGDisplayModeGetWidth(current), ch = CGDisplayModeGetHeight(current);
+    size_t cpw = CGDisplayModeGetPixelWidth(current), cph = CGDisplayModeGetPixelHeight(current);
+    printf("  display mode now: %zux%zu points, %zux%zu pixels, %.0f Hz; %ld modes offered\n", cw, ch, cpw, cph,
+           CGDisplayModeGetRefreshRate(current), modes ? (long)CFArrayGetCount(modes) : 0L);
+
+    CGDisplayModeRef other = NULL;
+    for (CFIndex i = 0; modes && i < CFArrayGetCount(modes); i++)
+    {
+        CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        size_t mw = CGDisplayModeGetWidth(m), mh = CGDisplayModeGetHeight(m);
+        size_t mpw = CGDisplayModeGetPixelWidth(m), mph = CGDisplayModeGetPixelHeight(m);
+        if (i < 12)
+            printf("    mode %ld: %zux%zu points, %zux%zu pixels\n", (long)i, mw, mh, mpw, mph);
+        /* the same size in points, at a different scale (the layout does not change, only the pixels do) */
+        if (!other && mw == cw && mh == ch && mpw != cpw && CGDisplayModeIsUsableForDesktopGUI(m))
+            other = m;
+    }
+    if (other)
+        switch_scale(w, display, current, other);
+    else
+        NOTE("the display offers no mode with the same size in points and another scale, scale change checks skipped");
+    if (modes)
+        CFRelease(modes);
+    if (options)
+        CFRelease(options);
+    CGDisplayModeRelease(current);
+}
+
 static void test_init_cycle(void)
 {
     platform_shutdown();
@@ -1072,6 +1183,8 @@ int main(void)
     test_live_callback(w);
     printf("not implemented yet\n");
     test_not_implemented(w);
+    printf("scale change\n");
+    test_scale_change(w);
     printf("create and destroy\n");
     test_create_destroy_many(w);
 
