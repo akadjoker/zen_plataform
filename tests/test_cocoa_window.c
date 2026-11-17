@@ -12,7 +12,11 @@
  * Two oracles that do not go through the backend's own getters: CoreGraphics' window list (where the window server says
  * the window is, in the same top-left convention) and, read-only, AppKit through the Objective-C runtime's C interface.
  */
+/* The Mach headers some Apple headers include declare a thread_create of their own, which platform.h's conflicts with when
+   both are in one file. This test uses the library's threads nowhere, so they are kept apart here. */
+#define thread_create zen_platform_thread_create
 #include "platform.h"
+#undef thread_create
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -175,7 +179,7 @@ static void settle(PlatformWindow *w)
    (it is called through the type of the method), so each call casts it to that type. */
 #define MSG(ret, ...) ((ret(*)(__VA_ARGS__))(void *)objc_msgSend)
 
-static id objc_class(const char *name)
+static id ns_class(const char *name)
 {
     return (id)objc_getClass(name);
 }
@@ -214,7 +218,7 @@ static SEL msg_sel(id o, const char *sel)
 
 static id ns_app(void)
 {
-    return msg_id(objc_class("NSApplication"), "sharedApplication");
+    return msg_id(ns_class("NSApplication"), "sharedApplication");
 }
 static id ns_window(PlatformWindow *w)
 {
