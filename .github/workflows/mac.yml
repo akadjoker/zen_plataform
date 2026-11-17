@@ -11,14 +11,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: mac-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   macos:
     name: macOS (Apple Silicon)
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[mac]')
+    # on the job, not the workflow: a push without the marker skips the job and must not cancel a run in progress
+    concurrency:
+      group: mac-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: macos-latest
     timeout-minutes: 40
     env:
