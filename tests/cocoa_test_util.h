@@ -137,11 +137,6 @@ UNUSED_FN CGRect msg_rect(id o, const char *sel)
 #endif
 }
 
-/* Autorelease pools: a C program has none around main, and what AppKit hands back autoreleased would pile up in the
-   thread's outermost pool for the life of the process. */
-extern void *objc_autoreleasePoolPush(void);
-extern void objc_autoreleasePoolPop(void *pool);
-
 UNUSED_FN id ns_string(const char *utf8)
 {
     return msg_id_cstr(ns_class("NSString"), "stringWithUTF8String:", utf8);
