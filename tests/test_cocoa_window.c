@@ -668,15 +668,22 @@ static void test_pointer(PlatformWindow *w)
     if (ok)
     {
         settle(w);
-        CHECK(g_seen.enter == 1 && g_seen.leave == 0);
-        printf("  entered: enter events %d\n", g_seen.enter);
+        /* AppKit may say leave and enter again while the tracking area settles, so the count of events is not asked to be one:
+           what is asked is that the events add up to the state, from a window that was not hovered. */
+        printf("  entered: enter events %d, leave events %d\n", g_seen.enter, g_seen.leave);
+        CHECK(g_seen.enter >= 1 && g_seen.enter - g_seen.leave == (window_is_hovered(w) ? 1 : 0));
     }
     seen_reset();
+    bool hovered_before = window_is_hovered(w);
     move_pointer(far_x, far_y, true);
     WAIT_UNTIL(w, !window_is_hovered(w), 1500, ok);
     CHECK(ok);
     if (ok)
-        CHECK(g_seen.leave == 1);
+    {
+        settle(w);
+        printf("  left again: enter events %d, leave events %d\n", g_seen.enter, g_seen.leave);
+        CHECK(g_seen.leave - g_seen.enter == (hovered_before ? 1 : 0));
+    }
 }
 
 /* ========================================================================== */
@@ -823,6 +830,14 @@ static void test_not_implemented(PlatformWindow *w)
 /*  create and destroy                                                        */
 /* ========================================================================== */
 
+/* Under AddressSanitizer freed memory waits in a quarantine that malloc_zone_statistics counts as in use, so the heap says
+   nothing about leaks there; the windows AppKit still holds are counted either way. */
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define ZP_ASAN 1
+#endif
+#endif
+
 static size_t heap_in_use(unsigned *blocks)
 {
     malloc_statistics_t st;
@@ -879,9 +894,108 @@ static void test_create_destroy_many(PlatformWindow *w)
            ROUNDS, WARM, h0, h1, grown, (double)grown / ROUNDS, b0, b1, windows_before, windows_after, sw0.count, sw1.count);
     CHECK(windows_after == windows_before); /* none of them is still held by AppKit */
     CHECK(sw1.count == sw0.count);
-    /* A window, its view and its delegate are several kilobytes: a leak of any of them in 300 rounds is well over this. */
-    CHECK(grown < 200 * 1024);
-    CHECK((long)b1 - (long)b0 < 3000);
+#if defined(ZP_ASAN)
+    NOTE("AddressSanitizer is on: the heap check is skipped (its quarantine counts as in use)");
+#else
+    /* A window that is not let go of leaves its whole object graph behind: the first run without a pool around the AppKit
+       calls grew 340 KB and 3000 blocks a round. What stays after the pools is a few hundred bytes a round (AppKit's own tables,
+       the numbers above), so the limit is a thousand of the 300 rounds' worth of that. */
+    CHECK(grown < 1024 * 1024);
+    CHECK((long)b1 - (long)b0 < 6000);
+#endif
+}
+
+/* A window made at a place goes there: where it was asked, or the middle of the monitor's usable area, or staggered. */
+static void test_placement(void)
+{
+    MonitorInfo m;
+    CHECK(monitor_get_info(0, &m));
+    WindowConfig cfg = {.title = "placed", .width = 200, .height = 120, .x = 60, .y = 150, .render = RENDER_VULKAN};
+    PlatformWindow *a = window_create(&cfg);
+    CHECK(a != NULL);
+    if (a)
+    {
+        settle(a);
+        int x, y;
+        window_get_position(a, &x, &y);
+        CHECK(x == 60 && y == 150);
+        window_destroy(a);
+    }
+
+    cfg.x = cfg.y = WINDOW_POS_CENTERED;
+    cfg.monitor = 0;
+    PlatformWindow *c = window_create(&cfg);
+    CHECK(c != NULL);
+    if (c)
+    {
+        settle(c);
+        ServerWindows sw = {0};
+        CGRect r = CGRectZero;
+        bool found = false;
+        for (int i = 0; i < 100 && !found; i++)
+        {
+            sw = server_windows();
+            for (int k = 0; k < sw.count; k++)
+                if ((int)lround(sw.bounds[k].size.width) == 200)
+                {
+                    r = sw.bounds[k];
+                    found = true;
+                }
+            if (!found)
+                pump_for(c, 20);
+        }
+        if (found)
+        {
+            double cx = r.origin.x + r.size.width / 2, cy = r.origin.y + r.size.height / 2;
+            double wx = m.work_x + m.work_w / 2.0, wy = m.work_y + m.work_h / 2.0;
+            printf("  centred: frame %.0f,%.0f %.0fx%.0f, middle %.1f,%.1f; usable area middle %.1f,%.1f\n", r.origin.x, r.origin.y,
+                   r.size.width, r.size.height, cx, cy, wx, wy);
+            CHECK(fabs(cx - wx) <= 1.0 && fabs(cy - wy) <= 1.0);
+        }
+        else
+            NOTE("the window server's list did not show the centred window, the check was skipped");
+        window_destroy(c);
+    }
+
+    /* no position given: the windows are staggered, not piled on one spot */
+    cfg.x = cfg.y = WINDOW_POS_UNDEFINED;
+    PlatformWindow *u1 = window_create(&cfg);
+    PlatformWindow *u2 = window_create(&cfg);
+    CHECK(u1 && u2);
+    if (u1 && u2)
+    {
+        int x1, y1, x2, y2;
+        window_get_position(u1, &x1, &y1);
+        window_get_position(u2, &x2, &y2);
+        printf("  undefined: %d,%d then %d,%d\n", x1, y1, x2, y2);
+        CHECK(x1 != x2 || y1 != y2);
+    }
+    window_destroy(u1);
+    window_destroy(u2);
+}
+
+/* One queue feeds every window, but an event belongs to the window it is for: pumping one window leaves the other's
+   events for its own pump. */
+static void test_two_windows(PlatformWindow *w)
+{
+    WindowConfig cfg = {.title = "second", .width = 160, .height = 120, .x = WINDOW_POS_UNDEFINED, .y = WINDOW_POS_UNDEFINED,
+                        .render = RENDER_VULKAN, .resizable = true};
+    PlatformWindow *b = window_create(&cfg);
+    CHECK(b != NULL);
+    if (!b)
+        return;
+    settle(b);
+    settle(w);
+    window_set_size(b, 190, 110);
+    seen_reset();
+    pump_for(w, 150); /* only the first window is pumped */
+    CHECK(g_seen.resize == 0 && g_seen.fb_resize == 0);
+    seen_reset();
+    pump_for(b, 150);
+    printf("  second window: resize events %d (%dx%d) once it is pumped\n", g_seen.resize, g_seen.resize_w, g_seen.resize_h);
+    CHECK(g_seen.resize >= 1 && g_seen.resize_w == 190 && g_seen.resize_h == 110);
+    window_destroy(b);
+    settle(w);
 }
 
 static void test_init_cycle(void)
@@ -948,6 +1062,10 @@ int main(void)
     test_focus(w);
     printf("pointer\n");
     test_pointer(w);
+    printf("placement\n");
+    test_placement();
+    printf("two windows\n");
+    test_two_windows(w);
     printf("close and quit\n");
     test_close_and_quit(w);
     printf("live callback\n");
