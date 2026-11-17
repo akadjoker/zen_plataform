@@ -85,21 +85,22 @@ static bool finished(int64_t id)
 
 /* children of this process that have ended and not been waited for */
 #if defined(__APPLE__)
-/* macOS has no /proc: the process table comes from sysctl, the children of this process one by one, and a zombie is a
-   process whose state is SZOMB. -1 when the table cannot be read. */
+/* macOS has no /proc: the process table comes from sysctl (all of it: its public header has no way to ask for the children of
+   one process), and a zombie of ours is a process whose state is SZOMB and whose parent is this one. -1 when the table cannot
+   be read. */
 static int zombies(void)
 {
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PPID, (int)getpid()};
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
     for (int attempt = 0; attempt < 5; attempt++)
     {
         size_t size = 0;
-        if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0)
+        if (sysctl(mib, 3, NULL, &size, NULL, 0) != 0)
             return -1;
-        size += 16 * sizeof(struct kinfo_proc); /* a child may appear between the two calls */
+        size += 64 * sizeof(struct kinfo_proc); /* processes may appear between the two calls */
         struct kinfo_proc *list = malloc(size);
         if (!list)
             return -1;
-        if (sysctl(mib, 4, list, &size, NULL, 0) != 0)
+        if (sysctl(mib, 3, list, &size, NULL, 0) != 0)
         {
             free(list);
             if (errno == ENOMEM)
@@ -108,7 +109,7 @@ static int zombies(void)
         }
         int n = 0;
         for (size_t i = 0; i < size / sizeof *list; i++)
-            if (list[i].kp_proc.p_stat == SZOMB)
+            if (list[i].kp_proc.p_stat == SZOMB && list[i].kp_eproc.e_ppid == getpid())
                 n++;
         free(list);
         return n;

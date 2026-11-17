@@ -153,9 +153,15 @@ static void test_crash_reports(void)
     /* sigaltstack is per thread: a thread of the library's own that runs out of stack needs a stack for the handler
        too, or the kernel cannot run it and the process dies with no report */
     run_child(path, 3, &sig, &report);
-    printf("  stack overflow in a thread: the child died of signal %d\n", sig);
+#if defined(__APPLE__)
+    /* On macOS the guard page of a thread's stack is reported as SIGBUS (the main thread's as SIGSEGV, above): the check is the
+       same, for the signal the system really gives (run 44125308694: the child died of signal 10). */
+    CHECK(sig == SIGBUS);
+    CHECK(report != NULL && strstr(report, "signal 10 (SIGBUS") != NULL);
+#else
     CHECK(sig == SIGSEGV);
     CHECK(report != NULL && strstr(report, "signal 11 (SIGSEGV") != NULL);
+#endif
     free(report);
     remove(path);
 }
