@@ -11,6 +11,7 @@
  */
 #include "gesture_internal.h"
 
+#include <float.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -140,7 +141,10 @@ void gesture_feed(GestureState *g, GestureAction action, int count, const GVec2 
 
             float distance = dist_n(g, g->down_a, g->up_pos);
             double dt = now - g->swipe_start;
-            float intensity = dt > 0 ? distance / (float)dt : 0.0f;
+            /* A lift-off that reads the same time as the touch-down (a flick faster than the clock ticks, which a fast
+               machine and a coarse clock make real) is the fastest swipe there is, not a still finger: its speed is
+               unbounded, as long as the finger moved at all. */
+            float intensity = dt > 0 ? distance / (float)dt : (distance > 0.0f ? FLT_MAX : 0.0f);
 
             if (intensity > FORCE_TO_SWIPE && g->current != GESTURE_DRAG)
             {

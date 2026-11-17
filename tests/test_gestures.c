@@ -109,6 +109,19 @@ static void test_swipes(void)
     touch1(&g, GESTURE_ACTION_DOWN, 400, 300, 1.0);
     touch1(&g, GESTURE_ACTION_UP, 420, 300, 3.0);
     CHECK(gesture_state_detected(&g) == GESTURE_NONE);
+
+    /* a flick that the clock cannot tell from the touch-down (the same time on both: a fast machine, a coarse clock) is the
+       fastest swipe, not a still finger; and a finger that did not move is no swipe however little time passed */
+    GestureState f;
+    gesture_state_init(&f);
+    touch1(&f, GESTURE_ACTION_DOWN, 400, 300, 1.0);
+    touch1(&f, GESTURE_ACTION_UP, 400, 350, 1.0);
+    CHECK(gesture_state_detected(&f) == GESTURE_SWIPE_DOWN);
+    GestureState still;
+    gesture_state_init(&still);
+    touch1(&still, GESTURE_ACTION_DOWN, 400, 300, 1.0);
+    touch1(&still, GESTURE_ACTION_UP, 400, 300, 1.0);
+    CHECK(gesture_state_detected(&still) == GESTURE_NONE);
 }
 
 static void test_drag(void)
