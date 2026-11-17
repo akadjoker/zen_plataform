@@ -327,7 +327,7 @@ src/
   log.c                   leveled logging with a replaceable sink
   library.c               shared library loading (dlopen / LoadLibrary)
   preedit.c               the text an input method is composing
-  thread.c                threads, recursive mutexes, condition variables, cpu_count
+  thread.c                threads, recursive mutexes, condition variables, count_cpu
   dialog.c                message boxes, file dialogs, open_url (native, zenity/kdialog, web)
   clipboard.c             clipboard API (text, MIME data, PNG images)
   png.c                   minimal PNG encoder and decoder for the clipboard

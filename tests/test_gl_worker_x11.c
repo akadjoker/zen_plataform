@@ -117,7 +117,7 @@ static void test_shared_objects(PlatformWindow *w)
     if (!worker)
         return;
     Job job = {.worker = worker, .rounds = 20};
-    PlatformThread *t = thread_create(worker_main, &job, "gl-worker");
+    PlatformThread *t = create_thread(worker_main, &job, "gl-worker");
     CHECK(t != NULL);
     if (!t)
     {
@@ -131,7 +131,7 @@ static void test_shared_objects(PlatformWindow *w)
         window_swap(w);
         time_sleep(2);
     }
-    CHECK(thread_join(t) == 0);
+    CHECK(join_thread(t) == 0);
     CHECK(job.made_current);
     CHECK(job.has_version);
     CHECK(job.shader_ok);
@@ -155,7 +155,7 @@ static void test_cycles(PlatformWindow *w)
             return;
         }
         Job job = {.worker = worker, .rounds = 1};
-        PlatformThread *t = thread_create(worker_main, &job, "gl-cycle");
+        PlatformThread *t = create_thread(worker_main, &job, "gl-cycle");
         if (!t)
         {
             CHECK(false);
@@ -164,7 +164,7 @@ static void test_cycles(PlatformWindow *w)
         }
         if (i % 2)
             window_swap(w);
-        thread_join(t);
+        join_thread(t);
         made += job.made_current;
         gl_worker_destroy(worker);
         window_make_current(w);

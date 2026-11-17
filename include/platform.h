@@ -477,32 +477,32 @@ extern "C"
 
     /* Start a thread running fn(user). name (may be NULL) shows in debuggers; Linux
        keeps its first 15 bytes. NULL on failure (platform_get_error()). */
-    PLATFORM_API PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name);
+    PLATFORM_API PlatformThread *create_thread(ThreadFunc fn, void *user, const char *name);
     /* Wait for the thread to end and return fn's result. Frees the handle. */
-    PLATFORM_API int thread_join(PlatformThread *t);
+    PLATFORM_API int join_thread(PlatformThread *t);
     /* Let the thread run to completion on its own. The handle is gone after this. */
-    PLATFORM_API void thread_detach(PlatformThread *t);
-    PLATFORM_API uint64_t thread_current_id(void);
+    PLATFORM_API void detach_thread(PlatformThread *t);
+    PLATFORM_API uint64_t current_thread_id(void);
 
     /* A mutex may be locked again by the thread that holds it, once per unlock.
        Do not wait on a condition while holding it more than once. */
-    PLATFORM_API PlatformMutex *mutex_create(void);
-    PLATFORM_API void mutex_destroy(PlatformMutex *m);
-    PLATFORM_API void mutex_lock(PlatformMutex *m);
-    PLATFORM_API bool mutex_try_lock(PlatformMutex *m); /* true if it got the lock */
-    PLATFORM_API void mutex_unlock(PlatformMutex *m);
+    PLATFORM_API PlatformMutex *create_mutex(void);
+    PLATFORM_API void destroy_mutex(PlatformMutex *m);
+    PLATFORM_API void lock_mutex(PlatformMutex *m);
+    PLATFORM_API bool try_lock_mutex(PlatformMutex *m); /* true if it got the lock */
+    PLATFORM_API void unlock_mutex(PlatformMutex *m);
 
-    /* cond_wait releases the mutex and sleeps until signalled, then takes the
+    /* wait_cond releases the mutex and sleeps until signalled, then takes the
        mutex again; it may wake spuriously, so wait in a loop on your condition. */
-    PLATFORM_API PlatformCond *cond_create(void);
-    PLATFORM_API void cond_destroy(PlatformCond *c);
-    PLATFORM_API void cond_signal(PlatformCond *c);
-    PLATFORM_API void cond_broadcast(PlatformCond *c);
-    PLATFORM_API void cond_wait(PlatformCond *c, PlatformMutex *m);
+    PLATFORM_API PlatformCond *create_cond(void);
+    PLATFORM_API void destroy_cond(PlatformCond *c);
+    PLATFORM_API void signal_cond(PlatformCond *c);
+    PLATFORM_API void broadcast_cond(PlatformCond *c);
+    PLATFORM_API void wait_cond(PlatformCond *c, PlatformMutex *m);
     /* false when the time ran out, true when it was signalled (or woke early). */
-    PLATFORM_API bool cond_wait_timeout(PlatformCond *c, PlatformMutex *m, uint32_t milliseconds);
+    PLATFORM_API bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t milliseconds);
 
-    PLATFORM_API int cpu_count(void); /* logical processors, at least 1 */
+    PLATFORM_API int count_cpu(void); /* logical processors, at least 1 */
 
     /* ========================================================================== */
     /*  Child processes                                                           */
@@ -538,7 +538,7 @@ extern "C"
        `extra` writes (may be NULL), and a backtrace of the crashing thread where the C library
        has one. The folder of `path` has to exist. path and header are copied; a second call
        replaces the first. The handlers run on a stack of their own for the thread that calls
-       this and for every thread thread_create starts after it, so a stack overflow there is
+       this and for every thread create_thread starts after it, so a stack overflow there is
        reported too (a thread made some other way has none: sigaltstack is per thread).
        Returns false, and does nothing, where this is not supported (Windows, the web). */
     PLATFORM_API bool crash_handler_install(const char *path, const char *header, CrashCallback extra, void *user);
