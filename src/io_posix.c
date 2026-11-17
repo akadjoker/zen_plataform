@@ -91,9 +91,21 @@ static size_t fd_write(IoStream *s, const void *src, size_t n)
     return done;
 }
 
+/* fsync on macOS hands the data to the drive and does not wait for the drive to write it from its cache, so a power cut can
+   still lose it, and lose the order of writes with it (fsync(2) says so, and names F_FULLFSYNC for programs that need more).
+   A file system that has no F_FULLFSYNC (a network volume, FAT) says no, and fsync is what is left. */
+static int sync_fd(int fd)
+{
+#if defined(__APPLE__) && defined(F_FULLFSYNC)
+    if (fcntl(fd, F_FULLFSYNC) == 0)
+        return 0;
+#endif
+    return fsync(fd);
+}
+
 static bool fd_flush(IoStream *s)
 {
-    if (fsync(s->u.fd) == 0)
+    if (sync_fd(s->u.fd) == 0)
         return true;
     return error_set("fsync failed: %s", strerror(errno));
 }
@@ -357,7 +369,7 @@ static void sync_parent_dir(const char *path)
     int fd = open(dir[0] ? dir : (path[0] == '/' ? "/" : "."), O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return;
-    fsync(fd);
+    sync_fd(fd);
     close(fd);
 }
 
