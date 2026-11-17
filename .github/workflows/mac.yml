@@ -1,11 +1,8 @@
 name: macOS
 
-# The native macOS port is developed on branches called mac-*. Like ci.yml, a push only
-# runs the job when the head commit message carries the marker (here "[mac]"), so a push
-# costs nothing unless the commit asks for it. Run it by hand from the Actions tab too.
+# The native macOS port is developed on branches called mac-*. The job runs only when it is started by hand (the Actions tab, or
+# `gh workflow run mac.yml --ref <branch>`): a push to those branches makes no run at all, so a push costs nothing.
 on:
-  push:
-    branches: ["mac-*"]
   workflow_dispatch:
 
 permissions:
@@ -14,8 +11,7 @@ permissions:
 jobs:
   macos:
     name: macOS (Apple Silicon)
-    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[mac]')
-    # on the job, not the workflow: a push without the marker skips the job and must not cancel a run in progress
+    # a second start of the job while one is running replaces it
     concurrency:
       group: mac-${{ github.ref }}
       cancel-in-progress: true
