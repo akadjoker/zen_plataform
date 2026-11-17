@@ -1,5 +1,8 @@
+/* On macOS a strict _POSIX_C_SOURCE hides what this file uses (DT_*, st_mtimespec), so none is asked for there. */
+#if !defined(__APPLE__)
 #define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "platform.h"
 #include "os_backend.h"
@@ -7,11 +10,16 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h> /* _NSGetExecutablePath */
+#endif
 
 #ifndef PATH_CAP
 #define PATH_CAP 4096
@@ -207,6 +215,33 @@ bool fs_enumerate_directory(const char *path, bool recursive, FsEnumCallback cb,
     return ok;
 }
 
+/* The running executable, resolved, into buf (NUL ended): its length, or -1 when the system does not say. Linux has it in
+   /proc/self/exe; macOS has no procfs, _NSGetExecutablePath gives the path the program was started by (it may hold
+   symbolic links, "./" or "../"), so realpath makes it the same kind of path readlink gives. */
+#if !defined(__ANDROID__)
+static ssize_t executable_file(char *buf, size_t cap)
+{
+#if defined(__APPLE__)
+    char raw[PATH_CAP];
+    char real[PATH_MAX];
+    uint32_t size = (uint32_t)sizeof raw;
+    if (_NSGetExecutablePath(raw, &size) != 0 || !realpath(raw, real))
+        return -1;
+    size_t n = strlen(real);
+    if (n == 0 || n >= cap)
+        return -1;
+    memcpy(buf, real, n + 1);
+    return (ssize_t)n;
+#else
+    ssize_t n = readlink("/proc/self/exe", buf, cap - 1);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+    return n;
+#endif
+}
+#endif
+
 bool fs_get_base_path(char *out, size_t cap)
 {
 #if defined(__ANDROID__)
@@ -215,7 +250,7 @@ bool fs_get_base_path(char *out, size_t cap)
     return error_set("no base path on this platform, use assets");
 #else
     char exe[PATH_CAP];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    ssize_t n = executable_file(exe, sizeof exe);
     if (n <= 0)
     {
         if (!getcwd(exe, sizeof exe))
@@ -228,7 +263,6 @@ bool fs_get_base_path(char *out, size_t cap)
     }
     else
     {
-        exe[n] = '\0';
         char *sep = strrchr(exe, '/');
         if (!sep)
             return error_set("cannot determine the base path");
@@ -253,10 +287,9 @@ bool fs_get_executable_path(char *out, size_t cap)
     return error_set("no executable path on this platform");
 #else
     char exe[PATH_CAP];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    ssize_t n = executable_file(exe, sizeof exe);
     if (n <= 0)
-        return error_set("cannot determine the executable path: %s", strerror(errno));
-    exe[n] = '\0';
+        return error_set("cannot determine the executable path");
     if ((size_t)n >= cap)
     {
         if (cap)
@@ -297,6 +330,18 @@ bool fs_get_pref_path(char *out, size_t cap, const char *org, const char *app)
     if (!data)
         return error_set("no data directory available");
     if (!path_join(dir, sizeof dir, data, ""))
+        return false;
+#elif defined(__APPLE__)
+    /* macOS keeps what a program saves for its user in ~/Library/Application Support/<org>/<app>/ (Apple's File System
+       Programming Guide). $HOME is read, as XDG_DATA_HOME is on the other systems, so a test can point it elsewhere. */
+    const char *home = getenv("HOME");
+    if (!home || !path_is_absolute(home))
+        return error_set("HOME is not set to an absolute path");
+    if (!path_join(dir, sizeof dir, home, "Library/Application Support"))
+        return false;
+    if (org && org[0] && !path_join(dir, sizeof dir, dir, org))
+        return false;
+    if (!path_join(dir, sizeof dir, dir, app))
         return false;
 #else
     const char *xdg = getenv("XDG_DATA_HOME");

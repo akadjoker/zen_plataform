@@ -283,6 +283,48 @@ static void test_temp_path(void)
     CHECK(!fs_get_temp_path(out, 3));
 }
 #else
+#if defined(__APPLE__)
+/* macOS keeps a program's files for its user in ~/Library/Application Support/<org>/<app>/, found from $HOME; XDG_DATA_HOME
+   means nothing there and is not read. */
+static void test_pref_path(void)
+{
+    char out[1024];
+    char want[1200];
+
+    snprintf(want, sizeof want, "%s/" ROOT "/home", g_abs);
+    setenv("HOME", want, 1);
+    setenv("XDG_DATA_HOME", "/nonexistent/xdg", 1); /* not used: the result must not move */
+    CHECK(fs_get_pref_path(out, sizeof out, "Org", "App"));
+    snprintf(want, sizeof want, "%s/" ROOT "/home/Library/Application Support/Org/App/", g_abs);
+    CHECK_STR(out, want);
+    CHECK(dir_exists(ROOT "/home/Library/Application Support/Org/App"));
+    CHECK(!dir_exists("/nonexistent/xdg"));
+    CHECK(fs_get_pref_path(out, sizeof out, "Org", "App"));
+    CHECK_STR(out, want);
+
+    CHECK(fs_get_pref_path(out, sizeof out, "", "Solo"));
+    snprintf(want, sizeof want, "%s/" ROOT "/home/Library/Application Support/Solo/", g_abs);
+    CHECK_STR(out, want);
+    CHECK(fs_get_pref_path(out, sizeof out, NULL, "Solo2"));
+    CHECK(dir_exists(ROOT "/home/Library/Application Support/Solo2"));
+
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", ""));
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", NULL));
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", ".."));
+    CHECK(!fs_get_pref_path(out, sizeof out, "../x", "App"));
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", "a/b"));
+    CHECK(out[0] == '\0');
+    CHECK(!fs_get_pref_path(out, 8, "Org", "App"));
+
+    setenv("HOME", "relative/path", 1);
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", "App"));
+    CHECK(strstr(platform_get_error(), "HOME") != NULL);
+    unsetenv("HOME");
+    CHECK(!fs_get_pref_path(out, sizeof out, "Org", "App"));
+    CHECK(strstr(platform_get_error(), "HOME") != NULL);
+    unsetenv("XDG_DATA_HOME");
+}
+#else
 static void test_pref_path(void)
 {
     char out[1024];
@@ -327,6 +369,7 @@ static void test_pref_path(void)
     CHECK(!fs_get_pref_path(out, sizeof out, "Org", "App"));
     CHECK(strstr(platform_get_error(), "HOME") != NULL);
 }
+#endif
 
 static void test_temp_path(void)
 {
@@ -351,7 +394,9 @@ static void cleanup(void)
         ROOT "/appdata/Org/App", ROOT "/appdata/Org", ROOT "/appdata/Solo", ROOT "/appdata/Solo2", ROOT "/appdata", ROOT "/tmp",
         ROOT "/xdg/Org/App", ROOT "/xdg/Org", ROOT "/xdg/Solo", ROOT "/xdg/Solo2", ROOT "/xdg",
         ROOT "/home/.local/share/Org/App", ROOT "/home/.local/share/Org", ROOT "/home/.local/share",
-        ROOT "/home/.local", ROOT "/home", ROOT "/f.txt", ROOT};
+        ROOT "/home/.local", ROOT "/home/Library/Application Support/Org/App", ROOT "/home/Library/Application Support/Org",
+        ROOT "/home/Library/Application Support/Solo", ROOT "/home/Library/Application Support/Solo2",
+        ROOT "/home/Library/Application Support", ROOT "/home/Library", ROOT "/home", ROOT "/f.txt", ROOT};
     for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++)
         fs_remove_path(dirs[i]);
 }
