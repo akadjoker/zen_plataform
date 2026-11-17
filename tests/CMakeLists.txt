@@ -131,8 +131,9 @@ if(PLATFORM_BACKEND_WAYLAND)
     endif()
 endif()
 
-# The dialog plumbing is the same on macOS (the fake backend and the native one alike): stand-in programs on PATH.
-if(APPLE)
+# The dialog plumbing of the fake backend on macOS is dialog.c's, with stand-in programs on PATH. The native backend has the
+# system's own dialogs instead (dialog_cocoa.m), tested by test_dialog_cocoa.
+if(APPLE AND PLATFORM_USE_FAKE)
     add_executable(test_dialog test_dialog.c)
     target_link_libraries(test_dialog PRIVATE platform)
     add_test(NAME test_dialog COMMAND test_dialog)
@@ -218,7 +219,7 @@ if(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
     # OpenGL, the pixel surface, the keyboard and the mouse, and the toolkit's frames: each on a window of its own.
     # What the tests write for a person to look at (the frames of test_ui_cocoa) goes to test-images/ of the build folder.
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test-images)
-    set(COCOA_TESTS test_gl_cocoa test_pixels_cocoa test_input_cocoa test_text_cocoa test_gl_worker_cocoa test_ui_cocoa)
+    set(COCOA_TESTS test_gl_cocoa test_pixels_cocoa test_input_cocoa test_text_cocoa test_clipboard_cocoa test_drop_cocoa test_dialog_cocoa test_gl_worker_cocoa test_ui_cocoa)
     foreach(t ${COCOA_TESTS})
         add_executable(${t} ${t}.c)
         if(t STREQUAL "test_ui_cocoa")
