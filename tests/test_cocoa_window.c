@@ -1070,6 +1070,13 @@ static void switch_scale(PlatformWindow *w, CGDirectDisplayID display, CGDisplay
    points; if it does, the window is told, and the framebuffer follows. */
 static void test_scale_change(PlatformWindow *w)
 {
+    /* It changes the display's mode (for this program only, and back), which flashes the screen of whoever runs the test: only
+       when asked for, as the CI job does. */
+    if (!getenv("ZP_TEST_DISPLAY_MODES"))
+    {
+        NOTE("ZP_TEST_DISPLAY_MODES is not set, the display mode switch (scale change) was skipped");
+        return;
+    }
     CGDirectDisplayID display = CGMainDisplayID();
     CGDisplayModeRef current = CGDisplayCopyDisplayMode(display);
     if (!current)
