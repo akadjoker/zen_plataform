@@ -354,10 +354,11 @@ extern "C"
     PLATFORM_API void window_set_event_hook(PlatformWindow *w, EventHook hook, void *user);
 
     /* While the OS runs a modal loop for the window (Windows: dragging or resizing
-       it, a system menu), call cb about every 16 ms and on each size change, so the
-       application can redraw instead of freezing. Only draw from it (window_swap or
-       window_present_pixels included); do not call window_begin_frame. On the other
-       platforms nothing blocks the application's loop, so it is never called. */
+       it, a system menu; macOS: dragging or resizing it, an open menu), call cb about
+       every 16 ms and on each size change, so the application can redraw instead of
+       freezing. Only draw from it (window_swap or window_present_pixels included); do
+       not call window_begin_frame. On the other platforms nothing blocks the
+       application's loop, so it is never called. */
     PLATFORM_API void window_set_live_callback(PlatformWindow *w, FrameCallback cb, void *user);
 
     PLATFORM_API void window_set_user_ptr(PlatformWindow *w, void *ptr);
@@ -562,8 +563,11 @@ extern "C"
          X11              Display*             Window             GLXContext
          Wayland          wl_display*          wl_surface*        EGLContext
          Win32            HINSTANCE            HWND               HGLRC
+         macOS            NULL                 NSWindow*          NULL (NSOpenGLContext* later)
          Android          EGLDisplay           ANativeWindow*     EGLContext
          Web, fake        NULL                 NULL               NULL
+
+       On macOS the NSWindow's view is [window contentView].
 
        On Android the window comes and goes with the activity: it is NULL between
        EVENT_WINDOW_SURFACE_LOST and EVENT_WINDOW_SURFACE_READY, so ask again after

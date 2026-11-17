@@ -54,6 +54,13 @@ ctest --test-dir build -C Release
 The CRT is linked statically (`/MT`; `-static` with MinGW), so the executables
 import only DLLs that ship with Windows: no vcruntime, no SDL, no GLFW.
 
+On macOS (Xcode or the command line tools, CMake 3.16 or later), the same three commands build the native backend, which is
+Objective-C over AppKit (`src/backend_cocoa.m`, the only file of the library that is not C) and runs on macOS 11.0 or later
+(`-DCMAKE_OSX_DEPLOYMENT_TARGET=...` changes that). `-DPLATFORM_USE_FAKE=ON` builds the headless library there too. The window
+test (`test_cocoa_window`) needs a graphical session and skips without one. There is no Mac among the machines it is developed
+on, so `.github/workflows/mac.yml` builds and tests it on a GitHub macOS runner: on the branches called `mac-*` a push runs it
+only when the head commit message carries `[mac]`, and it can be started by hand.
+
 ### Releases
 
 CI builds Linux, Windows (MSVC and MinGW), Web and Android on every push. Pushing a
@@ -71,7 +78,8 @@ version in `release_version`; the release is created on the chosen commit.
 | `-DBUILD_SHARED_LIBS=ON` | OFF | Build as a shared library |
 | `-DPLATFORM_BUILD_TESTS=ON` | ON | Build unit tests |
 | `-DPLATFORM_BUILD_EXAMPLES=ON` | ON | Build examples |
-| `-DPLATFORM_USE_FAKE=ON` | OFF | Use fake/headless backend |
+| `-DPLATFORM_USE_FAKE=ON` | OFF | Use fake/headless backend (also the way to build for macOS without a window, and for iOS) |
+| `-DCMAKE_OSX_DEPLOYMENT_TARGET=` | 11.0 | Oldest macOS the build runs on (macOS only) |
 | `-DPLATFORM_LINUX_BACKEND=wayland` | x11 | Window system on Linux: `x11` or `wayland` |
 | `-DPLATFORM_SANITIZE=ON` | OFF | Enable ASan + UBSan |
 
@@ -84,7 +92,8 @@ version in `release_version`; the release is created on the chosen commit.
 | Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |
-| macOS/iOS | none | not supported yet; only the headless fake backend builds (`-DPLATFORM_USE_FAKE=ON`) |
+| macOS | `backend_cocoa.m` | in progress (macOS 11.0 or later; links Cocoa and CoreGraphics). Works: windows (create, destroy, show, hide, title, size, position, limits, minimize, maximize, focus), the window events (close, resize, move, focus, minimize, maximize, restore, pointer enter and leave, scale change), high-DPI (size in points, framebuffer in pixels, content scale), monitors, the menu bar with Quit (Cmd+Q, which raises a close request), the live callback while AppKit drags or resizes. Not yet, and each says so with "not implemented on macOS yet": OpenGL and the pixel surface (a `RENDER_GL` or `RENDER_PIXELS` window is refused, so only `RENDER_VULKAN` windows open), keyboard, mouse and cursors, text input, clipboard, file drop, native dialogs, fullscreen, window icon, opacity, always on top, undecorated windows and the hit test, gamepads, Vulkan |
+| iOS | none | not supported; only the headless fake backend builds (`-DPLATFORM_USE_FAKE=ON`) |
 
 ## API Overview
 
