@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(ZEN_DIALOG_COCOA)
 static bool bad_url(const char *url)
 {
     if (!url || !url[0] || url[0] == '-')
@@ -33,6 +34,7 @@ static bool store(const char *text, char *out, size_t cap)
     memcpy(out, text, n + 1);
     return true;
 }
+#endif
 
 #if defined(__EMSCRIPTEN__)
 /* ========================================================================== */
@@ -333,6 +335,9 @@ bool open_url(const char *url)
         return error_set("the URL is too long");
     return (INT_PTR)ShellExecuteW(NULL, L"open", w, NULL, NULL, SW_SHOWNORMAL) > 32 || error_set("cannot open the URL");
 }
+
+#elif defined(ZEN_DIALOG_COCOA)
+/* The native macOS backend has the system's own dialogs and open_url, in dialog_cocoa.m. */
 
 #elif defined(__ANDROID__)
 /* ========================================================================== */

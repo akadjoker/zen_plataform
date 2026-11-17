@@ -55,12 +55,14 @@ elseif(APPLE)
         message(FATAL_ERROR "No native iOS backend; configure with -DPLATFORM_USE_FAKE=ON for a headless build")
     endif()
     enable_language(OBJC)
-    set(BACKEND_SRC src/backend_cocoa.m)
+    # dialog_cocoa.m: the message boxes, the file dialogs and open_url with the system's own (dialog.c leaves them to it)
+    set(BACKEND_SRC src/backend_cocoa.m src/dialog_cocoa.m)
     set(PLATFORM_BACKEND_COCOA ON)
     # Manual retain/release, not ARC: a BackendWindow is a calloc'ed C struct holding the window, the view and the delegate,
     # and ARC would need a bridging cast at every use of them (see the comment at the top of the file).
     # -Wunguarded-availability: an AppKit call newer than the deployment target needs an @available check, or it warns.
-    set_source_files_properties(src/backend_cocoa.m PROPERTIES COMPILE_OPTIONS "-fno-objc-arc;-Wunguarded-availability")
+    set_source_files_properties(src/backend_cocoa.m src/dialog_cocoa.m PROPERTIES COMPILE_OPTIONS "-fno-objc-arc;-Wunguarded-availability")
+    set_source_files_properties(src/dialog.c PROPERTIES COMPILE_DEFINITIONS ZEN_DIALOG_COCOA)
 elseif(UNIX)
     if(PLATFORM_LINUX_BACKEND STREQUAL "wayland")
         include(cmake/wayland.cmake)
