@@ -32,7 +32,12 @@
 #define GL_SILENCE_DEPRECATION 1
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h> /* CGSessionCopyCurrentDictionary, CGDisplay*, CGEventSourceKeyState */
-#import <Carbon/Carbon.h>                          /* only for kVK_*, the virtual key codes (header only, nothing is linked) */
+/* Carbon's header is only for kVK_*, the virtual key codes (nothing of Carbon is linked). It has a typedef called EventType
+   (a UInt32, in its event manager), and platform.h an enum of that name: Carbon's gets another name for the length of its
+   header, which the corrida 44156573685 showed is needed. */
+#define EventType zen_carbon_EventType
+#import <Carbon/Carbon.h>
+#undef EventType
 #import <OpenGL/OpenGL.h>                          /* CGL: the context of gl_worker_* */
 
 #include <dlfcn.h>
