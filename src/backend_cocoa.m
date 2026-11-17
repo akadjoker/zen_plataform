@@ -19,13 +19,21 @@
  * other backends, and a window's position is the top left corner of its content area. All sizes are in points;
  * the framebuffer size, in pixels, is the points times the backing scale factor.
  *
- * Phase markers: what is not here yet is a stub that says so, marked TODO(mac phase N). 3 = OpenGL and software
- * present, 4 = keyboard and mouse, 5 = text input, 6 = clipboard and file drop, 7 = fullscreen, icon, opacity,
- * always on top, undecorated windows and hit test, 8 = Vulkan (Metal) surface.
+ * OpenGL: an NSOpenGLContext on the window's view (core profile 3.2 or 4.1, or the 2.1 legacy one), a second context made
+ * with CGL for gl_worker_* (CGL has no view in it, so another thread can use it without touching AppKit), and the
+ * software surface drawn from the view's drawRect.
+ *
+ * Phase markers: what is not here yet is a stub that says so, marked TODO(mac phase N). 4 = keyboard and mouse, 5 = text
+ * input, 6 = clipboard and file drop, 7 = fullscreen, icon, opacity, always on top, undecorated windows and hit test,
+ * 8 = Vulkan (Metal) surface.
  */
+/* Apple has deprecated OpenGL since macOS 10.14 and says so for every call; this file is the only one that uses it. */
+#define GL_SILENCE_DEPRECATION 1
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h> /* CGSessionCopyCurrentDictionary, CGDisplay* */
+#import <OpenGL/OpenGL.h>                          /* CGL: the context of gl_worker_* */
 
+#include <dlfcn.h>
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
@@ -48,7 +56,17 @@
 #define LIVE_INTERVAL 0.016 /* seconds between live callbacks while AppKit runs its own loop */
 
 @class ZenAppDelegate;
-@class ZenView;
+
+/* The window's content view: the software surface is drawn by it (the keyboard and the mouse are phase 4). Declared
+   here, above the window's struct, so the helpers below can message it. */
+@interface ZenView : NSView
+{
+    BackendWindow *owner;
+    NSTrackingArea *area;
+}
+- (id)initWithFrame:(NSRect)frame owner:(BackendWindow *)b;
+- (void)detach;
+@end
 
 @interface ZenWindowDelegate : NSObject <NSWindowDelegate>
 {
@@ -71,6 +89,19 @@ struct BackendWindow
     ZenView *view;
     ZenWindowDelegate *delegate;
     RenderMode render;
+
+    /* RENDER_GL. The window's own context draws to its own view, until window_make_current_on points it at another
+       window's: gl_target is the window whose view this context draws to (this one, mostly) and gl_drawer the window
+       whose context draws to this view, so window_swap(b) knows whose buffer to flush. */
+    NSOpenGLPixelFormat *gl_format;
+    NSOpenGLContext *gl_ctx;
+    BackendWindow *gl_target;
+    BackendWindow *gl_drawer;
+    GLConfig gl_cfg;
+
+    /* RENDER_PIXELS: the back buffer, in pixels (the window's framebuffer size), 0xAARRGGBB */
+    uint32_t *pixels;
+    int px_w, px_h;
 
     bool hovered;
     bool zoomed;   /* isZoomed at the last size change, to tell a maximize from a plain resize */
@@ -95,6 +126,7 @@ static struct
     NSPoint cascade;
     bool cascaded;
     char monitor_names[MAX_MONITORS][MONITOR_NAME_CAP];
+    void *gl_framework;         /* dlopen of OpenGL.framework, for gl_proc_address */
 } g;
 
 /* ========================================================================== */
@@ -171,6 +203,193 @@ static void push_move(BackendWindow *b)
     Event m = {.type = EVENT_WINDOW_MOVE};
     top_left(content_rect(b), &m.data.move.x, &m.data.move.y);
     push(b, &m);
+}
+
+/* ========================================================================== */
+/*  OpenGL                                                                    */
+/* ========================================================================== */
+
+#define ZGL_MAJOR_VERSION 0x821B
+#define ZGL_MINOR_VERSION 0x821C
+#define ZGL_FRAMEWORK "/System/Library/Frameworks/OpenGL.framework/OpenGL"
+
+typedef void (*GlGetIntegerv)(unsigned name, int *out);
+
+static void gl_destroy(BackendWindow *b)
+{
+    if (b->gl_target && b->gl_target != b)
+        b->gl_target->gl_drawer = NULL;
+    if (b->gl_drawer && b->gl_drawer != b)
+    {
+        [b->gl_drawer->gl_ctx clearDrawable]; /* another window's context was drawing to this view */
+        b->gl_drawer->gl_target = NULL;
+    }
+    b->gl_target = b->gl_drawer = NULL;
+    if (b->gl_ctx)
+    {
+        if ([NSOpenGLContext currentContext] == b->gl_ctx)
+            [NSOpenGLContext clearCurrentContext];
+        [b->gl_ctx clearDrawable];
+        [b->gl_ctx release];
+        b->gl_ctx = nil;
+    }
+    [b->gl_format release];
+    b->gl_format = nil;
+}
+
+/* The context a GLConfig asks for: made, current, and checked to be what was asked, or NO with the error set (never a
+   context of another version or profile than the request, as on the other backends). What macOS has: the core profile as
+   3.2 or 4.1 (a context made for either is the highest the hardware has, which is 4.1 on every GPU of the last decade),
+   and the compatibility profile as 2.1 only. No OpenGL ES (it needs EGL, which macOS does not have) and no debug context. */
+static bool gl_create(BackendWindow *b, const GLConfig *gl)
+{
+    GLProfile profile = gl->profile == GL_PROFILE_DEFAULT ? GL_PROFILE_CORE : gl->profile;
+    int major = gl->major, minor = gl->minor;
+    if (major == 0)
+    {
+        major = 3;
+        minor = profile == GL_PROFILE_ES ? 0 : 3;
+    }
+    const char *name = profile == GL_PROFILE_COMPAT ? "compatibility" : profile == GL_PROFILE_ES ? "ES" : "core";
+
+    if (profile == GL_PROFILE_ES)
+        return error_set("cannot create an OpenGL ES %d.%d context: OpenGL ES is not available on macOS", major, minor);
+    if (gl->debug)
+        return error_set("cannot create an OpenGL %s %d.%d context with debug: macOS has no debug contexts", name, major, minor);
+
+    NSOpenGLPixelFormatAttribute profile_attr;
+    if (profile == GL_PROFILE_COMPAT)
+    {
+        if (major > 2 || (major == 2 && minor > 1))
+            return error_set("cannot create an OpenGL compatibility %d.%d context: macOS has 2.1 at most in the compatibility "
+                             "profile",
+                             major, minor);
+        profile_attr = NSOpenGLProfileVersionLegacy;
+    }
+    else
+    {
+        if (major > 4 || (major == 4 && minor > 1))
+            return error_set("cannot create an OpenGL core %d.%d context: macOS has 4.1 at most", major, minor);
+        profile_attr = (major > 3 || (major == 3 && minor > 2)) ? NSOpenGLProfileVersion4_1Core : NSOpenGLProfileVersion3_2Core;
+    }
+
+    /* RGBA8, depth 24, stencil 8 and double buffering are what the library always gives; sizes in a pixel format are
+       minimums, so a request is never met with less. AllowOfflineRenderers lets the context follow the window to a display
+       on another GPU. */
+    NSOpenGLPixelFormatAttribute attrs[24];
+    int n = 0;
+    attrs[n++] = NSOpenGLPFAOpenGLProfile;
+    attrs[n++] = profile_attr;
+    attrs[n++] = NSOpenGLPFADoubleBuffer;
+    attrs[n++] = NSOpenGLPFAColorSize;
+    attrs[n++] = 24;
+    attrs[n++] = NSOpenGLPFAAlphaSize;
+    attrs[n++] = 8;
+    attrs[n++] = NSOpenGLPFADepthSize;
+    attrs[n++] = 24;
+    attrs[n++] = NSOpenGLPFAStencilSize;
+    attrs[n++] = 8;
+    attrs[n++] = NSOpenGLPFAAllowOfflineRenderers;
+    if (gl->msaa > 0)
+    {
+        attrs[n++] = NSOpenGLPFAMultisample;
+        attrs[n++] = NSOpenGLPFASampleBuffers;
+        attrs[n++] = 1;
+        attrs[n++] = NSOpenGLPFASamples;
+        attrs[n++] = (NSOpenGLPixelFormatAttribute)gl->msaa;
+    }
+    attrs[n] = 0;
+
+    b->gl_format = [[NSOpenGLPixelFormat alloc] initWithAttributes:attrs];
+    int samples = 0;
+    if (b->gl_format && gl->msaa > 0) /* the closest format may have fewer samples than asked */
+        [b->gl_format getValues:&samples forAttribute:NSOpenGLPFASamples forVirtualScreen:0];
+    if (!b->gl_format || samples < gl->msaa)
+    {
+        gl_destroy(b);
+        return error_set("no pixel format with RGBA8, depth 24, stencil 8 and %d samples for an OpenGL %s %d.%d context",
+                         gl->msaa, name, major, minor);
+    }
+    b->gl_ctx = [[NSOpenGLContext alloc] initWithFormat:b->gl_format shareContext:nil];
+    if (!b->gl_ctx)
+    {
+        gl_destroy(b);
+        return error_set("cannot create an OpenGL %s %d.%d context", name, major, minor);
+    }
+    [b->gl_ctx makeCurrentContext];
+
+    if (profile != GL_PROFILE_COMPAT) /* a core context says its version; the legacy one is 2.1 by definition */
+    {
+        GlGetIntegerv get_integerv;
+        *(void **)&get_integerv = backend_gl_proc_address("glGetIntegerv");
+        int got_major = 0, got_minor = 0;
+        if (get_integerv)
+        {
+            get_integerv(ZGL_MAJOR_VERSION, &got_major);
+            get_integerv(ZGL_MINOR_VERSION, &got_minor);
+        }
+        if (got_major < major || (got_major == major && got_minor < minor))
+        {
+            gl_destroy(b);
+            return error_set("cannot create an OpenGL core %d.%d context: the system's is %d.%d", major, minor, got_major,
+                             got_minor);
+        }
+    }
+    b->gl_cfg = *gl;
+    return true;
+}
+
+/* The context goes onto the window's view, at the resolution of the display's pixels (without that the surface would be
+   point sized and scaled up on a Retina display, and would not match backend_get_fb_size). */
+static void gl_attach(BackendWindow *b)
+{
+    [b->view setWantsBestResolutionOpenGLSurface:YES];
+    [b->gl_ctx setView:b->view];
+    [b->gl_ctx makeCurrentContext];
+    b->gl_target = b;
+    b->gl_drawer = b;
+}
+
+/* The surface moved or changed size, or the display it is on changed scale: the context has to be told, on the main thread
+   (a context that is not told keeps drawing into the old surface). */
+static void gl_update(BackendWindow *b)
+{
+    if (b->gl_drawer)
+        [b->gl_drawer->gl_ctx update];
+}
+
+/* ========================================================================== */
+/*  software surface                                                          */
+/* ========================================================================== */
+
+/* Draws the back buffer into the view, in pixels: at its own size from the top left corner, never scaled, as on the other
+   backends (what the buffer does not cover is black). It is the view's drawRect that does it, so a window that is exposed
+   again is repainted from the buffer as it is, and backend_present_pixels asks for a draw and waits for it, so the buffer
+   is free to be written again when the present returns. The image is told to be sRGB, so the colours are the ones that were
+   written on any display, wide gamut ones included. */
+static void pixels_draw(BackendWindow *b)
+{
+    CGContextRef cg = [[NSGraphicsContext currentContext] CGContext];
+    NSRect bounds = [b->view bounds];
+    CGContextSetRGBFillColor(cg, 0, 0, 0, 1);
+    CGContextFillRect(cg, NSRectToCGRect(bounds));
+    if (!b->pixels)
+        return;
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGDataProviderRef data = CGDataProviderCreateWithData(NULL, b->pixels, (size_t)b->px_w * (size_t)b->px_h * 4, NULL);
+    CGImageRef image = CGImageCreate((size_t)b->px_w, (size_t)b->px_h, 8, 32, (size_t)b->px_w * 4, space,
+                                     (CGBitmapInfo)(kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little), data, NULL,
+                                     false, kCGRenderingIntentDefault);
+    if (image)
+    {
+        CGFloat scale = [b->window backingScaleFactor];
+        CGFloat w = b->px_w / scale, h = b->px_h / scale;
+        CGContextSetInterpolationQuality(cg, kCGInterpolationNone);
+        CGContextDrawImage(cg, CGRectMake(0, bounds.size.height - h, w, h), image);
+        CGImageRelease(image);
+    }
+    CGDataProviderRelease(data);
+    CGColorSpaceRelease(space);
 }
 
 /* ========================================================================== */
@@ -307,6 +526,7 @@ static void modal_end(BackendWindow *b)
     (void)note;
     if (!owner)
         return;
+    gl_update(owner);
     push_size(owner);
     bool zoomed = [owner->window isZoomed] ? true : false;
     if (zoomed != owner->zoomed)
@@ -323,8 +543,18 @@ static void modal_end(BackendWindow *b)
     (void)note;
     if (!owner)
         return;
+    gl_update(owner);
     push_move(owner);
     live_tick(owner);
+}
+
+/* Moved to another display (the context has to be told, the display may be on another GPU): the scale, if it differs, is
+   told by windowDidChangeBackingProperties. */
+- (void)windowDidChangeScreen:(NSNotification *)note
+{
+    (void)note;
+    if (owner)
+        gl_update(owner);
 }
 
 /* The window is about to be moved by the user dragging it: AppKit runs its loop until the button is let go. */
@@ -341,6 +571,7 @@ static void modal_end(BackendWindow *b)
     (void)note;
     if (!owner)
         return;
+    gl_update(owner);
     float scale = (float)[owner->window backingScaleFactor];
     if (scale == owner->scale)
         return;
@@ -389,15 +620,6 @@ static void modal_end(BackendWindow *b)
     push(owner, &e);
 }
 
-@end
-
-@interface ZenView : NSView
-{
-    BackendWindow *owner;
-    NSTrackingArea *area;
-}
-- (id)initWithFrame:(NSRect)frame owner:(BackendWindow *)b;
-- (void)detach;
 @end
 
 @implementation ZenView
@@ -502,6 +724,15 @@ static void modal_end(BackendWindow *b)
 - (void)flagsChanged:(NSEvent *)event
 {
     (void)event;
+}
+
+/* ---- software surface ---- */
+
+- (void)drawRect:(NSRect)dirty
+{
+    (void)dirty;
+    if (owner && owner->render == RENDER_PIXELS)
+        pixels_draw(owner);
 }
 
 @end
@@ -704,19 +935,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         error_set("the macOS backend must be used from the main thread");
         return NULL;
     }
-    /* TODO(mac phase 3): OpenGL contexts and the software present; a window with nothing to draw with is refused,
-       not handed out as if it worked */
-    if (cfg->render == RENDER_GL)
-    {
-        error_set("RENDER_GL windows are not implemented on macOS yet (OpenGL is not available)");
-        return NULL;
-    }
-    if (cfg->render == RENDER_PIXELS)
-    {
-        error_set("RENDER_PIXELS windows are not implemented on macOS yet (the pixel surface cannot be shown)");
-        return NULL;
-    }
-
+    /* BackendWindow is plain C and cleared by calloc: every field is its "nothing" until something sets it */
     BackendWindow *b = calloc(1, sizeof *b);
     if (!b)
     {
@@ -724,6 +943,22 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         return NULL;
     }
     b->render = cfg->render;
+
+    /* The context comes first, before any AppKit object of the window exists: a request macOS cannot meet (a version it
+       does not have, a sample count no format offers) is refused without a window having been made. */
+    if (cfg->render == RENDER_GL)
+    {
+        bool made;
+        @autoreleasepool
+        {
+            made = gl_create(b, &cfg->gl);
+        }
+        if (!made)
+        {
+            free(b);
+            return NULL;
+        }
+    }
 
     @autoreleasepool
     {
@@ -739,6 +974,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
                                                     defer:NO];
         if (!b->window)
         {
+            gl_destroy(b);
             free(b);
             error_set("cannot create the window");
             return NULL;
@@ -753,6 +989,11 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         [b->window setContentView:b->view];
         [b->window setDelegate:b->delegate];
         [b->window makeFirstResponder:b->view];
+        if (cfg->render == RENDER_GL)
+        {
+            gl_attach(b);
+            backend_set_vsync(b, cfg->vsync);
+        }
         NSString *title = [NSString stringWithUTF8String:cfg->title ? cfg->title : ""];
         [b->window setTitle:title ? title : @""];
 
@@ -775,6 +1016,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
             [b->window makeKeyAndOrderFront:nil];
             [NSApp activateIgnoringOtherApps:YES];
         }
+        gl_update(b); /* the surface is on screen now */
     }
     return b;
 }
@@ -796,6 +1038,7 @@ void backend_destroy(BackendWindow *b)
         [b->delegate detach];
         [b->view detach];
         [b->window setDelegate:nil];
+        gl_destroy(b);
         [b->window orderOut:nil];
         [b->window close];
         [b->window setContentView:nil];
@@ -803,6 +1046,7 @@ void backend_destroy(BackendWindow *b)
         [b->delegate release];
         [b->window release];
     }
+    free(b->pixels);
     free(b);
 }
 
@@ -1087,9 +1331,165 @@ void *backend_native_handle(BackendWindow *b, NativeHandleType type)
     case NATIVE_DISPLAY:
         return NULL;
     case NATIVE_GL_CONTEXT:
-        return NULL; /* TODO(mac phase 3): the NSOpenGLContext */
+        return (void *)b->gl_ctx; /* an NSOpenGLContext *, NULL unless the window is RENDER_GL */
     }
     return NULL;
+}
+
+/* ========================================================================== */
+/*  OpenGL: the window's context, the worker's, the address of a function     */
+/* ========================================================================== */
+
+/* The window's own context goes back onto the window's own view (and is the current one of this thread); another window's
+   surface is made with backend_make_current_on. A context belongs to the thread that made it current, and its view to
+   the main thread: the window's context is for the main thread, the other threads' work is what gl_worker_* is for. */
+void backend_make_current(BackendWindow *b)
+{
+    backend_make_current_on(b, b);
+}
+
+void backend_make_current_on(BackendWindow *target, BackendWindow *context)
+{
+    if (target->render != RENDER_GL || context->render != RENDER_GL)
+        return;
+    @autoreleasepool
+    {
+        if (context->gl_target != target)
+        {
+            /* one view has one context drawing to it, and one context draws to one view: the old links are cut */
+            if (context->gl_target)
+                context->gl_target->gl_drawer = NULL;
+            if (target->gl_drawer && target->gl_drawer != context)
+            {
+                [target->gl_drawer->gl_ctx clearDrawable];
+                target->gl_drawer->gl_target = NULL;
+            }
+            [context->gl_ctx setView:target->view];
+            context->gl_target = target;
+            target->gl_drawer = context;
+            [context->gl_ctx update];
+        }
+        [context->gl_ctx makeCurrentContext];
+    }
+}
+
+/* Presents what the context that draws to this window has drawn; a window nothing draws to (its context went to another
+   window) has nothing to present. */
+void backend_swap(BackendWindow *b)
+{
+    if (b->render != RENDER_GL || !b->gl_drawer)
+        return;
+    @autoreleasepool
+    {
+        [b->gl_drawer->gl_ctx flushBuffer];
+    }
+}
+
+void backend_set_vsync(BackendWindow *b, bool on)
+{
+    if (b->render != RENDER_GL || !b->gl_ctx)
+        return;
+    @autoreleasepool
+    {
+        int interval = on ? 1 : 0;
+        [b->gl_ctx setValues:&interval forParameter:NSOpenGLContextParameterSwapInterval];
+    }
+}
+
+/* The functions of the OpenGL framework by name, for the program's loader (glad). The framework exports every function
+   the core profiles have, and a name it does not export is NULL, as the loader expects. */
+void *backend_gl_proc_address(const char *name)
+{
+    if (!g.gl_framework)
+        g.gl_framework = dlopen(ZGL_FRAMEWORK, RTLD_LAZY | RTLD_LOCAL);
+    return g.gl_framework ? dlsym(g.gl_framework, name) : NULL;
+}
+
+/* A second context that shares the window's objects, for a thread of its own. It is made with CGL, which has no view and
+   no AppKit in it: nothing of it touches the window, so any thread may make it current and use it. It has no surface to
+   draw to (the default framebuffer is not there; textures, buffers, shaders, programs and framebuffer objects are). The
+   pixel format is the window's own, which sharing needs. It is made and destroyed on the window's thread, before the
+   window goes. What a worker made is seen by the window's context after the worker has called glFlush (or glFinish). */
+struct BackendGLWorker
+{
+    CGLContextObj ctx;
+};
+
+BackendGLWorker *backend_gl_worker_create(BackendWindow *b)
+{
+    if (b->render != RENDER_GL || !b->gl_ctx)
+        return NULL;
+    CGLContextObj ctx = NULL;
+    CGLError err = CGLCreateContext([b->gl_format CGLPixelFormatObj], [b->gl_ctx CGLContextObj], &ctx);
+    if (err != kCGLNoError || !ctx)
+    {
+        error_set("cannot create the shared OpenGL context: %s", CGLErrorString(err));
+        return NULL;
+    }
+    BackendGLWorker *worker = calloc(1, sizeof *worker);
+    if (!worker)
+    {
+        CGLDestroyContext(ctx);
+        return NULL;
+    }
+    worker->ctx = ctx;
+    return worker;
+}
+
+bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current)
+{
+    return CGLSetCurrentContext(current ? worker->ctx : NULL) == kCGLNoError;
+}
+
+void backend_gl_worker_destroy(BackendGLWorker *worker)
+{
+    CGLDestroyContext(worker->ctx);
+    free(worker);
+}
+
+/* ========================================================================== */
+/*  software surface                                                          */
+/* ========================================================================== */
+
+/* The back buffer is as big as the window's framebuffer, in pixels (a scale 2 window has four times the pixels of its
+   size in points), 32 bits a pixel, 0xAARRGGBB, `stride` the same as `width`. Its content is kept between frames, and
+   starts as zeros (black) after a resize. */
+bool backend_lock_pixels(BackendWindow *b, Framebuffer *out)
+{
+    if (b->render != RENDER_PIXELS || !out)
+        return false;
+    int w, h;
+    @autoreleasepool
+    {
+        fb_size(b, &w, &h);
+    }
+    if (w <= 0 || h <= 0)
+        return false;
+    if (!b->pixels || b->px_w != w || b->px_h != h)
+    {
+        uint32_t *grown = calloc((size_t)w * (size_t)h, 4);
+        if (!grown)
+            return false;
+        free(b->pixels);
+        b->pixels = grown;
+        b->px_w = w;
+        b->px_h = h;
+    }
+    out->pixels = b->pixels;
+    out->width = b->px_w;
+    out->height = b->px_h;
+    out->stride = b->px_w;
+    return true;
+}
+
+void backend_present_pixels(BackendWindow *b)
+{
+    if (b->render != RENDER_PIXELS || !b->pixels)
+        return;
+    @autoreleasepool
+    {
+        [b->view display]; /* draws the view now (drawRect), so the buffer is not read after this returns */
+    }
 }
 
 /* ========================================================================== */
@@ -1100,60 +1500,6 @@ void *backend_native_handle(BackendWindow *b, NativeHandleType type)
 static bool not_yet(const char *what)
 {
     return error_set("%s is not implemented on macOS yet", what);
-}
-
-/* ---- phase 3: OpenGL and the pixel surface ---- */
-
-void backend_swap(BackendWindow *b)
-{
-    (void)b; /* TODO(mac phase 3) */
-}
-void backend_make_current(BackendWindow *b)
-{
-    (void)b; /* TODO(mac phase 3) */
-    not_yet("window_make_current");
-}
-void backend_make_current_on(BackendWindow *target, BackendWindow *context)
-{
-    (void)target; /* TODO(mac phase 3) */
-    (void)context;
-    not_yet("window_make_current_on");
-}
-void backend_set_vsync(BackendWindow *b, bool on)
-{
-    (void)b; /* TODO(mac phase 3) */
-    (void)on;
-}
-void *backend_gl_proc_address(const char *name)
-{
-    (void)name; /* TODO(mac phase 3) */
-    return NULL;
-}
-BackendGLWorker *backend_gl_worker_create(BackendWindow *b)
-{
-    (void)b; /* TODO(mac phase 3) */
-    not_yet("a shared OpenGL worker context");
-    return NULL;
-}
-bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current)
-{
-    (void)worker; /* TODO(mac phase 3) */
-    (void)current;
-    return false;
-}
-void backend_gl_worker_destroy(BackendGLWorker *worker)
-{
-    (void)worker; /* TODO(mac phase 3) */
-}
-bool backend_lock_pixels(BackendWindow *b, Framebuffer *out)
-{
-    (void)b; /* TODO(mac phase 3) */
-    (void)out;
-    return false;
-}
-void backend_present_pixels(BackendWindow *b)
-{
-    (void)b; /* TODO(mac phase 3) */
 }
 
 /* ---- phase 4: keyboard and mouse ---- */

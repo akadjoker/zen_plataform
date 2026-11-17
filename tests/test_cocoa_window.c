@@ -782,19 +782,31 @@ static bool says_not_implemented(void)
 
 static void test_not_implemented(PlatformWindow *w)
 {
-    /* Each of these is a stub of a later phase, and has to say no: when a phase brings one in, its check here changes. */
+    /* The GL and pixel windows are tested in test_gl_cocoa and test_pixels_cocoa; here only that a window of each kind can be
+       made. Each of the stubs of the later phases has to say no, and when a phase brings one in, its check here changes. */
     WindowConfig gl = {.title = "gl", .width = 100, .height = 100, .render = RENDER_GL};
-    platform_clear_error();
-    CHECK(window_create(&gl) == NULL);
-    CHECK(says_not_implemented());
+    PlatformWindow *gw = window_create(&gl);
+    CHECK(gw != NULL);
+    if (gw)
+    {
+        CHECK(window_native_handle(gw, NATIVE_GL_CONTEXT) != NULL);
+        window_destroy(gw);
+    }
     WindowConfig px = {.title = "px", .width = 100, .height = 100, .render = RENDER_PIXELS};
-    platform_clear_error();
-    CHECK(window_create(&px) == NULL);
-    CHECK(says_not_implemented());
+    PlatformWindow *pw = window_create(&px);
+    CHECK(pw != NULL);
+    if (pw)
+    {
+        Framebuffer fb;
+        CHECK(window_lock_pixels(pw, &fb));
+        window_destroy(pw);
+    }
 
+    /* the test window is RENDER_VULKAN: it has neither a surface of pixels nor a context */
     Framebuffer fb;
     CHECK(!window_lock_pixels(w, &fb));
-    CHECK(gl_proc_address("glClear") == NULL);
+    CHECK(window_native_handle(w, NATIVE_GL_CONTEXT) == NULL);
+    CHECK(gl_proc_address("glClear") != NULL);
     CHECK(gl_worker_create(w) == NULL);
 
     uint32_t pixel = 0xFFFFFFFFu;
@@ -1188,7 +1200,7 @@ int main(void)
     test_close_and_quit(w);
     printf("live callback\n");
     test_live_callback(w);
-    printf("not implemented yet\n");
+    printf("the stubs of the later phases\n");
     test_not_implemented(w);
     printf("scale change\n");
     test_scale_change(w);
