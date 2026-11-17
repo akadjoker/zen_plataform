@@ -9,7 +9,12 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#ifdef __APPLE__
+#define GL_SILENCE_DEPRECATION 1 /* Apple's OpenGL header says every call is deprecated */
+#include <OpenGL/gl.h>
+#else
 #include <GL/gl.h>
+#endif
 #include <stdio.h>
 
 static void frame(PlatformWindow *w, void *user)

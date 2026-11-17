@@ -126,9 +126,9 @@ target_link_libraries(zen_ui PUBLIC platform)
 
 # zen_2d (r2d): batched 2D engine on GL, and the zen_ui GL renderer. Separate
 # library so the toolkit core never depends on OpenGL. Desktop uses GL 3.3 core
-# via glad (Linux and Windows); web (WebGL2) and Android (GLES3) use the GLES3 path in r2d.c.
-# macOS has no OpenGL context yet (mac phase 3), so the GL renderer waits.
-if(NOT PLATFORM_USE_FAKE AND NOT APPLE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
+# via glad (Linux, Windows and macOS, where it is a 4.1 core context); web (WebGL2) and Android (GLES3) use the GLES3
+# path in r2d.c.
+if(NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_library(zen_2d src/r2d/r2d.c src/r2d/r2d_ui.c)
     target_include_directories(zen_2d PUBLIC include PRIVATE src/r2d)
     target_compile_features(zen_2d PUBLIC c_std_11)
@@ -192,8 +192,11 @@ elseif(PLATFORM_BACKEND_WAYLAND AND NOT PLATFORM_USE_FAKE)
     endif()
     target_link_libraries(platform PUBLIC PkgConfig::WAYLAND ${CMAKE_DL_LIBS} Threads::Threads)
 elseif(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
-    # Cocoa is AppKit and Foundation; CoreGraphics has the display and session calls (the monitors, the window server check).
-    target_link_libraries(platform PUBLIC "-framework Cocoa" "-framework CoreGraphics")
+    # Cocoa is AppKit and Foundation; CoreGraphics has the display and session calls (the monitors, the window server check,
+    # the pointer's warp and its association with the mouse, the software surface's image); OpenGL has CGL, which the
+    # NSOpenGLContext of a window sits on and the shared context of gl_worker_* is made with. Carbon is included for the
+    # virtual key codes (kVK_*), which are constants in a header: nothing of it is linked.
+    target_link_libraries(platform PUBLIC "-framework Cocoa" "-framework CoreGraphics" "-framework OpenGL")
 elseif(UNIX AND NOT PLATFORM_USE_FAKE AND NOT APPLE)
     find_package(X11 REQUIRED)
     find_package(Threads REQUIRED)
@@ -206,8 +209,7 @@ if(PLATFORM_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT ANDROID)
 endif()
 
 option(PLATFORM_BUILD_EXAMPLES "Build examples" ON)
-# (the examples draw with OpenGL, which macOS does not have yet: mac phase 3)
-if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND NOT APPLE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
+if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_subdirectory(examples)
 endif()
 
