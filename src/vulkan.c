@@ -21,7 +21,10 @@ static void *load_loader(void)
 #if defined(_WIN32)
         "vulkan-1.dll",
 #elif defined(__APPLE__)
-        "libvulkan.1.dylib", "libMoltenVK.dylib",
+        "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
+        /* where Homebrew (Apple Silicon and Intel) and the Vulkan SDK's installer put them, which the loader's own search does not look in */
+        "/opt/homebrew/lib/libvulkan.1.dylib", "/usr/local/lib/libvulkan.1.dylib", "/opt/homebrew/lib/libMoltenVK.dylib",
+        "/usr/local/lib/libMoltenVK.dylib",
 #else
         "libvulkan.so.1", "libvulkan.so",
 #endif

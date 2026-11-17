@@ -24,9 +24,9 @@
  * software surface drawn from the view's drawRect. Keyboard and mouse: the view turns NSEvents into the library's events;
  * the key table is built from Apple's virtual key codes (kVK_*).
  *
- * Phase markers: what is not here yet is a stub that says so, marked TODO(mac phase N). 5 = text input (the input method,
- * dead keys), 6 = clipboard and file drop, 7 = fullscreen, icon, opacity, always on top, undecorated windows and hit test,
- * 8 = Vulkan (Metal) surface.
+ * Everything the backend interface has is here. Nothing of the macOS backend has been seen working beyond what docs/MAC-PORT.md
+ * lists as run on a Mac: the code of the later phases (text input, clipboard and drop, window modes and looks, trackpad gestures,
+ * the Vulkan surface) was written when no run was allowed, and is marked so there.
  */
 /* Apple has deprecated OpenGL since macOS 10.14 and says so for every call; this file is the only one that uses it. */
 #define GL_SILENCE_DEPRECATION 1
@@ -39,6 +39,7 @@
 #import <Carbon/Carbon.h>
 #undef EventType
 #import <OpenGL/OpenGL.h>                          /* CGL: the context of gl_worker_* */
+#import <QuartzCore/QuartzCore.h>                   /* CAMetalLayer, the layer of a Vulkan surface */
 
 #include <dlfcn.h>
 #include <float.h>
@@ -56,6 +57,7 @@
 #include "backend.h"
 #include "error_internal.h"
 #include "preedit.h"
+#include "vulkan_internal.h"
 #undef thread_create
 
 #define PENDING_MAX 256
@@ -63,6 +65,13 @@
 #define MONITOR_NAME_CAP 64
 #define LIVE_INTERVAL 0.016 /* seconds between live callbacks while AppKit runs its own loop */
 #define KEYMAP_SIZE 128     /* virtual key codes are below 0x7F */
+#define RESIZE_LEFT 1
+#define RESIZE_RIGHT 2
+#define RESIZE_TOP 4
+#define RESIZE_BOTTOM 8
+#define PINCH_RADIUS 80.0   /* points: half the distance of the two made-up fingers of a pinch, at scale 1 */
+#define SWIPE_DISTANCE 120.0 /* points: how far the made-up finger of a swipe moves */
+#define ICON_MAX 1024
 #define WHEEL_PIXELS_PER_NOTCH 10.0 /* a touchpad's scroll in points, per wheel notch (what the Wayland backend takes too) */
 
 @class ZenAppDelegate;
@@ -76,6 +85,18 @@
 }
 - (id)initWithFrame:(NSRect)frame owner:(BackendWindow *)b;
 - (void)detach;
+@end
+
+/* The windows themselves. A window without a title bar cannot be the key window unless it says it can, and a tooltip must not
+   take the focus: so they are subclasses. A panel is what the kinds that are not ordinary windows (utility, popup, tooltip) are. */
+@interface ZenWindow : NSWindow
+@end
+
+@interface ZenPanel : NSPanel
+{
+    BOOL takes_focus;
+}
+- (void)setTakesFocus:(BOOL)takes;
 @end
 
 @interface ZenWindowDelegate : NSObject <NSWindowDelegate>
@@ -115,6 +136,32 @@ struct BackendWindow
 
     /* keyboard: which virtual key codes this window has told the program are down */
     bool held[KEYMAP_SIZE];
+
+    /* window modes and looks */
+    WindowMode mode;     /* windowed, or one of the two fullscreen modes (both a borderless window the size of the monitor) */
+    WindowKind kind;
+    bool decorated, resizable, on_top;
+    NSRect saved_frame;  /* the frame before fullscreen, to go back to */
+    BackendWindow *parent; /* the window a dialog, utility, popup or tooltip stays above; checked against g.windows before it is used */
+    bool attached;       /* it is a child window of its parent's NSWindow */
+
+    /* the hit test: a custom title bar and edges */
+    HitTestFunc hit_cb;
+    PlatformWindow *hit_w;
+    void *hit_user;
+    int hit_cursor;      /* CURSOR_* of the edge the pointer is over, -1 for none */
+    bool hit_press;      /* the press that is on was taken by a hit region: its release is not the program's */
+    int resize_edges;    /* RESIZE_* flags while an edge is being dragged, else 0 */
+    NSRect resize_start; /* the content area when the drag began, and where the pointer was (screen points) */
+    NSPoint resize_from;
+
+    /* a pinch or a rotation of the trackpad, told as two fingers around the pointer */
+    bool pinching;
+    double pinch_scale, pinch_angle;
+    int pinch_x, pinch_y;
+
+    /* a RENDER_VULKAN window's surface: the Metal layer that is the view's layer once vulkan_create_surface was asked for */
+    CAMetalLayer *metal_layer;
 
     /* a drop (EVENT_WINDOW_DROP): the paths of the last one, which the event points to until the next drop or the window's end */
     char **drop_paths;
@@ -163,6 +210,7 @@ static struct
     NSCursor *blank_cursor;     /* a cursor with nothing to show, made once: what a hidden pointer is */
     NSCursor *shape_cursors[CURSOR_COUNT]; /* the system cursors, looked up once */
     void *gl_framework;         /* dlopen of OpenGL.framework, for gl_proc_address */
+    int fullscreen_windows;     /* how many windows hold the menu bar and the Dock hidden */
 } g;
 
 struct PlatformCursor
@@ -569,10 +617,17 @@ static int other_button(NSInteger number)
     }
 }
 
+static void cursor_apply(BackendWindow *b);
+static bool hit_test_button(BackendWindow *b, NSEvent *event, bool down);
+static void hit_hover(BackendWindow *b, int x, int y);
+static void resize_drag(BackendWindow *b, NSEvent *event);
+
 static void mouse_button_event(BackendWindow *b, NSEvent *event, int button, bool down)
 {
     if (button < 0)
         return;
+    if (button == MOUSE_LEFT && hit_test_button(b, event, down))
+        return; /* a custom title bar or edge: the window manager's press, not the program's */
     int x, y;
     view_point(b, [event locationInWindow], &x, &y);
     b->last_x = x;
@@ -584,6 +639,11 @@ static void mouse_button_event(BackendWindow *b, NSEvent *event, int button, boo
    not a position: the positions the program sees are the sum of it, and fractions of a point are carried over. */
 static void mouse_motion_event(BackendWindow *b, NSEvent *event)
 {
+    if (b->resize_edges)
+    {
+        resize_drag(b, event);
+        return;
+    }
     if (b->mouse_locked)
     {
         b->rel_x += [event deltaX];
@@ -604,6 +664,7 @@ static void mouse_motion_event(BackendWindow *b, NSEvent *event)
     b->last_y = y;
     if (b->mouse_mode == MOUSE_MODE_CAPTURED)
         return; /* waiting for the window to be the key one again, when the pointer is let loose from the mouse */
+    hit_hover(b, x, y);
     push_mouse_move(b, x, y, 0, 0);
 }
 
@@ -852,6 +913,8 @@ static NSCursor *cursor_wanted(BackendWindow *b)
 {
     if (b->mouse_mode != MOUSE_MODE_NORMAL)
         return blank_cursor();
+    if (b->hit_cursor >= 0)
+        return shape_cursor(b->hit_cursor); /* over an edge of a custom frame */
     if (b->cursor_image)
     {
         NSCursor *c = image_cursor(b->cursor_image, (float)[b->window backingScaleFactor]);
@@ -873,6 +936,359 @@ static void cursor_apply(BackendWindow *b)
     [b->window invalidateCursorRectsForView:b->view];
     if (NSPointInRect([NSEvent mouseLocation], content_rect(b)))
         [c set];
+}
+
+/* ========================================================================== */
+/*  window looks: style, level, modes                                         */
+/* ========================================================================== */
+
+static bool kind_is_popup(WindowKind k)
+{
+    return k == WINDOW_KIND_POPUP || k == WINDOW_KIND_TOOLTIP;
+}
+
+/* The style of a window from what it is: with a title bar or without, resizable, and of what kind (a utility has a small title bar
+   and no minimize button; a popup and a tooltip do not take the activation of the application). */
+static NSWindowStyleMask style_for(const BackendWindow *b)
+{
+    NSWindowStyleMask m = NSWindowStyleMaskBorderless;
+    if (b->decorated)
+    {
+        m = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable;
+        m |= b->kind == WINDOW_KIND_UTILITY ? NSWindowStyleMaskUtilityWindow : NSWindowStyleMaskMiniaturizable;
+        if (b->resizable)
+            m |= NSWindowStyleMaskResizable;
+    }
+    if (kind_is_popup(b->kind))
+        m |= NSWindowStyleMaskNonactivatingPanel;
+    return m;
+}
+
+/* Above the others: always on top is the floating level, a popup or tooltip the pop-up menu level, a fullscreen window above the
+   menu bar. */
+static void apply_level(BackendWindow *b)
+{
+    NSInteger level = NSNormalWindowLevel;
+    if (kind_is_popup(b->kind))
+        level = NSPopUpMenuWindowLevel;
+    if (b->on_top && level < NSFloatingWindowLevel)
+        level = NSFloatingWindowLevel;
+    if (b->mode != WINDOW_WINDOWED)
+        level = NSMainMenuWindowLevel + 1;
+    [b->window setLevel:level];
+}
+
+/* A new style with the content where it was: the title bar goes or comes around it. */
+static void apply_style(BackendWindow *b)
+{
+    NSRect content = content_rect(b);
+    bool was_key = [b->window isKeyWindow] ? true : false;
+    [b->window setStyleMask:style_for(b)];
+    [b->window setFrame:[b->window frameRectForContentRect:content] display:YES];
+    if (was_key)
+        [b->window makeKeyAndOrderFront:nil];
+}
+
+static NSScreen *screen_at(int monitor);
+
+/* The screen of a monitor index, of the window (MONITOR_CURRENT) or of the pointer (MONITOR_MOUSE). */
+static NSScreen *screen_for(BackendWindow *b, int monitor)
+{
+    if (monitor == MONITOR_MOUSE)
+    {
+        NSPoint at = [NSEvent mouseLocation];
+        for (NSScreen *screen in [NSScreen screens])
+            if (NSPointInRect(at, [screen frame]))
+                return screen;
+    }
+    else if (monitor >= 0)
+        return screen_at(monitor);
+    NSScreen *own = [b->window screen];
+    return own ? own : screen_at(0);
+}
+
+/* A window of this process that is still alive (a parent that was destroyed is not). */
+static bool window_alive(BackendWindow *w)
+{
+    for (BackendWindow *p = g.windows; p; p = p->next)
+        if (p == w)
+            return true;
+    return false;
+}
+
+/* The two fullscreen modes are the same here: a borderless window the size of the monitor, above the menu bar, with the menu bar
+   and the Dock hidden for as long as one is. It is made at once and keeps its place in the stacking, where the system's own
+   fullscreen is a Space of its own that arrives after an animation. Going back gives the frame, the title bar and the level
+   the window had. */
+static void apply_mode(BackendWindow *b, WindowMode mode, int monitor)
+{
+    if (mode == WINDOW_WINDOWED)
+    {
+        if (b->mode == WINDOW_WINDOWED)
+            return;
+        b->mode = WINDOW_WINDOWED;
+        if (--g.fullscreen_windows <= 0)
+        {
+            g.fullscreen_windows = 0;
+            [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+        }
+        [b->window setStyleMask:style_for(b)];
+        [b->window setFrame:b->saved_frame display:YES];
+        apply_level(b);
+        return;
+    }
+    NSScreen *screen = screen_for(b, monitor);
+    if (b->mode == WINDOW_WINDOWED)
+    {
+        b->saved_frame = [b->window frame];
+        if (g.fullscreen_windows++ == 0)
+            [NSApp setPresentationOptions:NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar];
+    }
+    b->mode = mode;
+    [b->window setStyleMask:NSWindowStyleMaskBorderless];
+    apply_level(b);
+    [b->window setFrame:[screen frame] display:YES];
+    [b->window makeKeyAndOrderFront:nil];
+}
+
+/* ---- icon: the application's, which the Dock shows (a window has none of its own on macOS) ---- */
+
+/* An image from RGBA bytes (not premultiplied), w x h pixels, shown as w x h points. */
+static NSImage *image_from_rgba(const uint8_t *rgba, int w, int h)
+{
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+                                                                    pixelsWide:w
+                                                                    pixelsHigh:h
+                                                                 bitsPerSample:8
+                                                               samplesPerPixel:4
+                                                                      hasAlpha:YES
+                                                                      isPlanar:NO
+                                                                colorSpaceName:NSDeviceRGBColorSpace
+                                                                   bytesPerRow:w * 4
+                                                                  bitsPerPixel:32];
+    if (!rep)
+        return nil;
+    unsigned char *out = [rep bitmapData];
+    for (int i = 0; i < w * h; i++)
+    {
+        unsigned a = rgba[i * 4 + 3];
+        out[i * 4 + 0] = (unsigned char)(rgba[i * 4 + 0] * a / 255);
+        out[i * 4 + 1] = (unsigned char)(rgba[i * 4 + 1] * a / 255);
+        out[i * 4 + 2] = (unsigned char)(rgba[i * 4 + 2] * a / 255);
+        out[i * 4 + 3] = (unsigned char)a;
+    }
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(w, h)];
+    [image addRepresentation:rep];
+    [rep release];
+    return [image autorelease];
+}
+
+/* ========================================================================== */
+/*  hit test: a custom title bar and edges                                    */
+/* ========================================================================== */
+
+static int hit_edges(HitTestResult r)
+{
+    switch (r)
+    {
+    case HIT_RESIZE_TOPLEFT:
+        return RESIZE_TOP | RESIZE_LEFT;
+    case HIT_RESIZE_TOP:
+        return RESIZE_TOP;
+    case HIT_RESIZE_TOPRIGHT:
+        return RESIZE_TOP | RESIZE_RIGHT;
+    case HIT_RESIZE_RIGHT:
+        return RESIZE_RIGHT;
+    case HIT_RESIZE_BOTTOMRIGHT:
+        return RESIZE_BOTTOM | RESIZE_RIGHT;
+    case HIT_RESIZE_BOTTOM:
+        return RESIZE_BOTTOM;
+    case HIT_RESIZE_BOTTOMLEFT:
+        return RESIZE_BOTTOM | RESIZE_LEFT;
+    case HIT_RESIZE_LEFT:
+        return RESIZE_LEFT;
+    default:
+        return 0;
+    }
+}
+
+/* The cursor of an edge, or -1 for no edge. */
+static int hit_cursor_for(HitTestResult r)
+{
+    switch (hit_edges(r))
+    {
+    case RESIZE_LEFT:
+    case RESIZE_RIGHT:
+        return CURSOR_RESIZE_EW;
+    case RESIZE_TOP:
+    case RESIZE_BOTTOM:
+        return CURSOR_RESIZE_NS;
+    case RESIZE_TOP | RESIZE_LEFT:
+    case RESIZE_BOTTOM | RESIZE_RIGHT:
+        return CURSOR_RESIZE_NWSE;
+    case RESIZE_TOP | RESIZE_RIGHT:
+    case RESIZE_BOTTOM | RESIZE_LEFT:
+        return CURSOR_RESIZE_NESW;
+    default:
+        return -1;
+    }
+}
+
+/* A point of the window (as the event has it) in screen coordinates (AppKit's: points, origin at the bottom left). */
+static NSPoint screen_point(BackendWindow *b, NSEvent *event)
+{
+    NSPoint at = [event locationInWindow];
+    return [b->window convertRectToScreen:NSMakeRect(at.x, at.y, 0, 0)].origin;
+}
+
+/* The press of the left button: over a part the program called a title bar the window is dragged (by the system, which runs the
+   drag), over an edge the window is resized (by the drag events that follow, below); either way the program does not see the press
+   or its release. Returns true when the event was taken. A new press forgets one that never got its release (a system drag
+   swallows it). */
+static bool hit_test_button(BackendWindow *b, NSEvent *event, bool down)
+{
+    if (!b->hit_cb)
+        return false;
+    if (!down)
+    {
+        bool taken = b->hit_press;
+        b->hit_press = false;
+        b->resize_edges = 0;
+        return taken;
+    }
+    b->hit_press = false;
+    int x, y;
+    view_point(b, [event locationInWindow], &x, &y);
+    HitTestResult r = b->hit_cb(b->hit_w, x, y, b->hit_user);
+    if (r == HIT_NORMAL)
+        return false;
+    b->hit_press = true;
+    if (r == HIT_DRAG)
+    {
+        [b->window performWindowDragWithEvent:event];
+        return true;
+    }
+    b->resize_edges = hit_edges(r);
+    b->resize_start = content_rect(b);
+    b->resize_from = screen_point(b, event);
+    return true;
+}
+
+static CGFloat clamp_size(CGFloat v, int lo, int hi)
+{
+    if (lo > 0 && v < lo)
+        v = lo;
+    if (hi > 0 && v > hi)
+        v = hi;
+    return v < 1 ? 1 : v;
+}
+
+/* The window follows the pointer by the edges that were taken: a left or bottom edge moves the origin too (AppKit's origin is the
+   bottom left corner, y goes up), and the size stays within the limits. */
+static void resize_drag(BackendWindow *b, NSEvent *event)
+{
+    NSPoint now = screen_point(b, event);
+    CGFloat dx = now.x - b->resize_from.x, dy = now.y - b->resize_from.y;
+    NSRect r = b->resize_start;
+    CGFloat w = r.size.width, h = r.size.height;
+    if (b->resize_edges & RESIZE_LEFT)
+        w -= dx;
+    if (b->resize_edges & RESIZE_RIGHT)
+        w += dx;
+    if (b->resize_edges & RESIZE_TOP)
+        h += dy;
+    if (b->resize_edges & RESIZE_BOTTOM)
+        h -= dy;
+    w = clamp_size(w, b->min_w, b->max_w);
+    h = clamp_size(h, b->min_h, b->max_h);
+    NSRect want = NSMakeRect(r.origin.x, r.origin.y, w, h);
+    if (b->resize_edges & RESIZE_LEFT)
+        want.origin.x = NSMaxX(r) - w;
+    if (b->resize_edges & RESIZE_BOTTOM)
+        want.origin.y = NSMaxY(r) - h;
+    [b->window setFrame:[b->window frameRectForContentRect:want] display:YES];
+}
+
+/* The pointer over an edge shows the cursor of that edge. */
+static void hit_hover(BackendWindow *b, int x, int y)
+{
+    if (!b->hit_cb)
+        return;
+    int cursor = hit_cursor_for(b->hit_cb(b->hit_w, x, y, b->hit_user));
+    if (cursor != b->hit_cursor)
+    {
+        b->hit_cursor = cursor;
+        cursor_apply(b);
+    }
+}
+
+/* ========================================================================== */
+/*  trackpad gestures: pinch, rotate and swipe, into the touch points of the gesture module                              */
+/* ========================================================================== */
+
+static void push_touch(BackendWindow *b, TouchPhase phase, int id, double x, double y)
+{
+    Event e = {.type = EVENT_TOUCH};
+    e.data.touch.id = id;
+    e.data.touch.x = (float)x;
+    e.data.touch.y = (float)y;
+    e.data.touch.pressure = phase == TOUCH_UP ? 0.0f : 1.0f;
+    e.data.touch.phase = phase;
+    push(b, &e);
+}
+
+/* A pinch or a rotation is two made-up fingers around the pointer, a distance apart that follows the magnification and an angle
+   that follows the rotation; the gesture module sees a pinch in or out (and its angle) as it does for two real fingers. They are
+   pushed as touch events and not through core_push_touch, so the first of them does not press the left mouse button. */
+static void pinch_fingers(BackendWindow *b, TouchPhase phase)
+{
+    double r = PINCH_RADIUS * b->pinch_scale;
+    double dx = r * cos(b->pinch_angle), dy = r * sin(b->pinch_angle);
+    push_touch(b, phase, 1, b->pinch_x + dx, b->pinch_y + dy);
+    push_touch(b, phase, 2, b->pinch_x - dx, b->pinch_y - dy);
+}
+
+static void pinch_event(BackendWindow *b, NSEvent *event, double magnification, double rotation_degrees)
+{
+    NSEventPhase phase = [event phase];
+    if (phase & (NSEventPhaseEnded | NSEventPhaseCancelled))
+    {
+        if (b->pinching)
+        {
+            pinch_fingers(b, TOUCH_UP);
+            b->pinching = false;
+        }
+        return;
+    }
+    if (!b->pinching)
+    {
+        b->pinching = true;
+        b->pinch_scale = 1.0;
+        b->pinch_angle = 0.0;
+        pointer_in_window(b, &b->pinch_x, &b->pinch_y);
+        pinch_fingers(b, TOUCH_DOWN);
+    }
+    b->pinch_scale *= 1.0 + magnification;
+    if (b->pinch_scale < 0.05)
+        b->pinch_scale = 0.05;
+    b->pinch_angle -= rotation_degrees * M_PI / 180.0; /* AppKit turns counterclockwise, with y up; ours has y down */
+    pinch_fingers(b, TOUCH_MOVE);
+}
+
+/* A swipe of three fingers is one made-up finger that goes down, moves a good way in the direction and comes up, all at once,
+   which the gesture module takes for the quickest swipe there is. AppKit's x is positive to the left and its y positive up. */
+static void swipe_event(BackendWindow *b, NSEvent *event)
+{
+    double dx = -[event deltaX], dy = -[event deltaY];
+    if (dx == 0.0 && dy == 0.0)
+        return;
+    int x, y;
+    pointer_in_window(b, &x, &y);
+    double to_x = x + (dx > 0 ? SWIPE_DISTANCE : dx < 0 ? -SWIPE_DISTANCE : 0.0);
+    double to_y = y + (dy > 0 ? SWIPE_DISTANCE : dy < 0 ? -SWIPE_DISTANCE : 0.0);
+    push_touch(b, TOUCH_DOWN, 3, x, y);
+    push_touch(b, TOUCH_MOVE, 3, to_x, to_y);
+    push_touch(b, TOUCH_UP, 3, to_x, to_y);
 }
 
 /* ========================================================================== */
@@ -1255,6 +1671,8 @@ static void modal_end(BackendWindow *b)
         return;
     owner->scale = scale;
     cursor_apply(owner); /* a cursor from an image is made for the scale */
+    if (owner->metal_layer)
+        [owner->metal_layer setContentsScale:scale];
     Event e = {.type = EVENT_WINDOW_SCALE_CHANGED};
     e.data.scale.scale = scale;
     push(owner, &e);
@@ -1305,6 +1723,39 @@ static void modal_end(BackendWindow *b)
         return;
     Event e = {.type = EVENT_WINDOW_RESTORE};
     push(owner, &e);
+}
+
+@end
+
+@implementation ZenWindow
+
+- (BOOL)canBecomeKeyWindow
+{
+    return YES;
+}
+
+- (BOOL)canBecomeMainWindow
+{
+    return YES;
+}
+
+@end
+
+@implementation ZenPanel
+
+- (void)setTakesFocus:(BOOL)takes
+{
+    takes_focus = takes;
+}
+
+- (BOOL)canBecomeKeyWindow
+{
+    return takes_focus;
+}
+
+- (BOOL)canBecomeMainWindow
+{
+    return NO;
 }
 
 @end
@@ -1509,6 +1960,26 @@ static void modal_end(BackendWindow *b)
 {
     if (owner)
         scroll_event(owner, event);
+}
+
+/* ---- trackpad gestures ---- */
+
+- (void)magnifyWithEvent:(NSEvent *)event
+{
+    if (owner)
+        pinch_event(owner, event, [event magnification], 0.0);
+}
+
+- (void)rotateWithEvent:(NSEvent *)event
+{
+    if (owner)
+        pinch_event(owner, event, 0.0, [event rotation]);
+}
+
+- (void)swipeWithEvent:(NSEvent *)event
+{
+    if (owner)
+        swipe_event(owner, event);
 }
 
 /* ---- file drop: the view takes files dragged onto it (NSDraggingDestination) ---- */
@@ -1859,14 +2330,19 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     {
         int w = cfg->width > 0 ? cfg->width : 640;
         int h = cfg->height > 0 ? cfg->height : 480;
-        NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
-        if (cfg->resizable)
-            style |= NSWindowStyleMaskResizable;
+        b->kind = cfg->kind;
+        b->resizable = cfg->resizable;
+        b->decorated = !cfg->undecorated && !kind_is_popup(cfg->kind); /* a popup and a tooltip have no title bar */
+        b->mode = WINDOW_WINDOWED;
+        b->hit_cursor = -1;
+        bool panel = cfg->kind == WINDOW_KIND_UTILITY || kind_is_popup(cfg->kind);
 
-        b->window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, w, h)
-                                                styleMask:style
-                                                  backing:NSBackingStoreBuffered
-                                                    defer:NO];
+        b->window = [[(panel ? [ZenPanel class] : [ZenWindow class]) alloc] initWithContentRect:NSMakeRect(0, 0, w, h)
+                                                                                     styleMask:style_for(b)
+                                                                                       backing:NSBackingStoreBuffered
+                                                                                         defer:NO];
+        if (panel)
+            [(ZenPanel *)b->window setTakesFocus:cfg->kind != WINDOW_KIND_TOOLTIP]; /* a tooltip never takes the focus */
         if (!b->window)
         {
             gl_destroy(b);
@@ -1905,18 +2381,29 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         b->next = g.windows;
         g.windows = b;
 
-        /* TODO(mac phase 7): fullscreen modes, undecorated windows and the window kinds (dialog, utility, popup, tooltip
-           with a parent). The window is made as an ordinary one, and the program told. */
-        if (cfg->mode != WINDOW_WINDOWED)
-            error_set("fullscreen windows are not implemented on macOS yet, the window is windowed");
-        else if (cfg->undecorated || cfg->kind != WINDOW_KIND_NORMAL)
-            error_set("undecorated windows and window kinds are not implemented on macOS yet, the window is an ordinary one");
+        /* a dialog, utility, popup or tooltip stays above the window it belongs to */
+        if (cfg->parent && cfg->kind != WINDOW_KIND_NORMAL && cfg->parent->b && window_alive(cfg->parent->b))
+            b->parent = cfg->parent->b;
+        apply_level(b);
 
         if (!cfg->hidden)
         {
-            [b->window makeKeyAndOrderFront:nil];
-            [NSApp activateIgnoringOtherApps:YES];
+            /* a tooltip is shown without taking the focus (it could not anyway) and without bringing the application up */
+            if (cfg->kind == WINDOW_KIND_TOOLTIP)
+                [b->window orderFront:nil];
+            else
+            {
+                [b->window makeKeyAndOrderFront:nil];
+                [NSApp activateIgnoringOtherApps:YES];
+            }
+            if (b->parent)
+            {
+                [b->parent->window addChildWindow:b->window ordered:NSWindowAbove];
+                b->attached = true;
+            }
         }
+        if (cfg->mode != WINDOW_WINDOWED)
+            apply_mode(b, cfg->mode, cfg->monitor);
         gl_update(b); /* the surface is on screen now */
     }
     return b;
@@ -1941,6 +2428,15 @@ void backend_destroy(BackendWindow *b)
         [b->delegate detach];
         [b->view detach];
         [b->window setDelegate:nil];
+        if (b->mode != WINDOW_WINDOWED && --g.fullscreen_windows <= 0)
+        {
+            g.fullscreen_windows = 0;
+            [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+        }
+        for (BackendWindow *w = g.windows; w; w = w->next)
+            if (w->parent == b)
+                w->parent = NULL; /* a window that belonged to this one does not any more */
+        [[b->window parentWindow] removeChildWindow:b->window];
         gl_destroy(b);
         [b->cursor_now release];
         [b->window orderOut:nil];
@@ -1950,6 +2446,7 @@ void backend_destroy(BackendWindow *b)
         [b->delegate release];
         [b->window release];
     }
+    [b->metal_layer release];
     drop_free(b);
     free(b->pixels);
     free(b);
@@ -2170,7 +2667,15 @@ void backend_show(BackendWindow *b)
 {
     @autoreleasepool
     {
-        [b->window makeKeyAndOrderFront:nil];
+        if (b->kind == WINDOW_KIND_TOOLTIP)
+            [b->window orderFront:nil];
+        else
+            [b->window makeKeyAndOrderFront:nil];
+        if (b->parent && !b->attached && window_alive(b->parent))
+        {
+            [b->parent->window addChildWindow:b->window ordered:NSWindowAbove];
+            b->attached = true;
+        }
     }
 }
 
@@ -2406,14 +2911,8 @@ void backend_present_pixels(BackendWindow *b)
 }
 
 /* ========================================================================== */
-/*  stubs: what the later phases bring. Each one does nothing, says no (false, NULL, 0) and, where the core has an      */
-/*  error to set, says why.                                                                                          */
+/*  keyboard, mouse, text, clipboard, window looks, Vulkan: the public functions that are not above                          */
 /* ========================================================================== */
-
-static bool not_yet(const char *what)
-{
-    return error_set("%s is not implemented on macOS yet", what);
-}
 
 /* ---- keyboard and mouse ---- */
 
@@ -2748,67 +3247,124 @@ void *backend_clipboard_get(const char *mime, size_t *size)
     return copy;
 }
 
-/* ---- phase 7: window modes and looks ---- */
+/* ---- window modes and looks ---- */
 
 void backend_set_mode(BackendWindow *b, WindowMode mode, int monitor)
 {
-    (void)b; /* TODO(mac phase 7) */
-    (void)monitor;
-    if (mode != WINDOW_WINDOWED)
-        not_yet("fullscreen windows");
+    @autoreleasepool
+    {
+        apply_mode(b, mode, monitor);
+    }
 }
+
 WindowMode backend_get_mode(BackendWindow *b)
 {
-    (void)b; /* TODO(mac phase 7): a window is always windowed until then */
-    return WINDOW_WINDOWED;
+    return b->mode;
 }
+
+/* The icon of the application, which the Dock shows: macOS has no icon of a window. NULL, or a size that is not there, gives the
+   default one back. */
 void backend_set_icon(BackendWindow *b, int w, int h, const uint8_t *rgba)
 {
-    (void)b; /* TODO(mac phase 7) */
-    (void)w;
-    (void)h;
-    (void)rgba;
-    not_yet("window icons");
+    (void)b;
+    @autoreleasepool
+    {
+        if (!rgba || w < 1 || h < 1 || w > ICON_MAX || h > ICON_MAX)
+        {
+            [NSApp setApplicationIconImage:nil];
+            return;
+        }
+        [NSApp setApplicationIconImage:image_from_rgba(rgba, w, h)];
+    }
 }
+
 void backend_set_opacity(BackendWindow *b, float a)
 {
-    (void)b; /* TODO(mac phase 7) */
-    (void)a;
-    not_yet("window opacity");
+    @autoreleasepool
+    {
+        [b->window setAlphaValue:a < 0.0f ? 0.0 : a > 1.0f ? 1.0 : a];
+    }
 }
+
 void backend_set_always_on_top(BackendWindow *b, bool on)
 {
-    (void)b; /* TODO(mac phase 7) */
-    (void)on;
-    not_yet("always on top");
+    b->on_top = on;
+    @autoreleasepool
+    {
+        apply_level(b);
+    }
 }
+
+/* A fullscreen window has no title bar whatever is asked; the choice shows when it returns to a window. */
 void backend_set_decorated(BackendWindow *b, bool on)
 {
-    (void)b; /* TODO(mac phase 7) */
-    (void)on;
-    not_yet("window_set_decorated");
+    b->decorated = on;
+    if (b->mode != WINDOW_WINDOWED)
+        return;
+    @autoreleasepool
+    {
+        apply_style(b);
+    }
 }
+
+/* Which parts of the window are a title bar to drag or an edge to resize by is asked of the program (with the pointer position in
+   window coordinates) on a press and when the pointer moves. NULL removes it. */
 void backend_set_hit_test(BackendWindow *b, PlatformWindow *w, HitTestFunc fn, void *user)
 {
-    (void)b; /* TODO(mac phase 7) */
-    (void)w;
-    (void)user;
-    if (fn)
-        not_yet("the window hit test");
+    b->hit_cb = fn;
+    b->hit_w = w;
+    b->hit_user = user;
+    b->hit_press = false;
+    b->resize_edges = 0;
+    if (!fn && b->hit_cursor >= 0)
+    {
+        b->hit_cursor = -1;
+        @autoreleasepool
+        {
+            cursor_apply(b);
+        }
+    }
 }
 
-/* ---- phase 8: Vulkan (through Metal) ---- */
+/* ---- Vulkan, through Metal ---- */
 
+/* VK_KHR_surface and VK_EXT_metal_surface, which MoltenVK (found at run time, as the other backends find their loaders) has. An
+   instance on macOS also needs VK_KHR_portability_enumeration and the flag that goes with it, which are the program's to ask for:
+   they are not a window system's extension. */
 const char *const *backend_vulkan_extensions(uint32_t *count)
 {
-    *count = 0; /* TODO(mac phase 8): VK_KHR_surface and VK_EXT_metal_surface */
-    return NULL;
+    static const char *const ext[] = {"VK_KHR_surface", "VK_EXT_metal_surface"};
+    *count = 2;
+    return ext;
 }
+
+typedef struct
+{
+    int sType;
+    const void *pNext;
+    uint32_t flags;
+    const void *pLayer; /* a CAMetalLayer * */
+} ZenVkMetalSurfaceCreateInfo;
+
+/* The surface of a window is a CAMetalLayer that is the layer of the window's view (a layer-hosting view: the layer is set first
+   and then asked for), as large as the view, at the display's scale. The swapchain sets the size of its drawable. */
 bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void *allocator, uint64_t *out_surface)
 {
-    (void)b; /* TODO(mac phase 8) */
-    (void)instance;
-    (void)allocator;
-    (void)out_surface;
-    return not_yet("Vulkan surface creation");
+    @autoreleasepool
+    {
+        if (!b->metal_layer)
+        {
+            CAMetalLayer *layer = [CAMetalLayer layer];
+            if (!layer)
+                return error_set("cannot create a Metal layer");
+            [layer setContentsScale:[b->window backingScaleFactor]];
+            [layer setFrame:NSRectToCGRect([b->view bounds])];
+            [layer setAutoresizingMask:kCALayerWidthSizable | kCALayerHeightSizable];
+            [b->view setLayer:layer];
+            [b->view setWantsLayer:YES];
+            b->metal_layer = [layer retain];
+        }
+        ZenVkMetalSurfaceCreateInfo info = {.sType = ZEN_VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT, .pLayer = b->metal_layer};
+        return vulkan_call_create_surface(instance, "vkCreateMetalSurfaceEXT", &info, allocator, out_surface);
+    }
 }

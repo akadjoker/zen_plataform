@@ -196,9 +196,10 @@ elseif(PLATFORM_BACKEND_WAYLAND AND NOT PLATFORM_USE_FAKE)
 elseif(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
     # Cocoa is AppKit and Foundation; CoreGraphics has the display and session calls (the monitors, the window server check,
     # the pointer's warp and its association with the mouse, the software surface's image); OpenGL has CGL, which the
-    # NSOpenGLContext of a window sits on and the shared context of gl_worker_* is made with. Carbon is included for the
+    # NSOpenGLContext of a window sits on and the shared context of gl_worker_* is made with; QuartzCore has the CAMetalLayer
+    # of a Vulkan surface (MoltenVK is found at run time, not linked). Carbon is included for the
     # virtual key codes (kVK_*), which are constants in a header: nothing of it is linked.
-    target_link_libraries(platform PUBLIC "-framework Cocoa" "-framework CoreGraphics" "-framework OpenGL")
+    target_link_libraries(platform PUBLIC "-framework Cocoa" "-framework CoreGraphics" "-framework OpenGL" "-framework QuartzCore")
     # A program that links zen_2d, zen_ui and platform names libplatform.a more than once (each of them needs it), which the
     # Apple linker warns about; it is as harmless as it is on the other linkers, which say nothing.
     target_link_options(platform INTERFACE "LINKER:-no_warn_duplicate_libraries")
