@@ -131,8 +131,10 @@ jobs:
         run: |
           cd build-native/tests
           leaks --atExit -- ./test_cocoa_window > ../../leaks.log 2>&1 || true
-          grep -E "leaks for|Leak:|ROOT LEAK|passed" ../../leaks.log | head -60
-          tail -80 ../../leaks.log
+          # the summary and what the tool says about each leak, up to the list of images it prints last
+          sed -n '1,/^Binary Images/p' ../../leaks.log | grep -v "^ *0x[0-9a-f]* - " | cut -c1-200 | head -150
+          echo "--- leaks that name this library or AppKit objects of a window:"
+          grep -E "Zen[A-Z]|backend_cocoa|NSWindow|NSTrackingArea|NSThemeFrame" ../../leaks.log | cut -c1-200 | head -40 || true
 
       - name: Verdict
         if: always()
