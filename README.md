@@ -56,10 +56,13 @@ import only DLLs that ship with Windows: no vcruntime, no SDL, no GLFW.
 
 On macOS (Xcode or the command line tools, CMake 3.16 or later), the same three commands build the native backend, which is
 Objective-C over AppKit (`src/backend_cocoa.m`, the only file of the library that is not C) and runs on macOS 11.0 or later
-(`-DCMAKE_OSX_DEPLOYMENT_TARGET=...` changes that). `-DPLATFORM_USE_FAKE=ON` builds the headless library there too. The window
-test (`test_cocoa_window`) needs a graphical session and skips without one. There is no Mac among the machines it is developed
+(`-DCMAKE_OSX_DEPLOYMENT_TARGET=...` changes that). `-DPLATFORM_USE_FAKE=ON` builds the headless library there too. The tests of the
+window, OpenGL, the pixel surface, the keyboard and mouse and the toolkit's frames (`test_cocoa_window`, `test_gl_cocoa`,
+`test_gl_worker_cocoa`, `test_pixels_cocoa`, `test_input_cocoa`, `test_ui_cocoa`) need a graphical session and skip without one;
+`test_ui_cocoa` writes the toolkit's software and GL frames as PNG files into `test-images/` of the build folder. There is no Mac among the machines it is developed
 on, so `.github/workflows/mac.yml` builds and tests it on a GitHub macOS runner: on the branches called `mac-*` a push runs it
-only when the head commit message carries `[mac]`, and it can be started by hand.
+only when the head commit message carries `[mac]`, and it can be started by hand. `docs/MAC-PORT.md` says where the port stands (the
+phases, what the runner showed, what could not be verified, the next steps).
 
 ### Releases
 
@@ -92,7 +95,7 @@ version in `release_version`; the release is created on the chosen commit.
 | Windows | `backend_win32.c` | MSVC or MinGW, links opengl32+gdi32+user32+shell32; XInput is loaded at run time |
 | Web | `backend_web.c` | `emcmake cmake ..` for Emscripten |
 | Android | `backend_android.c` | NativeActivity + EGL + NDK glue |
-| macOS | `backend_cocoa.m` | in progress (macOS 11.0 or later; links Cocoa and CoreGraphics). Works: windows (create, destroy, show, hide, title, size, position, limits, minimize, maximize, focus), the window events (close, resize, move, focus, minimize, maximize, restore, pointer enter and leave, scale change), high-DPI (size in points, framebuffer in pixels, content scale), monitors, the menu bar with Quit (Cmd+Q, which raises a close request), the live callback while AppKit drags or resizes (the scale-change event and a drag with a real mouse are written but not yet seen working: the CI display has a single scale and nobody to drag). Not yet, and each says so with "not implemented on macOS yet": OpenGL and the pixel surface (a `RENDER_GL` or `RENDER_PIXELS` window is refused, so only `RENDER_VULKAN` windows open), keyboard, mouse and cursors, text input, clipboard, file drop, native dialogs, fullscreen, window icon, opacity, always on top, undecorated windows and the hit test, gamepads, Vulkan |
+| macOS | `backend_cocoa.m` | in progress (macOS 11.0 or later; links Cocoa, CoreGraphics and OpenGL). Works: windows (create, destroy, show, hide, title, size, position, limits, minimize, maximize, focus), the window events (close, resize, move, focus, minimize, maximize, restore, pointer enter and leave, scale change), high-DPI (size in points, framebuffer in pixels, content scale), monitors, the menu bar with Quit (Cmd+Q, which raises a close request), the live callback while AppKit drags or resizes. OpenGL: a core 3.2 to 4.1 context (what the system gives for any core request from 3.2 to 4.1 is a 4.1 one) or the legacy 2.1 one, with depth, stencil and the samples asked for, vsync, one context for several windows, a shared context for a worker thread (`gl_worker_*`), and the `zen_2d` renderer; a request macOS cannot meet (core above 4.1, compatibility above 2.1, ES, a debug context) fails with the reason. The pixel surface (`RENDER_PIXELS`), in pixels at any scale. Keyboard (every key of the table from Apple's virtual key codes, repeat, left and right modifiers, Command as Super, Caps Lock; typed characters without an input method), mouse (buttons, drags, wheel and trackpad scroll, warp, capture, hidden and captured modes) and cursors (every `CURSOR_*`, and cursors from an image). Menu key equivalents are AppKit's first: Cmd+Q quits through the menu (a close request) and every other Command shortcut arrives as a key. Not yet, and each says so with "not implemented on macOS yet": text input (dead keys, composition, the input method), clipboard, file drop, native dialogs, fullscreen, window icon, opacity, always on top, undecorated windows and the hit test, gamepads, Vulkan. Not yet seen working, because the CI machine has one display of scale 1, no one to drag and no keyboard or mouse of its own: the scale-change event, a scale 2 display, a drag with a real mouse, the pointer held by the captured mode with a real mouse, and a trackpad |
 | iOS | none | not supported; only the headless fake backend builds (`-DPLATFORM_USE_FAKE=ON`) |
 
 ## API Overview
