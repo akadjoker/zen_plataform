@@ -218,6 +218,9 @@ static void *trampoline(void *p)
 #if defined(__linux__) || defined(__ANDROID__)
     if (t->name[0])
         pthread_setname_np(pthread_self(), t->name);
+#elif defined(__APPLE__)
+    if (t->name[0])
+        pthread_setname_np(t->name); /* macOS names the calling thread only */
 #endif
     crash_thread_enter();
     t->result = t->fn(t->user);
@@ -312,7 +315,7 @@ PlatformCond *cond_create(void)
     pthread_condattr_t a;
     pthread_condattr_init(&a);
 #if !defined(__APPLE__) && defined(CLOCK_MONOTONIC)
-    pthread_condattr_setclock(&a, CLOCK_MONOTONIC); /* timeouts must not follow the wall clock */
+    pthread_condattr_setclock(&a, CLOCK_MONOTONIC); /* timeouts must not follow the wall clock (macOS: see cond_wait_timeout) */
 #endif
     int rc = pthread_cond_init(&c->c, &a);
     pthread_condattr_destroy(&a);
@@ -337,8 +340,14 @@ void cond_wait(PlatformCond *c, PlatformMutex *m) { pthread_cond_wait(&c->c, &m-
 
 bool cond_wait_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
 {
+#if defined(__APPLE__)
+    /* macOS has no pthread_condattr_setclock, and pthread_cond_timedwait counts on the wall clock, which can be set
+       back or forward while the wait runs. The relative wait does not follow it. */
+    struct timespec rel = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000L};
+    return pthread_cond_timedwait_relative_np(&c->c, &m->m, &rel) == 0;
+#else
     struct timespec ts;
-#if !defined(__APPLE__) && defined(CLOCK_MONOTONIC)
+#if defined(CLOCK_MONOTONIC)
     clock_gettime(CLOCK_MONOTONIC, &ts);
 #else
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -351,6 +360,7 @@ bool cond_wait_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
         ts.tv_nsec -= 1000000000L;
     }
     return pthread_cond_timedwait(&c->c, &m->m, &ts) == 0;
+#endif
 }
 
 int cpu_count(void)
