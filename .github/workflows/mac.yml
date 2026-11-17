@@ -122,6 +122,18 @@ jobs:
           ZP_REQUIRE_DISPLAY: "1"
         run: ctest --test-dir build-native-asan -R test_cocoa_window -V --timeout 240
 
+      # information only (not in the verdict): what the leaks tool finds in the window test after its 300 create/destroy rounds
+      - name: Native backend, leaks report
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          ZP_REQUIRE_DISPLAY: "1"
+        run: |
+          cd build-native/tests
+          leaks --atExit -- ./test_cocoa_window > ../../leaks.log 2>&1 || true
+          grep -E "leaks for|Leak:|ROOT LEAK|passed" ../../leaks.log | head -60
+          tail -80 ../../leaks.log
+
       - name: Verdict
         if: always()
         run: |
