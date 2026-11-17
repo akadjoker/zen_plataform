@@ -55,6 +55,7 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "preedit.h"
 #undef thread_create
 
 #define PENDING_MAX 256
@@ -68,7 +69,7 @@
 
 /* The window's content view: every event of the keyboard and the mouse arrives here, and the software surface is drawn
    by it. Declared here, above the window's struct, so the helpers below can message it. */
-@interface ZenView : NSView
+@interface ZenView : NSView <NSTextInputClient>
 {
     BackendWindow *owner;
     NSTrackingArea *area;
@@ -114,6 +115,12 @@ struct BackendWindow
 
     /* keyboard: which virtual key codes this window has told the program are down */
     bool held[KEYMAP_SIZE];
+
+    /* text input (NSTextInputClient): on by default; the text being composed, as UTF-16 units, and where the program's caret is */
+    bool text_input;
+    bool composing;
+    int marked_len;
+    int ti_x, ti_y, ti_w, ti_h;
 
     /* mouse */
     int mouse_mode;       /* MOUSE_MODE_* */
@@ -373,14 +380,16 @@ static const unsigned char *utf8_next(const unsigned char *p, uint32_t *cp)
     return p + i;
 }
 
-/* What a key press types, as plain characters (no input method yet: dead keys, composition and the candidate window are
-   phase 5). Not with Command held, which makes shortcuts and not text; the control characters, Delete, the C1 range and the
-   private-use block where AppKit puts the arrow and function keys are not text either. */
-static void key_text(BackendWindow *b, NSEvent *event)
+/* Text the input context hands over, as plain characters: what the layout types (dead keys already composed by it), what an
+   input method committed. The control characters, Delete, the C1 range and the private-use block where AppKit puts the arrow
+   and function keys are not text. Commit ends the composition that was on, as the other backends do (an empty edit first). */
+static void text_edit_end(BackendWindow *b);
+
+static void text_commit(BackendWindow *b, NSString *text)
 {
-    if ([event modifierFlags] & NSEventModifierFlagCommand)
+    if (!b->text_input)
         return;
-    NSString *text = [event characters];
+    text_edit_end(b);
     const char *s = text ? [text UTF8String] : NULL;
     for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p;)
     {
@@ -389,6 +398,51 @@ static void key_text(BackendWindow *b, NSEvent *event)
         if (cp >= 0x20 && cp != 0x7F && !(cp >= 0x80 && cp < 0xA0) && !(cp >= 0xF700 && cp <= 0xF8FF) && cp != 0xFFFD)
             push_char(b, cp);
     }
+}
+
+/* The composition as EVENT_TEXT_EDIT: UTF-8 cut to what the event holds (63 bytes) on a character boundary, the caret as a byte
+   offset in it. The selected range is in UTF-16 units of the string, so the caret is the length of what comes before it. An empty
+   text ends the composition. */
+static void text_edit(BackendWindow *b, NSString *text, NSRange selected)
+{
+    if (!b->text_input)
+        return;
+    const char *u = text ? [text UTF8String] : NULL;
+    uint32_t cps[PREEDIT_CAP], before[PREEDIT_CAP];
+    int count = preedit_from_utf8(u ? u : "", u ? (int)strlen(u) : 0, cps, PREEDIT_CAP);
+    int caret = count;
+    if (selected.location != NSNotFound && text)
+    {
+        NSUInteger at = selected.location < [text length] ? selected.location : [text length];
+        const char *head = [[text substringToIndex:at] UTF8String];
+        caret = preedit_from_utf8(head ? head : "", head ? (int)strlen(head) : 0, before, PREEDIT_CAP);
+    }
+    Preedit pre;
+    preedit_clear(&pre);
+    preedit_draw(&pre, caret, 0, 0, cps, count);
+    Event e = {.type = EVENT_TEXT_EDIT};
+    preedit_to_utf8(&pre, e.data.edit.text, (int)sizeof e.data.edit.text, &e.data.edit.cursor);
+    b->composing = count > 0;
+    b->marked_len = text ? (int)[text length] : 0;
+    push(b, &e);
+}
+
+static void text_edit_end(BackendWindow *b)
+{
+    if (!b->composing)
+        return;
+    b->composing = false;
+    b->marked_len = 0;
+    Event e = {.type = EVENT_TEXT_EDIT}; /* an empty text */
+    push(b, &e);
+}
+
+/* A window that loses the focus gives up the composition: the input method is told to drop it and the program is told it ended. */
+static void text_abandon(BackendWindow *b)
+{
+    if (b->composing)
+        [[b->view inputContext] discardMarkedText];
+    text_edit_end(b);
 }
 
 /* A modifier key changed (flagsChanged). The event names the key, and its flags say which kinds of modifier are held after
@@ -1177,6 +1231,7 @@ static void modal_end(BackendWindow *b)
        to the mouse: a program that is not in front must not hold the pointer */
     release_held_keys(owner);
     mouse_unlock(owner);
+    text_abandon(owner);
     Event e = {.type = EVENT_WINDOW_FOCUS};
     e.data.focus.gained = false;
     push(owner, &e);
@@ -1299,7 +1354,11 @@ static void modal_end(BackendWindow *b)
     if (!owner)
         return;
     push_key(owner, [event keyCode], true, [event isARepeat] ? true : false, translate_mods([event modifierFlags]));
-    key_text(owner, event);
+    /* the key goes to the input context too, which turns it into text (insertText), a composition (setMarkedText) or a command
+       (doCommandBySelector, which is ignored: the key event was told already); not with Command or Control held, which make
+       shortcuts and not text */
+    if (owner->text_input && !([event modifierFlags] & (NSEventModifierFlagCommand | NSEventModifierFlagControl)))
+        [self interpretKeyEvents:[NSArray arrayWithObject:event]];
 }
 
 /* The release of a key whose press never came to this window says nothing, and is not passed on: the menu took the press of
@@ -1395,6 +1454,86 @@ static void modal_end(BackendWindow *b)
 {
     if (owner)
         scroll_event(owner, event);
+}
+
+/* ---- text input: the NSTextInputClient the input context talks to. The view has no text of its own: what the program
+   shows is the program's, so there is nothing to give back for a range, and the caret is wherever the program says
+   (window_set_text_input_rect), which is where the candidate window goes. ---- */
+
+- (BOOL)hasMarkedText
+{
+    return owner && owner->composing ? YES : NO;
+}
+
+- (NSRange)markedRange
+{
+    return owner && owner->composing ? NSMakeRange(0, (NSUInteger)owner->marked_len) : NSMakeRange(NSNotFound, 0);
+}
+
+- (NSRange)selectedRange
+{
+    return NSMakeRange(NSNotFound, 0);
+}
+
+- (void)setMarkedText:(id)string selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange
+{
+    (void)replacementRange;
+    if (!owner)
+        return;
+    NSString *text = [string isKindOfClass:[NSAttributedString class]] ? [string string] : (NSString *)string;
+    text_edit(owner, text, selectedRange);
+}
+
+- (void)unmarkText
+{
+    if (owner)
+        text_edit_end(owner);
+}
+
+- (NSArray *)validAttributesForMarkedText
+{
+    return [NSArray array];
+}
+
+- (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actualRange
+{
+    (void)range;
+    (void)actualRange;
+    return nil;
+}
+
+- (void)insertText:(id)string replacementRange:(NSRange)replacementRange
+{
+    (void)replacementRange;
+    if (!owner)
+        return;
+    NSString *text = [string isKindOfClass:[NSAttributedString class]] ? [string string] : (NSString *)string;
+    text_commit(owner, text);
+}
+
+- (NSUInteger)characterIndexForPoint:(NSPoint)point
+{
+    (void)point;
+    return NSNotFound;
+}
+
+/* Where the candidate window goes: the rectangle the program gave for its caret, in window coordinates (points, top left
+   origin), as a rectangle of the screen (AppKit's, bottom left origin). */
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange
+{
+    (void)range;
+    (void)actualRange;
+    if (!owner)
+        return NSZeroRect;
+    NSRect r = NSMakeRect(owner->ti_x, [self bounds].size.height - owner->ti_y - owner->ti_h, owner->ti_w, owner->ti_h);
+    return [[self window] convertRectToScreen:[self convertRect:r toView:nil]];
+}
+
+/* The commands the input context turns keys into (move the caret, delete, new line, tab) are the program's own business, and
+   it was told of the keys. */
+- (void)doCommandBySelector:(SEL)selector
+{
+    (void)selector;
 }
 
 /* ---- cursor ---- */
@@ -1677,6 +1816,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         [b->window makeFirstResponder:b->view];
         b->mouse_mode = MOUSE_MODE_NORMAL;
         b->cursor_shape = CURSOR_DEFAULT;
+        b->text_input = true;
         cursor_apply(b);
         if (cfg->render == RENDER_GL)
         {
@@ -2359,20 +2499,31 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     }
 }
 
-/* ---- phase 5: text input ---- */
+/* ---- text input ---- */
 
+/* On by default. Off, no key is passed to the input context (so no input method interferes with the keys and nothing is typed),
+   and a composition that was on is dropped. */
 void backend_set_text_input(BackendWindow *b, bool on)
 {
-    (void)b; /* TODO(mac phase 5) */
-    (void)on;
+    @autoreleasepool
+    {
+        b->text_input = on;
+        if (!on)
+            text_abandon(b);
+    }
 }
+
+/* The caret's rectangle, in window coordinates; the candidate window is put next to it, and asked for it again now. */
 void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
 {
-    (void)b; /* TODO(mac phase 5) */
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)h;
+    b->ti_x = x;
+    b->ti_y = y;
+    b->ti_w = w;
+    b->ti_h = h;
+    @autoreleasepool
+    {
+        [[b->view inputContext] invalidateCharacterCoordinates];
+    }
 }
 
 /* ---- phase 6: clipboard (and file drop, which has no function here: EVENT_WINDOW_DROP is never raised yet) ---- */
