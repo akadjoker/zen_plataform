@@ -504,6 +504,25 @@ UNUSED_FN long image_diff(const Image *a, const Image *b, int tolerance)
     return n;
 }
 
+/* The same, leaving out the two bottom corners (a square of `corner` pixels each): the windows of recent macOS are rounded
+   there, and the window server's picture of the window has the desktop (or nothing) in the corner, not the content. */
+UNUSED_FN long image_diff_corners(const Image *a, const Image *b, int tolerance, int corner)
+{
+    if (a->w != b->w || a->h != b->h)
+        return (long)a->w * a->h + 1;
+    long n = 0;
+    for (int y = 0; y < a->h; y++)
+        for (int x = 0; x < a->w; x++)
+        {
+            if (y >= a->h - corner && (x < corner || x >= a->w - corner))
+                continue;
+            n += color_distance(a->px[(size_t)y * a->w + x] | 0xFF000000u, b->px[(size_t)y * a->w + x] | 0xFF000000u) > tolerance;
+        }
+    return n;
+}
+
+#define WINDOW_CORNER 48 /* pixels: the radius of the rounded corner of a window, and some margin */
+
 /* ========================================================================== */
 /*  the heap                                                                  */
 /* ========================================================================== */

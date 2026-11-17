@@ -119,18 +119,49 @@ static const struct
 };
 #define TABLE_COUNT ((int)(sizeof k_table / sizeof k_table[0]))
 
+/* What a key types with no modifier, as the keyboard says it in the event: the keys that type have it (AppKit does not pass on a
+   key press of a typing key that has no character, as a real keyboard never sends one), the rest have none. */
+static const char *table_chars(int i)
+{
+    static char buf[2];
+    int key = k_table[i].key;
+    buf[1] = '\0';
+    if (key >= KEY_A && key <= KEY_Z)
+        buf[0] = (char)('a' + (key - KEY_A));
+    else if (key >= KEY_SPACE && key <= KEY_GRAVE)
+        buf[0] = (char)key;
+    else if (key >= KEY_KP_0 && key <= KEY_KP_9)
+        buf[0] = (char)('0' + (key - KEY_KP_0));
+    else if (key == KEY_KP_DECIMAL)
+        buf[0] = '.';
+    else if (key == KEY_KP_DIVIDE)
+        buf[0] = '/';
+    else if (key == KEY_KP_MULTIPLY)
+        buf[0] = '*';
+    else if (key == KEY_KP_SUBTRACT)
+        buf[0] = '-';
+    else if (key == KEY_KP_ADD)
+        buf[0] = '+';
+    else if (key == KEY_KP_EQUAL)
+        buf[0] = '=';
+    else
+        buf[0] = '\0';
+    return buf;
+}
+
 static void test_key_table(void)
 {
     int bad = 0;
     for (int i = 0; i < TABLE_COUNT; i++)
     {
-        send_key(true, k_table[i].code, 0, NULL, false);
+        const char *chars = table_chars(i);
+        send_key(true, k_table[i].code, 0, chars, false);
         const Event *down = only_key();
         bool ok = down && down->data.key.key == k_table[i].key && down->data.key.scancode == k_table[i].code && down->data.key.down &&
                   !down->data.key.repeat && down->data.key.mods == 0;
-        ok = ok && key_down(g_w, k_table[i].key) && key_pressed(g_w, k_table[i].key) && seen_count(EVENT_CHAR) == 0;
+        ok = ok && key_down(g_w, k_table[i].key) && key_pressed(g_w, k_table[i].key) && seen_count(EVENT_CHAR) == (chars[0] ? 1 : 0);
         seen_reset();
-        send_key(false, k_table[i].code, 0, NULL, false);
+        send_key(false, k_table[i].code, 0, chars, false);
         const Event *up = only_key();
         ok = ok && up && up->data.key.key == k_table[i].key && up->data.key.scancode == k_table[i].code && !up->data.key.down &&
              !key_down(g_w, k_table[i].key) && key_released(g_w, k_table[i].key);
@@ -161,6 +192,8 @@ static void test_key_table(void)
 
 static void test_repeat(void)
 {
+    while (key_get_pressed(g_w)) /* what the earlier tests left in the press queue */
+        ;
     send_key(true, 0x00, 0, "a", false);
     const Event *e = only_key();
     CHECK(e && !e->data.key.repeat);
@@ -312,18 +345,23 @@ static void test_text(void)
     } typed[] = {{"\xC3\xA9", 0xE9}, {"\xE2\x82\xAC", 0x20AC}, {"\xF0\x9F\x98\x80", 0x1F600}, {" ", 0x20}, {"\xC3\xA5", 0xE5}};
     for (size_t i = 0; i < sizeof typed / sizeof typed[0]; i++)
     {
+        if (g_routed && typed[i].cp > 0xFFFF)
+            continue; /* a character outside the BMP is a surrogate pair of AppKit's string: given to the view only */
         send_key(true, 0x0E, NS_FLAG_OPT, typed[i].utf8, false);
         CHECK(chars_seen(cp, 8) == 1 && cp[0] == typed[i].cp);
         seen_reset();
         send_key(false, 0x0E, NS_FLAG_OPT, typed[i].utf8, false);
         seen_reset();
     }
-    /* a key that makes several */
-    send_key(true, 0x00, 0, "ab", false);
-    CHECK(chars_seen(cp, 8) == 2 && cp[0] == 'a' && cp[1] == 'b');
-    seen_reset();
-    send_key(false, 0x00, 0, "ab", false);
-    seen_reset();
+    /* a key that makes several (given to the view only: AppKit does not pass on a key press that makes two characters) */
+    if (!g_routed)
+    {
+        send_key(true, 0x00, 0, "ab", false);
+        CHECK(chars_seen(cp, 8) == 2 && cp[0] == 'a' && cp[1] == 'b');
+        seen_reset();
+        send_key(false, 0x00, 0, "ab", false);
+        seen_reset();
+    }
 
     /* what is not text: control characters, delete, the private-use block of the arrow and function keys, the C1 range */
     static const char *not_text[] = {"\r", "\t", "\x1b", "\x7f", "\x03", "\xEF\x9C\x80" /* U+F700 */, "\xEF\xA3\xBF" /* U+F8FF */, "\xC2\x85", ""};

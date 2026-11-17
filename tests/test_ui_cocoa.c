@@ -132,7 +132,7 @@ static bool settle_and_capture(PlatformWindow *w, const Image *reference, int to
         Image got;
         if (!capture_window(w, &got))
             continue;
-        long diff = image_diff(reference, &got, tolerance);
+        long diff = image_diff_corners(reference, &got, tolerance, WINDOW_CORNER);
         if (best < 0 || diff < best)
         {
             best = diff;
@@ -190,8 +190,8 @@ static Image software_frame(void)
         Image shown;
         if (keep.px && settle_and_capture(w, &keep, 2, &shown))
         {
-            long diff = image_diff(&keep, &shown, 2);
-            printf("  software: the window server's picture differs from the buffer in %ld of %d pixels\n", diff, keep.w * keep.h);
+            long diff = image_diff_corners(&keep, &shown, 2, WINDOW_CORNER);
+            printf("  software: the window server's picture differs from the buffer in %ld of %d pixels (the window's rounded bottom corners left out)\n", diff, keep.w * keep.h);
             save(&shown, "ui_software_window.png");
             CHECK(diff == 0);
             image_free(&shown);
@@ -264,8 +264,8 @@ static Image gl_frame(void)
         window_swap(w);
         if (settle_and_capture(w, &keep, 2, &shown))
         {
-            long diff = image_diff(&keep, &shown, 3);
-            printf("  gl: the window server's picture differs from the read back frame in %ld of %d pixels\n", diff, keep.w * keep.h);
+            long diff = image_diff_corners(&keep, &shown, 3, WINDOW_CORNER);
+            printf("  gl: the window server's picture differs from the read back frame in %ld of %d pixels (the window's rounded bottom corners left out)\n", diff, keep.w * keep.h);
             save(&shown, "ui_gl_window.png");
             CHECK(diff * 100 <= (long)keep.w * keep.h); /* up to 1%: the frame that is shown may be the one before the last */
             image_free(&shown);

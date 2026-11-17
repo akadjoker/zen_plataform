@@ -50,7 +50,8 @@ static bool shows(PlatformWindow *w, const Framebuffer *fb, bool by_window_serve
         bool ok = by_window_server ? capture_window(w, &got) : capture_view(w, &got);
         if (ok)
         {
-            diff = image_diff(&want, &got, tolerance);
+            /* the window server's picture has the window's rounded bottom corners in it, which are not the content */
+            diff = by_window_server ? image_diff_corners(&want, &got, tolerance, WINDOW_CORNER) : image_diff(&want, &got, tolerance);
             if (diff == 0 || time_seconds() - t0 > 3.0)
             {
                 image_free(&got);
