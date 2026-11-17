@@ -231,6 +231,26 @@ static void test_base_path(void)
     CHECK(strncmp(app, base, n - 1) == 0 && strlen(app) == n - 1);
 }
 
+/* The running executable: where the system says it is (/proc/self/exe on Linux, _NSGetExecutablePath on macOS), resolved, so it is an
+   absolute path of a file that exists, its name is this program's, and the base path is its folder. */
+static void test_executable_path(void)
+{
+#if !defined(_WIN32)
+    char exe[1024], base[1024];
+    CHECK(fs_get_executable_path(exe, sizeof exe));
+    CHECK(path_is_absolute(exe));
+    CHECK(file_exists(exe));
+    CHECK_STR(path_filename(exe), "test_fsys");
+    CHECK(fs_get_base_path(base, sizeof base));
+    char dir[1024];
+    path_directory(exe, dir, sizeof dir);
+    size_t n = strlen(dir);
+    CHECK(strncmp(base, dir, n) == 0 && base[n] == '/' && base[n + 1] == '\0');
+    char tiny[4];
+    CHECK(!fs_get_executable_path(tiny, sizeof tiny));
+#endif
+}
+
 #if defined(_WIN32)
 static void test_pref_path(void)
 {
@@ -416,6 +436,7 @@ int main(void)
     test_create_remove_rename();
     test_enumerate();
     test_base_path();
+    test_executable_path();
     test_pref_path();
     test_temp_path();
 
