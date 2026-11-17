@@ -1,0 +1,88 @@
+name: macOS
+
+# The native macOS port is developed on branches called mac-*. Like ci.yml, a push only
+# runs the job when the head commit message carries the marker (here "[mac]"), so a push
+# costs nothing unless the commit asks for it. Run it by hand from the Actions tab too.
+on:
+  push:
+    branches: ["mac-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon)
+    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[mac]')
+    runs-on: macos-latest
+    timeout-minutes: 40
+    env:
+      # warnings that come from the vendored stb headers are not ours
+      WARN_FILTER: "stb_"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Machine, OS and toolchain
+        run: |
+          sw_vers
+          uname -a
+          sysctl -n machdep.cpu.brand_string || true
+          xcodebuild -version || true
+          xcrun clang --version
+          echo "SDK: $(xcrun --show-sdk-version)  $(xcrun --show-sdk-path)"
+          cmake --version | head -1
+          echo "GUI session: $(launchctl managername 2>&1)"
+          ps -ax -o pid,comm | grep -E "WindowServer|loginwindow|Finder" | grep -v grep || true
+          system_profiler SPDisplaysDataType 2>&1 | head -40 || true
+
+      # ---- phase 1: the library with no window ----
+      - name: Fake backend, build (-Wall -Wextra)
+        id: fake_build
+        continue-on-error: true
+        run: |
+          cmake -S . -B build-fake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DPLATFORM_USE_FAKE=ON \
+                -DCMAKE_C_FLAGS="-Wall -Wextra"
+          cmake --build build-fake -j4 -- -k 2>&1 | tee build-fake.log
+          test "${PIPESTATUS[0]}" = 0
+      - name: Fake backend, warnings of our own code
+        id: fake_warn
+        continue-on-error: true
+        run: |
+          if grep "warning:" build-fake.log | grep -v "$WARN_FILTER"; then echo "warnings above"; exit 1; fi
+          echo "no warnings"
+      - name: Fake backend, ctest
+        id: fake_test
+        continue-on-error: true
+        run: ctest --test-dir build-fake --output-on-failure --timeout 120
+
+      - name: Fake backend + ASan/UBSan, build
+        id: fake_asan_build
+        continue-on-error: true
+        run: |
+          cmake -S . -B build-fake-asan -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_USE_FAKE=ON \
+                -DPLATFORM_SANITIZE=ON -DCMAKE_C_FLAGS="-Wall -Wextra"
+          cmake --build build-fake-asan -j4 -- -k 2>&1 | tee build-fake-asan.log
+          test "${PIPESTATUS[0]}" = 0
+      - name: Fake backend + ASan/UBSan, ctest
+        id: fake_asan_test
+        continue-on-error: true
+        run: ctest --test-dir build-fake-asan --output-on-failure --timeout 240
+
+      - name: Verdict
+        if: always()
+        run: |
+          echo "fake build:       ${{ steps.fake_build.outcome }}"
+          echo "fake warnings:    ${{ steps.fake_warn.outcome }}"
+          echo "fake ctest:       ${{ steps.fake_test.outcome }}"
+          echo "fake asan build:  ${{ steps.fake_asan_build.outcome }}"
+          echo "fake asan ctest:  ${{ steps.fake_asan_test.outcome }}"
+          if [ "${{ steps.fake_build.outcome }}" != success ] || [ "${{ steps.fake_warn.outcome }}" != success ] ||
+             [ "${{ steps.fake_test.outcome }}" != success ] || [ "${{ steps.fake_asan_build.outcome }}" != success ] ||
+             [ "${{ steps.fake_asan_test.outcome }}" != success ]; then
+            exit 1
+          fi
