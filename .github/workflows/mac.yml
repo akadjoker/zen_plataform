@@ -94,13 +94,14 @@ jobs:
         env:
           ZP_REQUIRE_DISPLAY: "1"
         run: ctest --test-dir build-native --output-on-failure --timeout 120
+      # the window, GL, pixel, input and toolkit tests again with their own output (what each checked, the numbers it printed)
       - name: Native backend, window test output
         id: native_window
         continue-on-error: true
         env:
           ZP_REQUIRE_DISPLAY: "1"
           ZP_TEST_DISPLAY_MODES: "1"
-        run: ctest --test-dir build-native -R test_cocoa_window -V --timeout 120
+        run: ctest --test-dir build-native -R cocoa -V --timeout 120
 
       - name: Native backend + ASan/UBSan, build
         id: native_asan_build
@@ -122,7 +123,18 @@ jobs:
         env:
           ZP_REQUIRE_DISPLAY: "1"
           ZP_TEST_DISPLAY_MODES: "1"
-        run: ctest --test-dir build-native-asan -R test_cocoa_window -V --timeout 240
+        run: ctest --test-dir build-native-asan -R cocoa -V --timeout 240
+
+      # the frames test_ui_cocoa wrote (the toolkit's software and GL renderers, and what the window server shows of each)
+      - name: Frames of the toolkit, as images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-frames
+          path: |
+            build-native/test-images/*.png
+            build-native-asan/test-images/*.png
+          if-no-files-found: warn
 
       # information only (not in the verdict): what the leaks tool finds in the window test after its 300 create/destroy rounds
       - name: Native backend, leaks report

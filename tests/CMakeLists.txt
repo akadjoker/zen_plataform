@@ -214,6 +214,27 @@ if(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
         # looks for the leaks of this library itself (the windows AppKit still holds, the heap that grows)
         set_property(TEST test_cocoa_window APPEND PROPERTY ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
     endif()
+
+    # OpenGL, the pixel surface and the toolkit's frames: each on a window of its own.
+    # What the tests write for a person to look at (the frames of test_ui_cocoa) goes to test-images/ of the build folder.
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test-images)
+    set(COCOA_TESTS test_gl_cocoa test_pixels_cocoa test_gl_worker_cocoa test_ui_cocoa)
+    foreach(t ${COCOA_TESTS})
+        add_executable(${t} ${t}.c)
+        if(t STREQUAL "test_ui_cocoa")
+            target_link_libraries(${t} PRIVATE zen_2d zen_ui platform m "-framework CoreGraphics" "-framework CoreFoundation")
+        elseif(t STREQUAL "test_gl_worker_cocoa")
+            target_link_libraries(${t} PRIVATE platform) # no Apple headers in it: the library's thread_create and Mach's cannot meet
+        else()
+            target_link_libraries(${t} PRIVATE platform "-framework CoreGraphics" "-framework CoreFoundation")
+        endif()
+        add_test(NAME ${t} COMMAND ${t})
+        set_tests_properties(${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120
+                             ENVIRONMENT "ZP_TEST_OUT=${CMAKE_BINARY_DIR}/test-images")
+        if(PLATFORM_SANITIZE)
+            set_property(TEST ${t} APPEND PROPERTY ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+        endif()
+    endforeach()
 endif()
 
 # Fake test with extra source files (widgets + UI + software renderer).
