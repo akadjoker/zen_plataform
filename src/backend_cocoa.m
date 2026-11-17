@@ -896,6 +896,12 @@ static bool gl_create(BackendWindow *b, const GLConfig *gl)
     return true;
 }
 
+/* Apple deprecated the view of an NSOpenGLContext (and the full resolution of the view's surface) in macOS 10.14, telling
+   whoever has one to use NSOpenGLView, which is no use to a window whose content view is the library's own; the calls
+   work as they did, and GL_SILENCE_DEPRECATION does not reach them. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 /* The context goes onto the window's view, at the resolution of the display's pixels (without that the surface would be
    point sized and scaled up on a Retina display, and would not match backend_get_fb_size). */
 static void gl_attach(BackendWindow *b)
@@ -906,6 +912,8 @@ static void gl_attach(BackendWindow *b)
     b->gl_target = b;
     b->gl_drawer = b;
 }
+
+#pragma clang diagnostic pop
 
 /* The surface moved or changed size, or the display it is on changed scale: the context has to be told, on the main thread
    (a context that is not told keeps drawing into the old surface). */
@@ -2046,7 +2054,10 @@ void backend_make_current_on(BackendWindow *target, BackendWindow *context)
                 [target->gl_drawer->gl_ctx clearDrawable];
                 target->gl_drawer->gl_target = NULL;
             }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations" /* see gl_attach */
             [context->gl_ctx setView:target->view];
+#pragma clang diagnostic pop
             context->gl_target = target;
             target->gl_drawer = context;
             [context->gl_ctx update];
