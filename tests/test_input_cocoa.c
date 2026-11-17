@@ -120,7 +120,8 @@ static const struct
 #define TABLE_COUNT ((int)(sizeof k_table / sizeof k_table[0]))
 
 /* What a key types with no modifier, as the keyboard says it in the event: the keys that type have it (AppKit does not pass on a
-   key press of a typing key that has no character, as a real keyboard never sends one), the rest have none. */
+   key press of a typing key that has no character, as a real keyboard never sends one), the rest have none. What the program
+   gets as text is the input context's (the layout, the input method), tested in test_text_cocoa. */
 static const char *table_chars(int i)
 {
     static char buf[2];
@@ -159,7 +160,7 @@ static void test_key_table(void)
         const Event *down = only_key();
         bool ok = down && down->data.key.key == k_table[i].key && down->data.key.scancode == k_table[i].code && down->data.key.down &&
                   !down->data.key.repeat && down->data.key.mods == 0;
-        ok = ok && key_down(g_w, k_table[i].key) && key_pressed(g_w, k_table[i].key) && seen_count(EVENT_CHAR) == (chars[0] ? 1 : 0);
+        ok = ok && key_down(g_w, k_table[i].key) && key_pressed(g_w, k_table[i].key);
         seen_reset();
         send_key(false, k_table[i].code, 0, chars, false);
         const Event *up = only_key();
@@ -197,7 +198,6 @@ static void test_repeat(void)
     send_key(true, 0x00, 0, "a", false);
     const Event *e = only_key();
     CHECK(e && !e->data.key.repeat);
-    CHECK(seen_count(EVENT_CHAR) == 1);
     seen_reset();
     for (int i = 0; i < 3; i++)
     {
@@ -205,7 +205,6 @@ static void test_repeat(void)
         e = only_key();
         CHECK(e && e->data.key.down && e->data.key.repeat);
         CHECK(key_down(g_w, KEY_A));
-        CHECK(seen_count(EVENT_CHAR) == 1); /* a repeat types again */
         seen_reset();
     }
     /* the press queue has the key once, whatever the repeats */
@@ -312,94 +311,6 @@ static void test_modifiers(void)
     CHECK((key_mods(g_w) & KEYMOD_NUM_LOCK) == 0); /* a Mac has no Num Lock */
     printf("  Caps Lock is %s in the system, key_mods says %s\n", (system_flags & NS_FLAG_CAPS) ? "on" : "off",
            (key_mods(g_w) & KEYMOD_CAPS_LOCK) ? "on" : "off");
-}
-
-static int chars_seen(uint32_t *out, int cap)
-{
-    int n = 0;
-    for (int i = 0; i < g_seen_count && n < cap; i++)
-        if (g_seen[i].type == EVENT_CHAR)
-            out[n++] = g_seen[i].data.codepoint;
-    return n;
-}
-
-static void test_text(void)
-{
-    uint32_t cp[8];
-    /* plain typed characters */
-    send_key(true, 0x00, 0, "a", false);
-    CHECK(chars_seen(cp, 8) == 1 && cp[0] == 'a');
-    seen_reset();
-    send_key(false, 0x00, 0, "a", false);
-    seen_reset();
-    send_key(true, 0x00, NS_FLAG_SHIFT, "A", false);
-    CHECK(chars_seen(cp, 8) == 1 && cp[0] == 'A');
-    seen_reset();
-    send_key(false, 0x00, NS_FLAG_SHIFT, "A", false);
-    seen_reset();
-    /* what the layout makes of a key: any code point, two bytes, three, four (outside the BMP, a surrogate pair in AppKit's string) */
-    static const struct
-    {
-        const char *utf8;
-        uint32_t cp;
-    } typed[] = {{"\xC3\xA9", 0xE9}, {"\xE2\x82\xAC", 0x20AC}, {"\xF0\x9F\x98\x80", 0x1F600}, {" ", 0x20}, {"\xC3\xA5", 0xE5}};
-    for (size_t i = 0; i < sizeof typed / sizeof typed[0]; i++)
-    {
-        if (g_routed && typed[i].cp > 0xFFFF)
-            continue; /* a character outside the BMP is a surrogate pair of AppKit's string: given to the view only */
-        send_key(true, 0x0E, NS_FLAG_OPT, typed[i].utf8, false);
-        CHECK(chars_seen(cp, 8) == 1 && cp[0] == typed[i].cp);
-        seen_reset();
-        send_key(false, 0x0E, NS_FLAG_OPT, typed[i].utf8, false);
-        seen_reset();
-    }
-    /* a key that makes several (given to the view only: AppKit does not pass on a key press that makes two characters) */
-    if (!g_routed)
-    {
-        send_key(true, 0x00, 0, "ab", false);
-        CHECK(chars_seen(cp, 8) == 2 && cp[0] == 'a' && cp[1] == 'b');
-        seen_reset();
-        send_key(false, 0x00, 0, "ab", false);
-        seen_reset();
-    }
-
-    /* what is not text: control characters, delete, the private-use block of the arrow and function keys, the C1 range */
-    static const char *not_text[] = {"\r", "\t", "\x1b", "\x7f", "\x03", "\xEF\x9C\x80" /* U+F700 */, "\xEF\xA3\xBF" /* U+F8FF */, "\xC2\x85", ""};
-    for (size_t i = 0; i < sizeof not_text / sizeof not_text[0]; i++)
-    {
-        send_key(true, 0x7E, 0, not_text[i], false);
-        CHECK(seen_count(EVENT_CHAR) == 0);
-        seen_reset();
-        send_key(false, 0x7E, 0, not_text[i], false);
-        seen_reset();
-    }
-
-    /* with Command held a key is a shortcut, not text; with Control the character is a control one, which is not text either */
-    send_key(true, 0x08, NS_FLAG_CMD, "c", false);
-    CHECK(seen_count(EVENT_CHAR) == 0);
-    seen_reset();
-    send_key(false, 0x08, NS_FLAG_CMD, "c", false);
-    seen_reset();
-    send_key(true, 0x08, NS_FLAG_CTRL, "\x03", false);
-    CHECK(seen_count(EVENT_CHAR) == 0);
-    seen_reset();
-    send_key(false, 0x08, NS_FLAG_CTRL, "\x03", false);
-    seen_reset();
-
-    /* the program can turn text off for a game that reads keys, and on again for a text field */
-    window_text_input_stop(g_w);
-    send_key(true, 0x00, 0, "a", false);
-    CHECK(seen_count(EVENT_CHAR) == 0 && seen_count(EVENT_KEY) == 1);
-    seen_reset();
-    send_key(false, 0x00, 0, "a", false);
-    seen_reset();
-    window_text_input_start(g_w);
-    send_key(true, 0x00, 0, "a", false);
-    CHECK(seen_count(EVENT_CHAR) == 1);
-    seen_reset();
-    send_key(false, 0x00, 0, "a", false);
-    seen_reset();
-    CHECK(char_get_pressed(g_w) != 0);
 }
 
 /* ========================================================================== */
@@ -1103,8 +1014,6 @@ int main(void)
         test_repeat();
         printf("modifiers\n");
         test_modifiers();
-        printf("text\n");
-        test_text();
         printf("shortcuts\n");
         test_shortcuts();
         printf("moves\n");
