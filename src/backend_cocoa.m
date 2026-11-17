@@ -21,16 +21,18 @@
  *
  * OpenGL: an NSOpenGLContext on the window's view (core profile 3.2 or 4.1, or the 2.1 legacy one), a second context made
  * with CGL for gl_worker_* (CGL has no view in it, so another thread can use it without touching AppKit), and the
- * software surface drawn from the view's drawRect.
+ * software surface drawn from the view's drawRect. Keyboard and mouse: the view turns NSEvents into the library's events;
+ * the key table is built from Apple's virtual key codes (kVK_*).
  *
- * Phase markers: what is not here yet is a stub that says so, marked TODO(mac phase N). 4 = keyboard and mouse, 5 = text
- * input, 6 = clipboard and file drop, 7 = fullscreen, icon, opacity, always on top, undecorated windows and hit test,
+ * Phase markers: what is not here yet is a stub that says so, marked TODO(mac phase N). 5 = text input (the input method,
+ * dead keys), 6 = clipboard and file drop, 7 = fullscreen, icon, opacity, always on top, undecorated windows and hit test,
  * 8 = Vulkan (Metal) surface.
  */
 /* Apple has deprecated OpenGL since macOS 10.14 and says so for every call; this file is the only one that uses it. */
 #define GL_SILENCE_DEPRECATION 1
 #import <Cocoa/Cocoa.h>
-#import <ApplicationServices/ApplicationServices.h> /* CGSessionCopyCurrentDictionary, CGDisplay* */
+#import <ApplicationServices/ApplicationServices.h> /* CGSessionCopyCurrentDictionary, CGDisplay*, CGEventSourceKeyState */
+#import <Carbon/Carbon.h>                          /* only for kVK_*, the virtual key codes (header only, nothing is linked) */
 #import <OpenGL/OpenGL.h>                          /* CGL: the context of gl_worker_* */
 
 #include <dlfcn.h>
@@ -54,11 +56,13 @@
 #define MAX_MONITORS 16
 #define MONITOR_NAME_CAP 64
 #define LIVE_INTERVAL 0.016 /* seconds between live callbacks while AppKit runs its own loop */
+#define KEYMAP_SIZE 128     /* virtual key codes are below 0x7F */
+#define WHEEL_PIXELS_PER_NOTCH 10.0 /* a touchpad's scroll in points, per wheel notch (what the Wayland backend takes too) */
 
 @class ZenAppDelegate;
 
-/* The window's content view: the software surface is drawn by it (the keyboard and the mouse are phase 4). Declared
-   here, above the window's struct, so the helpers below can message it. */
+/* The window's content view: every event of the keyboard and the mouse arrives here, and the software surface is drawn
+   by it. Declared here, above the window's struct, so the helpers below can message it. */
 @interface ZenView : NSView
 {
     BackendWindow *owner;
@@ -103,6 +107,20 @@ struct BackendWindow
     uint32_t *pixels;
     int px_w, px_h;
 
+    /* keyboard: which virtual key codes this window has told the program are down */
+    bool held[KEYMAP_SIZE];
+
+    /* mouse */
+    int mouse_mode;       /* MOUSE_MODE_* */
+    bool mouse_locked;    /* the pointer is cut loose from the mouse (CGAssociateMouseAndMouseCursorPosition(false)) */
+    int virt_x, virt_y;   /* the position the program is told in MOUSE_MODE_CAPTURED: the sum of the motion */
+    int last_x, last_y;   /* the last position of the pointer in the window, points */
+    double rel_x, rel_y;  /* motion in MOUSE_MODE_CAPTURED that is less than a point so far, carried to the next event */
+    int cursor_shape;     /* CURSOR_*, the one mouse_set_cursor chose */
+    PlatformCursor *cursor_image; /* the one mouse_set_cursor_image chose, NULL for the shape; not owned */
+    NSCursor *cursor_now; /* what the view's cursor rect uses: retained */
+    id capture_monitor;   /* mouse_capture(true): the global monitor that follows the pointer out of the application */
+
     bool hovered;
     bool zoomed;   /* isZoomed at the last size change, to tell a maximize from a plain resize */
     float scale;   /* backingScaleFactor at the last look, to tell a change from a repeat */
@@ -126,8 +144,18 @@ static struct
     NSPoint cascade;
     bool cascaded;
     char monitor_names[MAX_MONITORS][MONITOR_NAME_CAP];
+    NSCursor *blank_cursor;     /* a cursor with nothing to show, made once: what a hidden pointer is */
+    NSCursor *shape_cursors[CURSOR_COUNT]; /* the system cursors, looked up once */
     void *gl_framework;         /* dlopen of OpenGL.framework, for gl_proc_address */
 } g;
+
+struct PlatformCursor
+{
+    uint32_t *argb; /* the image as it was given: 0xAARRGGBB, w * h pixels (not premultiplied) */
+    int w, h, hot_x, hot_y;
+    NSCursor *cursor; /* built for `scale` pixels per point */
+    float scale;
+};
 
 /* ========================================================================== */
 /*  helpers                                                                   */
@@ -203,6 +231,535 @@ static void push_move(BackendWindow *b)
     Event m = {.type = EVENT_WINDOW_MOVE};
     top_left(content_rect(b), &m.data.move.x, &m.data.move.y);
     push(b, &m);
+}
+
+/* ========================================================================== */
+/*  keyboard                                                                  */
+/* ========================================================================== */
+
+/* The library's key for each of Apple's virtual key codes (kVK_*, from Carbon/HIToolbox/Events.h). A code names the place
+   of a key on the keyboard, not the letter the layout in use prints on it, which is what KEY_* means too. A code with no
+   entry (the extra keys of ISO and JIS keyboards, the function key, the media keys) gives KEY_NULL: the event still goes
+   out, with the code as its scancode. Where a PC key has no Mac twin the key in its place is used: Help is where Insert
+   is, Clear is where Num Lock is, F13 to F15 are where Print Screen, Scroll Lock and Pause are, Command is the Super key. */
+static const unsigned short k_keys[KEYMAP_SIZE] = {
+    [kVK_ANSI_A] = KEY_A, [kVK_ANSI_B] = KEY_B, [kVK_ANSI_C] = KEY_C, [kVK_ANSI_D] = KEY_D,
+    [kVK_ANSI_E] = KEY_E, [kVK_ANSI_F] = KEY_F, [kVK_ANSI_G] = KEY_G, [kVK_ANSI_H] = KEY_H,
+    [kVK_ANSI_I] = KEY_I, [kVK_ANSI_J] = KEY_J, [kVK_ANSI_K] = KEY_K, [kVK_ANSI_L] = KEY_L,
+    [kVK_ANSI_M] = KEY_M, [kVK_ANSI_N] = KEY_N, [kVK_ANSI_O] = KEY_O, [kVK_ANSI_P] = KEY_P,
+    [kVK_ANSI_Q] = KEY_Q, [kVK_ANSI_R] = KEY_R, [kVK_ANSI_S] = KEY_S, [kVK_ANSI_T] = KEY_T,
+    [kVK_ANSI_U] = KEY_U, [kVK_ANSI_V] = KEY_V, [kVK_ANSI_W] = KEY_W, [kVK_ANSI_X] = KEY_X,
+    [kVK_ANSI_Y] = KEY_Y, [kVK_ANSI_Z] = KEY_Z,
+
+    [kVK_ANSI_0] = KEY_ZERO, [kVK_ANSI_1] = KEY_ONE, [kVK_ANSI_2] = KEY_TWO, [kVK_ANSI_3] = KEY_THREE,
+    [kVK_ANSI_4] = KEY_FOUR, [kVK_ANSI_5] = KEY_FIVE, [kVK_ANSI_6] = KEY_SIX, [kVK_ANSI_7] = KEY_SEVEN,
+    [kVK_ANSI_8] = KEY_EIGHT, [kVK_ANSI_9] = KEY_NINE,
+
+    [kVK_ANSI_Quote] = KEY_APOSTROPHE, [kVK_ANSI_Comma] = KEY_COMMA, [kVK_ANSI_Minus] = KEY_MINUS,
+    [kVK_ANSI_Period] = KEY_PERIOD, [kVK_ANSI_Slash] = KEY_SLASH, [kVK_ANSI_Semicolon] = KEY_SEMICOLON,
+    [kVK_ANSI_Equal] = KEY_EQUAL, [kVK_ANSI_LeftBracket] = KEY_LEFT_BRACKET,
+    [kVK_ANSI_Backslash] = KEY_BACKSLASH, [kVK_ANSI_RightBracket] = KEY_RIGHT_BRACKET,
+    [kVK_ANSI_Grave] = KEY_GRAVE,
+
+    [kVK_Space] = KEY_SPACE, [kVK_Return] = KEY_ENTER, [kVK_Tab] = KEY_TAB, [kVK_Escape] = KEY_ESCAPE,
+    [kVK_Delete] = KEY_BACKSPACE, [kVK_ForwardDelete] = KEY_DELETE, [kVK_Help] = KEY_INSERT,
+    [kVK_ContextualMenu] = KEY_MENU,
+
+    [kVK_LeftArrow] = KEY_LEFT, [kVK_RightArrow] = KEY_RIGHT, [kVK_UpArrow] = KEY_UP, [kVK_DownArrow] = KEY_DOWN,
+    [kVK_PageUp] = KEY_PAGE_UP, [kVK_PageDown] = KEY_PAGE_DOWN, [kVK_Home] = KEY_HOME, [kVK_End] = KEY_END,
+
+    [kVK_F1] = KEY_F1, [kVK_F2] = KEY_F2, [kVK_F3] = KEY_F3, [kVK_F4] = KEY_F4, [kVK_F5] = KEY_F5,
+    [kVK_F6] = KEY_F6, [kVK_F7] = KEY_F7, [kVK_F8] = KEY_F8, [kVK_F9] = KEY_F9, [kVK_F10] = KEY_F10,
+    [kVK_F11] = KEY_F11, [kVK_F12] = KEY_F12,
+    [kVK_F13] = KEY_PRINT_SCREEN, [kVK_F14] = KEY_SCROLL_LOCK, [kVK_F15] = KEY_PAUSE,
+
+    [kVK_ANSI_Keypad0] = KEY_KP_0, [kVK_ANSI_Keypad1] = KEY_KP_1, [kVK_ANSI_Keypad2] = KEY_KP_2,
+    [kVK_ANSI_Keypad3] = KEY_KP_3, [kVK_ANSI_Keypad4] = KEY_KP_4, [kVK_ANSI_Keypad5] = KEY_KP_5,
+    [kVK_ANSI_Keypad6] = KEY_KP_6, [kVK_ANSI_Keypad7] = KEY_KP_7, [kVK_ANSI_Keypad8] = KEY_KP_8,
+    [kVK_ANSI_Keypad9] = KEY_KP_9, [kVK_ANSI_KeypadDecimal] = KEY_KP_DECIMAL,
+    [kVK_ANSI_KeypadDivide] = KEY_KP_DIVIDE, [kVK_ANSI_KeypadMultiply] = KEY_KP_MULTIPLY,
+    [kVK_ANSI_KeypadMinus] = KEY_KP_SUBTRACT, [kVK_ANSI_KeypadPlus] = KEY_KP_ADD,
+    [kVK_ANSI_KeypadEnter] = KEY_KP_ENTER, [kVK_ANSI_KeypadEquals] = KEY_KP_EQUAL,
+    [kVK_ANSI_KeypadClear] = KEY_NUM_LOCK,
+
+    [kVK_Shift] = KEY_LEFT_SHIFT, [kVK_RightShift] = KEY_RIGHT_SHIFT,
+    [kVK_Control] = KEY_LEFT_CONTROL, [kVK_RightControl] = KEY_RIGHT_CONTROL,
+    [kVK_Option] = KEY_LEFT_ALT, [kVK_RightOption] = KEY_RIGHT_ALT,
+    [kVK_Command] = KEY_LEFT_SUPER, [kVK_RightCommand] = KEY_RIGHT_SUPER,
+    [kVK_CapsLock] = KEY_CAPS_LOCK,
+};
+
+/* The modifier keys in pairs, left then right, each with the flag that stays set while a key of its kind is down. */
+static const struct
+{
+    unsigned short code;
+    NSEventModifierFlags kind;
+} k_modifiers[] = {
+    {kVK_Shift, NSEventModifierFlagShift},     {kVK_RightShift, NSEventModifierFlagShift},
+    {kVK_Control, NSEventModifierFlagControl}, {kVK_RightControl, NSEventModifierFlagControl},
+    {kVK_Option, NSEventModifierFlagOption},   {kVK_RightOption, NSEventModifierFlagOption},
+    {kVK_Command, NSEventModifierFlagCommand}, {kVK_RightCommand, NSEventModifierFlagCommand},
+};
+#define MODIFIER_COUNT ((int)(sizeof k_modifiers / sizeof k_modifiers[0]))
+
+static int translate_key(unsigned short code)
+{
+    return code < KEYMAP_SIZE ? k_keys[code] : KEY_NULL;
+}
+
+/* The modifiers held, as KEYMOD_*. Command is the Super key. Caps Lock is a lock, not a held key: key_mods adds it. */
+static int translate_mods(NSEventModifierFlags flags)
+{
+    int mods = 0;
+    if (flags & NSEventModifierFlagShift)
+        mods |= KEYMOD_SHIFT;
+    if (flags & NSEventModifierFlagControl)
+        mods |= KEYMOD_CTRL;
+    if (flags & NSEventModifierFlagOption)
+        mods |= KEYMOD_ALT;
+    if (flags & NSEventModifierFlagCommand)
+        mods |= KEYMOD_SUPER;
+    return mods;
+}
+
+static void push_key(BackendWindow *b, unsigned short code, bool down, bool repeat, int mods)
+{
+    if (code < KEYMAP_SIZE)
+        b->held[code] = down;
+    Event e = {.type = EVENT_KEY};
+    e.data.key.key = translate_key(code);
+    e.data.key.scancode = code;
+    e.data.key.down = down;
+    e.data.key.repeat = repeat;
+    e.data.key.mods = mods;
+    push(b, &e);
+}
+
+/* Typed text reaches the core as characters, so its own switch for text input (window_text_input_stop) is honoured. */
+static void push_char(BackendWindow *b, uint32_t cp)
+{
+    if (b->pumping && b->core)
+    {
+        core_push_char(b->core, cp);
+        return;
+    }
+    Event e = {.type = EVENT_CHAR};
+    e.data.codepoint = cp;
+    push(b, &e);
+}
+
+/* The next code point of a UTF-8 string, and the string after it; a byte that does not belong is skipped. */
+static const unsigned char *utf8_next(const unsigned char *p, uint32_t *cp)
+{
+    unsigned char c = *p;
+    int extra = c < 0x80 ? 0 : (c >> 5) == 0x6 ? 1 : (c >> 4) == 0xE ? 2 : (c >> 3) == 0x1E ? 3 : -1;
+    if (extra < 0)
+    {
+        *cp = 0xFFFD;
+        return p + 1;
+    }
+    uint32_t v = extra == 0 ? c : c & (0x3Fu >> extra);
+    int i = 1;
+    for (; i <= extra && (p[i] & 0xC0) == 0x80; i++)
+        v = (v << 6) | (p[i] & 0x3Fu);
+    *cp = i <= extra ? 0xFFFD : v;
+    return p + i;
+}
+
+/* What a key press types, as plain characters (no input method yet: dead keys, composition and the candidate window are
+   phase 5). Not with Command held, which makes shortcuts and not text; the control characters, Delete, the C1 range and the
+   private-use block where AppKit puts the arrow and function keys are not text either. */
+static void key_text(BackendWindow *b, NSEvent *event)
+{
+    if ([event modifierFlags] & NSEventModifierFlagCommand)
+        return;
+    NSString *text = [event characters];
+    const char *s = text ? [text UTF8String] : NULL;
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p;)
+    {
+        uint32_t cp;
+        p = utf8_next(p, &cp);
+        if (cp >= 0x20 && cp != 0x7F && !(cp >= 0x80 && cp < 0xA0) && !(cp >= 0xF700 && cp <= 0xF8FF) && cp != 0xFFFD)
+            push_char(b, cp);
+    }
+}
+
+/* A modifier key changed (flagsChanged). The event names the key, and its flags say which kinds of modifier are held after
+   the change, but not on which side, so the key's own state is flipped; and when a kind is no longer held at all, both of
+   its keys are let go, so a missed event heals at the next one. Caps Lock sends one event for each way the lock turns, not
+   one for the press and one for the release: it is told as a tap. */
+static void modifiers_changed(BackendWindow *b, NSEvent *event)
+{
+    unsigned short code = [event keyCode];
+    NSEventModifierFlags flags = [event modifierFlags];
+    int mods = translate_mods(flags);
+
+    if (code == kVK_CapsLock)
+    {
+        push_key(b, code, true, false, mods);
+        push_key(b, code, false, false, mods);
+        return;
+    }
+    for (int i = 0; i < MODIFIER_COUNT; i++)
+    {
+        unsigned short c = k_modifiers[i].code;
+        bool kind_down = (flags & k_modifiers[i].kind) != 0;
+        if (c == code)
+        {
+            bool down = kind_down && !b->held[c];
+            if (down != b->held[c])
+                push_key(b, c, down, false, mods);
+        }
+        else if (!kind_down && b->held[c])
+            push_key(b, c, false, false, mods);
+    }
+}
+
+/* A window that loses the focus lets go of what it held: the program is told, key by key, before it is told about the
+   focus (the core drops the polled state on the focus event; this is for whoever follows the event stream). */
+static void release_held_keys(BackendWindow *b)
+{
+    int mods = translate_mods([NSEvent modifierFlags]);
+    for (int code = 0; code < KEYMAP_SIZE; code++)
+        if (b->held[code])
+            push_key(b, (unsigned short)code, false, false, mods);
+}
+
+/* Keys that are already down when the window gets the focus send no press of their own: the session's own state says
+   which, as far as it will say (a session may not answer for key states, so the modifiers are also taken from the flags,
+   as the left key of their kind), and a key held across a focus change goes on working. */
+static void press_held_keys(BackendWindow *b)
+{
+    NSEventModifierFlags flags = [NSEvent modifierFlags];
+    int mods = translate_mods(flags);
+    for (int code = 0; code < KEYMAP_SIZE; code++)
+    {
+        if (!k_keys[code] || k_keys[code] == KEY_CAPS_LOCK || b->held[code])
+            continue;
+        if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, (CGKeyCode)code))
+            push_key(b, (unsigned short)code, true, false, mods);
+    }
+    for (int i = 0; i < MODIFIER_COUNT; i += 2)
+        if ((flags & k_modifiers[i].kind) && !b->held[k_modifiers[i].code] && !b->held[k_modifiers[i + 1].code])
+            push_key(b, k_modifiers[i].code, true, false, mods);
+}
+
+/* ========================================================================== */
+/*  mouse                                                                     */
+/* ========================================================================== */
+
+/* A point of the window's own coordinates (AppKit: points, origin at the bottom left) as the library has it: points from
+   the top left corner of the content area, y down. The same space as backend_get_size, at any scale. */
+static void view_point(BackendWindow *b, NSPoint p, int *x, int *y)
+{
+    NSPoint v = [b->view convertPoint:p fromView:nil];
+    *x = (int)floor(v.x);
+    *y = (int)floor([b->view bounds].size.height - v.y);
+}
+
+/* Where the pointer is now, in those coordinates, whether or not the window has been told of it. */
+static void pointer_in_window(BackendWindow *b, int *x, int *y)
+{
+    NSPoint m = [NSEvent mouseLocation];
+    NSRect c = content_rect(b);
+    *x = (int)floor(m.x - c.origin.x);
+    *y = (int)floor(c.origin.y + c.size.height - m.y);
+}
+
+static void push_mouse_move(BackendWindow *b, int x, int y, int dx, int dy)
+{
+    Event e = {.type = EVENT_MOUSE_MOVE};
+    e.data.mouse.x = x;
+    e.data.mouse.y = y;
+    e.data.mouse.dx = dx;
+    e.data.mouse.dy = dy;
+    push(b, &e);
+}
+
+/* Buttons are told where they happened, which in MOUSE_MODE_CAPTURED is the position the program is following (the real
+   pointer is held still then). */
+static void push_mouse_button(BackendWindow *b, int button, bool down, int x, int y)
+{
+    Event e = {.type = EVENT_MOUSE_BUTTON};
+    e.data.mouse.button = button;
+    e.data.mouse.down = down;
+    e.data.mouse.x = b->mouse_mode == MOUSE_MODE_CAPTURED ? b->virt_x : x;
+    e.data.mouse.y = b->mouse_mode == MOUSE_MODE_CAPTURED ? b->virt_y : y;
+    push(b, &e);
+}
+
+/* The library's button for AppKit's numbering of the "other" buttons: 2 is the middle one, 3 and 4 the side ones. */
+static int other_button(NSInteger number)
+{
+    switch (number)
+    {
+    case 2:
+        return MOUSE_MIDDLE;
+    case 3:
+        return MOUSE_X1;
+    case 4:
+        return MOUSE_X2;
+    default:
+        return -1;
+    }
+}
+
+static void mouse_button_event(BackendWindow *b, NSEvent *event, int button, bool down)
+{
+    if (button < 0)
+        return;
+    int x, y;
+    view_point(b, [event locationInWindow], &x, &y);
+    b->last_x = x;
+    b->last_y = y;
+    push_mouse_button(b, button, down, x, y);
+}
+
+/* Moves and drags are the same to the program. With the pointer cut loose from the mouse the event carries the motion and
+   not a position: the positions the program sees are the sum of it, and fractions of a point are carried over. */
+static void mouse_motion_event(BackendWindow *b, NSEvent *event)
+{
+    if (b->mouse_locked)
+    {
+        b->rel_x += [event deltaX];
+        b->rel_y += [event deltaY];
+        int dx = (int)b->rel_x, dy = (int)b->rel_y;
+        b->rel_x -= dx;
+        b->rel_y -= dy;
+        if (dx == 0 && dy == 0)
+            return;
+        b->virt_x += dx;
+        b->virt_y += dy;
+        push_mouse_move(b, b->virt_x, b->virt_y, dx, dy);
+        return;
+    }
+    int x, y;
+    view_point(b, [event locationInWindow], &x, &y);
+    b->last_x = x;
+    b->last_y = y;
+    if (b->mouse_mode == MOUSE_MODE_CAPTURED)
+        return; /* waiting for the window to be the key one again, when the pointer is let loose from the mouse */
+    push_mouse_move(b, x, y, 0, 0);
+}
+
+/* The wheel as the other backends tell it: one notch of a wheel is 1.0, up and to the right are positive. AppKit gives a
+   notch as about one "line" (more when the wheel is turned fast) and a trackpad as points, ten of which count as a notch
+   here, as in the Wayland backend; its y grows upward as ours does and its x grows to the left, which ours does not. The
+   system's setting of natural scrolling is already in what AppKit says, and is followed. */
+static void scroll_event(BackendWindow *b, NSEvent *event)
+{
+    double dx = [event scrollingDeltaX], dy = [event scrollingDeltaY];
+    if ([event hasPreciseScrollingDeltas])
+    {
+        dx /= WHEEL_PIXELS_PER_NOTCH;
+        dy /= WHEEL_PIXELS_PER_NOTCH;
+    }
+    if (dx == 0.0 && dy == 0.0)
+        return;
+    Event e = {.type = EVENT_MOUSE_WHEEL};
+    e.data.wheel.x = (float)-dx;
+    e.data.wheel.y = (float)dy;
+    push(b, &e);
+}
+
+/* The pointer is held still and the program follows the motion of the mouse: the pointer goes to the middle of the window
+   first, so it is inside, away from the edges, and stays where the events go. */
+static void mouse_lock(BackendWindow *b)
+{
+    if (b->mouse_locked)
+        return;
+    NSRect c = content_rect(b);
+    int cx, cy;
+    top_left(c, &cx, &cy);
+    CGWarpMouseCursorPosition(CGPointMake(cx + c.size.width / 2, cy + c.size.height / 2));
+    CGAssociateMouseAndMouseCursorPosition(false);
+    b->rel_x = b->rel_y = 0;
+    b->mouse_locked = true;
+}
+
+static void mouse_unlock(BackendWindow *b)
+{
+    if (!b->mouse_locked)
+        return;
+    CGAssociateMouseAndMouseCursorPosition(true);
+    b->mouse_locked = false;
+}
+
+/* mouse_capture(true): AppKit keeps a drag going outside the window by itself, but not a pointer that moves with no button
+   down. A global monitor is told of the mouse events that go to other applications (it needs no permission for the mouse,
+   only for the keyboard) and these are turned into the window's own. Events that go to this application's other windows
+   are not seen by it. */
+static void capture_event(BackendWindow *b, NSEvent *event)
+{
+    if (b->mouse_locked)
+        return;
+    int x, y;
+    pointer_in_window(b, &x, &y);
+    switch ([event type])
+    {
+    case NSEventTypeMouseMoved:
+    case NSEventTypeLeftMouseDragged:
+    case NSEventTypeRightMouseDragged:
+    case NSEventTypeOtherMouseDragged:
+        b->last_x = x;
+        b->last_y = y;
+        if (b->mouse_mode != MOUSE_MODE_CAPTURED)
+            push_mouse_move(b, x, y, 0, 0);
+        break;
+    case NSEventTypeLeftMouseDown:
+    case NSEventTypeLeftMouseUp:
+        push_mouse_button(b, MOUSE_LEFT, [event type] == NSEventTypeLeftMouseDown, x, y);
+        break;
+    case NSEventTypeRightMouseDown:
+    case NSEventTypeRightMouseUp:
+        push_mouse_button(b, MOUSE_RIGHT, [event type] == NSEventTypeRightMouseDown, x, y);
+        break;
+    case NSEventTypeOtherMouseDown:
+    case NSEventTypeOtherMouseUp:
+        push_mouse_button(b, other_button([event buttonNumber]), [event type] == NSEventTypeOtherMouseDown, x, y);
+        break;
+    default:
+        break;
+    }
+}
+
+static void capture_stop(BackendWindow *b)
+{
+    if (!b->capture_monitor)
+        return;
+    [NSEvent removeMonitor:b->capture_monitor];
+    [b->capture_monitor release];
+    b->capture_monitor = nil;
+}
+
+/* ========================================================================== */
+/*  cursors                                                                   */
+/* ========================================================================== */
+
+/* The system cursor for a CURSOR_*. AppKit has public cursors for most; for the rest the nearest one is used: the two
+   diagonal resize cursors are public from macOS 15 (before it, the crosshair stands in) and the four-way move cursor has
+   no public counterpart, so the open hand stands in. */
+static NSCursor *make_shape_cursor(int cursor)
+{
+    switch (cursor)
+    {
+    case CURSOR_IBEAM:
+        return [NSCursor IBeamCursor];
+    case CURSOR_CROSSHAIR:
+        return [NSCursor crosshairCursor];
+    case CURSOR_HAND:
+        return [NSCursor pointingHandCursor];
+    case CURSOR_RESIZE_EW:
+        return [NSCursor resizeLeftRightCursor];
+    case CURSOR_RESIZE_NS:
+        return [NSCursor resizeUpDownCursor];
+    case CURSOR_NOT_ALLOWED:
+        return [NSCursor operationNotAllowedCursor];
+    case CURSOR_RESIZE_NWSE:
+    case CURSOR_RESIZE_NESW:
+        if (@available(macOS 15.0, *))
+        {
+            NSCursorFrameResizePosition at =
+                cursor == CURSOR_RESIZE_NWSE ? NSCursorFrameResizePositionTopLeft : NSCursorFrameResizePositionTopRight;
+            return [NSCursor frameResizeCursorFromPosition:at inDirections:NSCursorFrameResizeDirectionsAll];
+        }
+        return [NSCursor crosshairCursor];
+    case CURSOR_RESIZE_ALL:
+        return [NSCursor openHandCursor];
+    default:
+        return [NSCursor arrowCursor];
+    }
+}
+
+static NSCursor *shape_cursor(int cursor)
+{
+    if (cursor < 0 || cursor >= CURSOR_COUNT)
+        cursor = CURSOR_DEFAULT;
+    if (!g.shape_cursors[cursor])
+        g.shape_cursors[cursor] = [make_shape_cursor(cursor) retain];
+    return g.shape_cursors[cursor];
+}
+
+/* A pointer that is not there: a cursor whose picture is one transparent pixel. */
+static NSCursor *blank_cursor(void)
+{
+    if (!g.blank_cursor)
+    {
+        NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+        g.blank_cursor = [[NSCursor alloc] initWithImage:image hotSpot:NSZeroPoint];
+        [image release];
+    }
+    return g.blank_cursor;
+}
+
+/* The cursor picture of a PlatformCursor for a display of `scale` pixels per point: the image is in pixels, and is shown
+   pixel for pixel, as on the other platforms, so on a scale 2 display it is half its size in points. AppKit wants the
+   alpha premultiplied, the library's pixels are not. */
+static NSCursor *image_cursor(PlatformCursor *pc, float scale)
+{
+    if (pc->cursor && pc->scale == scale)
+        return pc->cursor;
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+                                                                    pixelsWide:pc->w
+                                                                    pixelsHigh:pc->h
+                                                                 bitsPerSample:8
+                                                               samplesPerPixel:4
+                                                                      hasAlpha:YES
+                                                                      isPlanar:NO
+                                                                colorSpaceName:NSDeviceRGBColorSpace
+                                                                   bytesPerRow:pc->w * 4
+                                                                  bitsPerPixel:32];
+    if (!rep)
+        return nil;
+    unsigned char *out = [rep bitmapData];
+    for (int i = 0; i < pc->w * pc->h; i++)
+    {
+        uint32_t p = pc->argb[i];
+        uint32_t a = p >> 24;
+        out[i * 4 + 0] = (unsigned char)(((p >> 16) & 0xFF) * a / 255);
+        out[i * 4 + 1] = (unsigned char)(((p >> 8) & 0xFF) * a / 255);
+        out[i * 4 + 2] = (unsigned char)((p & 0xFF) * a / 255);
+        out[i * 4 + 3] = (unsigned char)a;
+    }
+    NSSize size = NSMakeSize(pc->w / scale, pc->h / scale);
+    [rep setSize:size];
+    NSImage *image = [[NSImage alloc] initWithSize:size];
+    [image addRepresentation:rep];
+    NSCursor *cursor = [[NSCursor alloc] initWithImage:image hotSpot:NSMakePoint(pc->hot_x / scale, pc->hot_y / scale)];
+    [image release];
+    [rep release];
+    [pc->cursor release];
+    pc->cursor = cursor;
+    pc->scale = scale;
+    return cursor;
+}
+
+/* The cursor a window should show now: nothing while the pointer is hidden or captured, else the image, else the shape. */
+static NSCursor *cursor_wanted(BackendWindow *b)
+{
+    if (b->mouse_mode != MOUSE_MODE_NORMAL)
+        return blank_cursor();
+    if (b->cursor_image)
+    {
+        NSCursor *c = image_cursor(b->cursor_image, (float)[b->window backingScaleFactor]);
+        if (c)
+            return c;
+    }
+    return shape_cursor(b->cursor_shape);
+}
+
+/* The view lays the cursor over its whole area as a cursor rect, which AppKit keeps applying as the pointer moves (a
+   cursor set by hand would be put back to the arrow with the next move); changing it means asking for the rects again and,
+   with the pointer inside, putting the new one on at once. */
+static void cursor_apply(BackendWindow *b)
+{
+    NSCursor *c = cursor_wanted(b);
+    [c retain];
+    [b->cursor_now release];
+    b->cursor_now = c;
+    [b->window invalidateCursorRectsForView:b->view];
+    if (NSPointInRect([NSEvent mouseLocation], content_rect(b)))
+        [c set];
 }
 
 /* ========================================================================== */
@@ -576,6 +1133,7 @@ static void modal_end(BackendWindow *b)
     if (scale == owner->scale)
         return;
     owner->scale = scale;
+    cursor_apply(owner); /* a cursor from an image is made for the scale */
     Event e = {.type = EVENT_WINDOW_SCALE_CHANGED};
     e.data.scale.scale = scale;
     push(owner, &e);
@@ -587,9 +1145,12 @@ static void modal_end(BackendWindow *b)
     (void)note;
     if (!owner)
         return;
+    if (owner->mouse_mode == MOUSE_MODE_CAPTURED)
+        mouse_lock(owner);
     Event e = {.type = EVENT_WINDOW_FOCUS};
     e.data.focus.gained = true;
     push(owner, &e);
+    press_held_keys(owner);
 }
 
 - (void)windowDidResignKey:(NSNotification *)note
@@ -597,6 +1158,10 @@ static void modal_end(BackendWindow *b)
     (void)note;
     if (!owner)
         return;
+    /* the keys held are let go (the core lets go of the buttons itself, on the focus event), and the pointer is given back
+       to the mouse: a program that is not in front must not hold the pointer */
+    release_held_keys(owner);
+    mouse_unlock(owner);
     Event e = {.type = EVENT_WINDOW_FOCUS};
     e.data.focus.gained = false;
     push(owner, &e);
@@ -709,21 +1274,116 @@ static void modal_end(BackendWindow *b)
         modal_end(owner);
 }
 
-/* TODO(mac phase 4): keyboard and mouse events. Until then a key that reaches the window is taken and dropped, so
-   AppKit does not answer each one with the system beep. */
+/* ---- keyboard. A key the view takes and does not pass on (no [super keyDown:]) is not answered with the system beep.
+   Key equivalents are AppKit's first: the menu is asked before the key reaches here, so Cmd+Q is the menu's (Quit, which
+   the program is told as a close request of every window) and does not arrive as a key. Everything else with Command held
+   (Cmd+C, Cmd+V, Cmd+S, Cmd+Z, ...) is not in the menu and arrives as an ordinary key, with KEYMOD_SUPER. ---- */
+
 - (void)keyDown:(NSEvent *)event
 {
-    (void)event;
+    if (!owner)
+        return;
+    push_key(owner, [event keyCode], true, [event isARepeat] ? true : false, translate_mods([event modifierFlags]));
+    key_text(owner, event);
 }
 
 - (void)keyUp:(NSEvent *)event
 {
-    (void)event;
+    if (owner)
+        push_key(owner, [event keyCode], false, false, translate_mods([event modifierFlags]));
 }
 
 - (void)flagsChanged:(NSEvent *)event
 {
+    if (owner)
+        modifiers_changed(owner, event);
+}
+
+/* ---- mouse. The first click on a window that is not the key one also goes to the program, as it does on the other
+   systems; the window is not first made the key one and then ignored. ---- */
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event
+{
     (void)event;
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent *)event
+{
+    if (owner)
+        mouse_button_event(owner, event, MOUSE_LEFT, true);
+}
+
+- (void)mouseUp:(NSEvent *)event
+{
+    if (owner)
+        mouse_button_event(owner, event, MOUSE_LEFT, false);
+}
+
+- (void)rightMouseDown:(NSEvent *)event
+{
+    if (owner)
+        mouse_button_event(owner, event, MOUSE_RIGHT, true);
+}
+
+- (void)rightMouseUp:(NSEvent *)event
+{
+    if (owner)
+        mouse_button_event(owner, event, MOUSE_RIGHT, false);
+}
+
+- (void)otherMouseDown:(NSEvent *)event
+{
+    if (owner)
+        mouse_button_event(owner, event, other_button([event buttonNumber]), true);
+}
+
+- (void)otherMouseUp:(NSEvent *)event
+{
+    if (owner)
+        mouse_button_event(owner, event, other_button([event buttonNumber]), false);
+}
+
+/* A drag goes on being delivered here while the pointer is outside the window, until the button is let go: AppKit's own
+   capture. */
+- (void)mouseMoved:(NSEvent *)event
+{
+    if (owner)
+        mouse_motion_event(owner, event);
+}
+
+- (void)mouseDragged:(NSEvent *)event
+{
+    if (owner)
+        mouse_motion_event(owner, event);
+}
+
+- (void)rightMouseDragged:(NSEvent *)event
+{
+    if (owner)
+        mouse_motion_event(owner, event);
+}
+
+- (void)otherMouseDragged:(NSEvent *)event
+{
+    if (owner)
+        mouse_motion_event(owner, event);
+}
+
+- (void)scrollWheel:(NSEvent *)event
+{
+    if (owner)
+        scroll_event(owner, event);
+}
+
+/* ---- cursor ---- */
+
+- (void)resetCursorRects
+{
+    if (owner && owner->cursor_now)
+        [self addCursorRect:[self visibleRect] cursor:owner->cursor_now];
+    else
+        [super resetCursorRects];
 }
 
 /* ---- software surface ---- */
@@ -803,7 +1463,10 @@ bool backend_init(void)
 void backend_shutdown(void)
 {
     /* The application, its delegate and its menu stay for the life of the process: AppKit cannot be taken down and
-       brought up again, and a later backend_init finds them as they were. */
+       brought up again, and a later backend_init finds them as they were. A window the program did not destroy must not
+       keep the pointer cut loose from the mouse. */
+    for (BackendWindow *b = g.windows; b; b = b->next)
+        mouse_unlock(b);
     g.ready = false;
 }
 
@@ -983,12 +1646,17 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         [b->window setReleasedWhenClosed:NO];
         [b->window setRestorable:NO];
         [b->window setTabbingMode:NSWindowTabbingModeDisallowed];
+        /* mouse moves go to the key window's first responder, which is the view; hover with no focus is not reported */
+        [b->window setAcceptsMouseMovedEvents:YES];
 
         b->view = [[ZenView alloc] initWithFrame:NSMakeRect(0, 0, w, h) owner:b];
         b->delegate = [[ZenWindowDelegate alloc] initWithOwner:b];
         [b->window setContentView:b->view];
         [b->window setDelegate:b->delegate];
         [b->window makeFirstResponder:b->view];
+        b->mouse_mode = MOUSE_MODE_NORMAL;
+        b->cursor_shape = CURSOR_DEFAULT;
+        cursor_apply(b);
         if (cfg->render == RENDER_GL)
         {
             gl_attach(b);
@@ -1028,6 +1696,8 @@ void backend_destroy(BackendWindow *b)
     @autoreleasepool
     {
         live_timer_stop(b);
+        capture_stop(b);
+        mouse_unlock(b);
         for (BackendWindow **p = &g.windows; *p; p = &(*p)->next)
             if (*p == b)
             {
@@ -1039,6 +1709,7 @@ void backend_destroy(BackendWindow *b)
         [b->view detach];
         [b->window setDelegate:nil];
         gl_destroy(b);
+        [b->cursor_now release];
         [b->window orderOut:nil];
         [b->window close];
         [b->window setContentView:nil];
@@ -1073,7 +1744,12 @@ void backend_pump_events(BackendWindow *b, Core *core)
             if (!event)
                 break;
             g.in_send = true;
-            [NSApp sendEvent:event];
+            /* NSApplication keeps the release of a key that was pressed with Command held to itself, and no key window ever
+               sees it: the key would stay down. The key window is given it directly. */
+            if ([event type] == NSEventTypeKeyUp && ([event modifierFlags] & NSEventModifierFlagCommand))
+                [[NSApp keyWindow] sendEvent:event];
+            else
+                [NSApp sendEvent:event];
             g.in_send = false;
             /* AppKit's own loop, if this event started one, is over when sendEvent returns */
             for (BackendWindow *w = g.windows; w; w = w->next)
@@ -1502,55 +2178,161 @@ static bool not_yet(const char *what)
     return error_set("%s is not implemented on macOS yet", what);
 }
 
-/* ---- phase 4: keyboard and mouse ---- */
+/* ---- keyboard and mouse ---- */
 
+/* Caps Lock is the only lock macOS has (no Num Lock), and the system says it as it is now. */
 int backend_lock_state(void)
 {
-    return 0; /* TODO(mac phase 4): Caps Lock; macOS has no Num Lock */
+    int state = 0;
+    @autoreleasepool
+    {
+        if ([NSEvent modifierFlags] & NSEventModifierFlagCapsLock)
+            state |= KEYMOD_CAPS_LOCK;
+    }
+    return state;
 }
+
 bool backend_mouse_capture(BackendWindow *b, bool on)
 {
-    (void)b; /* TODO(mac phase 4) */
-    (void)on;
-    return false;
+    bool in_effect = false;
+    @autoreleasepool
+    {
+        if (!on)
+            capture_stop(b);
+        else if (b->capture_monitor)
+            in_effect = true;
+        else
+        {
+            NSEventMask mask = NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged |
+                               NSEventMaskOtherMouseDragged | NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp |
+                               NSEventMaskRightMouseDown | NSEventMaskRightMouseUp | NSEventMaskOtherMouseDown |
+                               NSEventMaskOtherMouseUp;
+            id monitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask
+                                                                handler:^(NSEvent *event) {
+                                                                    capture_event(b, event);
+                                                                }];
+            b->capture_monitor = [monitor retain];
+            in_effect = monitor != nil;
+        }
+    }
+    return in_effect;
 }
+
 PlatformCursor *backend_cursor_create(const uint32_t *argb, int w, int h, int hot_x, int hot_y)
 {
-    (void)argb; /* TODO(mac phase 4) */
-    (void)w;
-    (void)h;
-    (void)hot_x;
-    (void)hot_y;
-    not_yet("cursor images");
-    return NULL;
+    PlatformCursor *pc = calloc(1, sizeof *pc);
+    if (pc)
+        pc->argb = malloc((size_t)w * (size_t)h * 4);
+    if (!pc || !pc->argb)
+    {
+        free(pc);
+        error_set("out of memory");
+        return NULL;
+    }
+    memcpy(pc->argb, argb, (size_t)w * (size_t)h * 4);
+    pc->w = w;
+    pc->h = h;
+    pc->hot_x = hot_x;
+    pc->hot_y = hot_y;
+    bool made;
+    @autoreleasepool
+    {
+        NSScreen *screen = [NSScreen mainScreen];
+        float scale = screen ? (float)[screen backingScaleFactor] : 1.0f;
+        made = image_cursor(pc, scale < 1.0f ? 1.0f : scale) != nil;
+    }
+    if (!made)
+    {
+        free(pc->argb);
+        free(pc);
+        error_set("cannot create the cursor");
+        return NULL;
+    }
+    return pc;
 }
+
 void backend_cursor_destroy(PlatformCursor *c)
 {
-    (void)c; /* TODO(mac phase 4): no cursor is ever made, so there is none to free */
+    @autoreleasepool
+    {
+        for (BackendWindow *b = g.windows; b; b = b->next)
+            if (b->cursor_image == c) /* a window still showing it goes back to its shape */
+            {
+                b->cursor_image = NULL;
+                cursor_apply(b);
+            }
+        [c->cursor release];
+    }
+    free(c->argb);
+    free(c);
 }
+
 void backend_set_cursor_image(BackendWindow *b, PlatformCursor *c)
 {
-    (void)b; /* TODO(mac phase 4) */
-    (void)c;
+    @autoreleasepool
+    {
+        b->cursor_image = c; /* NULL: back to the shape */
+        cursor_apply(b);
+    }
 }
-void backend_set_mouse_pos(BackendWindow *b, int x, int y)
-{
-    (void)b; /* TODO(mac phase 4) */
-    (void)x;
-    (void)y;
-    not_yet("mouse_set_position");
-}
+
 void backend_set_cursor(BackendWindow *b, int cursor)
 {
-    (void)b; /* TODO(mac phase 4) */
-    (void)cursor;
+    @autoreleasepool
+    {
+        b->cursor_shape = cursor < 0 || cursor >= CURSOR_COUNT ? CURSOR_DEFAULT : cursor;
+        b->cursor_image = NULL; /* a shape replaces an image, as on the other backends */
+        cursor_apply(b);
+    }
 }
+
+/* Moves the pointer. CGWarpMouseCursorPosition takes the global coordinates the library uses (top left of the primary
+   display, y down) and does not make the system send a motion event, so the program is told by one made here, as the
+   other systems tell it; and the mouse is associated again at once, which cuts the quarter second during which the system
+   would otherwise ignore the mouse after a warp. In MOUSE_MODE_CAPTURED the pointer is held and only the position the
+   program follows is set, as on X11 and Win32. */
+void backend_set_mouse_pos(BackendWindow *b, int x, int y)
+{
+    if (b->mouse_mode == MOUSE_MODE_CAPTURED)
+    {
+        b->virt_x = x;
+        b->virt_y = y;
+        return;
+    }
+    @autoreleasepool
+    {
+        int cx, cy;
+        top_left(content_rect(b), &cx, &cy);
+        CGWarpMouseCursorPosition(CGPointMake(cx + x, cy + y));
+        CGAssociateMouseAndMouseCursorPosition(true);
+    }
+    b->last_x = x;
+    b->last_y = y;
+    push_mouse_move(b, x, y, 0, 0);
+}
+
+/* MOUSE_MODE_HIDDEN hides the pointer over the window (a cursor with no picture on the view's cursor rect: it comes back
+   by itself when the pointer leaves or the window is not the key one, and there is no count of hides to keep balanced).
+   MOUSE_MODE_CAPTURED does that and also holds the pointer and gives the program the motion of the mouse, for as long as
+   the window is the key one: it is given back when the focus goes, and taken again when it returns. */
 void backend_set_mouse_mode(BackendWindow *b, int mode)
 {
-    (void)b; /* TODO(mac phase 4) */
-    (void)mode;
-    if (mode != MOUSE_MODE_NORMAL)
-        not_yet("the hidden and captured mouse modes");
+    if (mode != MOUSE_MODE_HIDDEN && mode != MOUSE_MODE_CAPTURED)
+        mode = MOUSE_MODE_NORMAL;
+    @autoreleasepool
+    {
+        if (mode == MOUSE_MODE_CAPTURED && b->mouse_mode != MOUSE_MODE_CAPTURED)
+            pointer_in_window(b, &b->virt_x, &b->virt_y);
+        b->mouse_mode = mode;
+        if (mode == MOUSE_MODE_CAPTURED)
+        {
+            if ([b->window isKeyWindow])
+                mouse_lock(b);
+        }
+        else
+            mouse_unlock(b);
+        cursor_apply(b);
+    }
 }
 
 /* ---- phase 5: text input ---- */

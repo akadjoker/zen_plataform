@@ -782,8 +782,9 @@ static bool says_not_implemented(void)
 
 static void test_not_implemented(PlatformWindow *w)
 {
-    /* The GL and pixel windows are tested in test_gl_cocoa and test_pixels_cocoa; here only that a window of each kind can be
-       made. Each of the stubs of the later phases has to say no, and when a phase brings one in, its check here changes. */
+    /* The GL and pixel windows, the keyboard, the mouse and the cursors are tested in test_gl_cocoa, test_pixels_cocoa and
+       test_input_cocoa; here only that a window of each kind can be made. What is still a stub of a later phase has to say no,
+       and when a phase brings one in, its check here changes. */
     WindowConfig gl = {.title = "gl", .width = 100, .height = 100, .render = RENDER_GL};
     PlatformWindow *gw = window_create(&gl);
     CHECK(gw != NULL);
@@ -809,12 +810,6 @@ static void test_not_implemented(PlatformWindow *w)
     CHECK(gl_proc_address("glClear") != NULL);
     CHECK(gl_worker_create(w) == NULL);
 
-    uint32_t pixel = 0xFFFFFFFFu;
-    platform_clear_error();
-    CHECK(cursor_create(&pixel, 1, 1, 0, 0) == NULL);
-    CHECK(says_not_implemented());
-    CHECK(!mouse_capture(w, true));
-
     platform_clear_error();
     CHECK(!clipboard_set_data(CLIPBOARD_TEXT, "x", 1));
     CHECK(says_not_implemented());
@@ -834,7 +829,7 @@ static void test_not_implemented(PlatformWindow *w)
     window_set_mode(w, WINDOW_FULLSCREEN, 0);
     CHECK(says_not_implemented());
     CHECK(window_get_mode(w) == WINDOW_WINDOWED); /* it stayed what it was */
-    CHECK(key_mods(w) == 0);
+    CHECK((key_mods(w) & ~KEYMOD_CAPS_LOCK) == 0);  /* no modifier is held on the runner (the Caps Lock light is not asked about) */
     window_request_attention(w); /* real: the Dock icon bounces, nothing to check but that it does not crash */
 }
 
