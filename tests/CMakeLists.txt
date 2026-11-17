@@ -202,6 +202,20 @@ if(PLATFORM_BACKEND_X11)
 endif()
 
 
+# The macOS window, events and monitors, on the window server of a graphical session.
+if(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
+    add_executable(test_cocoa_window test_cocoa_window.c)
+    target_link_libraries(test_cocoa_window PRIVATE platform "-framework CoreGraphics" "-framework CoreFoundation")
+    add_test(NAME test_cocoa_window COMMAND test_cocoa_window)
+    # 77: no graphical session (the CI job sets ZP_REQUIRE_DISPLAY, which turns that into a failure)
+    set_tests_properties(test_cocoa_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    if(PLATFORM_SANITIZE)
+        # AppKit keeps objects alive for the life of the process, which a leak check at exit takes for leaks; the test
+        # looks for the leaks of this library itself (the windows AppKit still holds, the heap that grows)
+        set_property(TEST test_cocoa_window APPEND PROPERTY ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+    endif()
+endif()
+
 # Fake test with extra source files (widgets + UI + software renderer).
 function(add_fake_ext_test name)
     set(srcs "")
