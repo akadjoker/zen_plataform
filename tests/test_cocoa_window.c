@@ -592,60 +592,91 @@ static void test_focus(PlatformWindow *w)
     }
 }
 
+/* Move the pointer (CGWarpMouseCursorPosition takes the same global coordinates as the library: top left of the primary display,
+   y down) and, if the window does not notice by itself, nudge it with a real move event, which a session may or may not let a
+   program post. */
+static void move_pointer(int x, int y, bool nudge)
+{
+    CGWarpMouseCursorPosition(CGPointMake(x, y));
+    if (nudge)
+    {
+        CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointMake(x + 1, y + 1), kCGMouseButtonLeft);
+        if (move)
+        {
+            CGEventPost(kCGHIDEventTap, move);
+            CFRelease(move);
+        }
+    }
+}
+
 static void test_pointer(PlatformWindow *w)
 {
-    /* CGWarpMouseCursorPosition takes the same global coordinates as the library: top left of the primary display, y down.
-       It moves the pointer without events, so the global position is checked at once and the window's enter and leave only
-       as far as the window server reports them. */
     bool ok;
     int x, y, cw, ch, px, py;
     window_get_position(w, &x, &y);
     window_get_size(w, &cw, &ch);
-    seen_reset();
-    CGWarpMouseCursorPosition(CGPointMake(x + cw / 2, y + ch / 2));
+    MonitorInfo m;
+    CHECK(monitor_get_info(monitor_from_window(w), &m));
+    /* a spot of the monitor far from the window, for the pointer to start from and to leave to */
+    int far_x = x + cw / 2 < m.x + m.width / 2 ? m.x + m.width - 4 : m.x + 4;
+    int far_y = y + ch / 2 < m.y + m.height / 2 ? m.y + m.height - 4 : m.y + 4;
+    int in_x = x + cw / 2, in_y = y + ch / 2;
+
+    /* the global position, at once and without any event */
+    move_pointer(in_x, in_y, false);
     for (int i = 0; i < 100; i++)
     {
         mouse_global_position(&px, &py);
-        if (abs(px - (x + cw / 2)) <= 1 && abs(py - (y + ch / 2)) <= 1)
+        if (abs(px - in_x) <= 1 && abs(py - in_y) <= 1)
             break;
         pump_for(w, 10);
     }
     mouse_global_position(&px, &py);
-    printf("  warped to %d,%d: mouse_global_position %d,%d\n", x + cw / 2, y + ch / 2, px, py);
-    CHECK(abs(px - (x + cw / 2)) <= 1 && abs(py - (y + ch / 2)) <= 1);
+    printf("  warped to %d,%d: mouse_global_position %d,%d\n", in_x, in_y, px, py);
+    CHECK(abs(px - in_x) <= 1 && abs(py - in_y) <= 1);
     CHECK(monitor_from_mouse() == monitor_from_window(w));
 
+    /* out of the window: if it was hovered, the leave arrives */
+    seen_reset();
+    bool was_hovered = window_is_hovered(w);
+    move_pointer(far_x, far_y, false);
+    WAIT_UNTIL(w, !window_is_hovered(w), 1500, ok);
+    if (!ok)
+    {
+        move_pointer(far_x, far_y, true);
+        WAIT_UNTIL(w, !window_is_hovered(w), 1500, ok);
+    }
+    if (!ok)
+    {
+        NOTE("the window never saw the pointer leave (the session may not deliver synthetic pointer moves), enter and leave checks skipped");
+        return;
+    }
+    if (was_hovered)
+        CHECK(g_seen.leave >= 1); /* it was inside and now it is not: the leave was raised */
+    printf("  left: hovered was %d, leave events %d\n", was_hovered, g_seen.leave);
+
+    /* and back in: the enter */
+    seen_reset();
+    move_pointer(in_x, in_y, false);
     WAIT_UNTIL(w, window_is_hovered(w), 1500, ok);
     if (!ok)
     {
-        /* a warp makes no mouse event, and the tracking area may wait for one: nudge the pointer with an event */
-        CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointMake(x + cw / 2 + 3, y + ch / 2 + 2), kCGMouseButtonLeft);
-        if (move)
-        {
-            CGEventPost(kCGHIDEventTap, move);
-            CFRelease(move);
-        }
+        move_pointer(in_x, in_y, true);
         WAIT_UNTIL(w, window_is_hovered(w), 1500, ok);
     }
+    CHECK(ok);
     if (ok)
     {
-        CHECK(g_seen.enter >= 1);
-        seen_reset();
-        CGWarpMouseCursorPosition(CGPointMake(x + cw + 200, y + ch + 200));
-        CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointMake(x + cw + 201, y + ch + 201), kCGMouseButtonLeft);
-        if (move)
-        {
-            CGEventPost(kCGHIDEventTap, move);
-            CFRelease(move);
-        }
-        WAIT_UNTIL(w, !window_is_hovered(w), 1500, ok);
-        if (ok)
-            CHECK(g_seen.leave >= 1);
-        else
-            NOTE("the pointer left the window but no leave arrived (synthetic pointer moves)");
+        settle(w);
+        CHECK(g_seen.enter == 1 && g_seen.leave == 0);
+        printf("  entered: enter events %d\n", g_seen.enter);
     }
-    else
-        NOTE("no enter event for a synthetic pointer move (the session may not deliver them), enter and leave checks skipped");
+    seen_reset();
+    move_pointer(far_x, far_y, true);
+    WAIT_UNTIL(w, !window_is_hovered(w), 1500, ok);
+    CHECK(ok);
+    if (ok)
+        CHECK(g_seen.leave == 1);
 }
 
 /* ========================================================================== */
@@ -772,8 +803,8 @@ static void test_not_implemented(PlatformWindow *w)
     CHECK(!clipboard_has_data(CLIPBOARD_TEXT));
 
     platform_clear_error();
-    CHECK(!vulkan_create_surface(w, NULL, NULL, &(uint64_t){0}));
-    CHECK(strstr(platform_get_error(), "Vulkan") != NULL);
+    CHECK(!vulkan_create_surface(w, (void *)1, NULL, &(uint64_t){0}));
+    CHECK(says_not_implemented());
     uint32_t n = 99;
     CHECK(vulkan_instance_extensions(&n) == NULL && n == 0);
 

@@ -858,30 +858,44 @@ void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallbac
     b->live_user = user;
     if (b->in_modal) /* set from inside AppKit's loop, which is already running */
     {
-        if (cb)
-            live_timer_start(b);
-        else
-            live_timer_stop(b);
+        @autoreleasepool
+        {
+            if (cb)
+                live_timer_start(b);
+            else
+                live_timer_stop(b);
+        }
     }
 }
 
 /* ========================================================================== */
 /*  geometry                                                                  */
+/*                                                                            */
+/*  Every call that reaches AppKit has an autorelease pool of its own: a C     */
+/*  program has none around main, and what AppKit autoreleases in a call (the  */
+/*  window itself, among it) would stay in the thread's outermost pool and     */
+/*  keep every window ever made alive (test_cocoa_window counted them).        */
 /* ========================================================================== */
 
 void backend_get_size(BackendWindow *b, int *w, int *h)
 {
-    NSRect c = content_rect(b);
-    if (w)
-        *w = round_int(c.size.width);
-    if (h)
-        *h = round_int(c.size.height);
+    @autoreleasepool
+    {
+        NSRect c = content_rect(b);
+        if (w)
+            *w = round_int(c.size.width);
+        if (h)
+            *h = round_int(c.size.height);
+    }
 }
 
 void backend_get_fb_size(BackendWindow *b, int *w, int *h)
 {
     int fw, fh;
-    fb_size(b, &fw, &fh);
+    @autoreleasepool
+    {
+        fb_size(b, &fw, &fh);
+    }
     if (w)
         *w = fw;
     if (h)
@@ -891,7 +905,10 @@ void backend_get_fb_size(BackendWindow *b, int *w, int *h)
 void backend_get_pos(BackendWindow *b, int *x, int *y)
 {
     int px, py;
-    top_left(content_rect(b), &px, &py);
+    @autoreleasepool
+    {
+        top_left(content_rect(b), &px, &py);
+    }
     if (x)
         *x = px;
     if (y)
@@ -910,24 +927,35 @@ static int clamp_limit(int v, int lo, int hi)
 
 void backend_set_size(BackendWindow *b, int w, int h)
 {
-    /* the top left corner stays where it is: setContentSize would keep the bottom left */
-    NSRect c = content_rect(b);
-    w = clamp_limit(w, b->min_w, b->max_w);
-    h = clamp_limit(h, b->min_h, b->max_h);
-    NSRect want = NSMakeRect(c.origin.x, c.origin.y + c.size.height - h, w, h);
-    [b->window setFrame:[b->window frameRectForContentRect:want] display:YES];
+    @autoreleasepool
+    {
+        /* the top left corner stays where it is: setContentSize would keep the bottom left */
+        NSRect c = content_rect(b);
+        w = clamp_limit(w, b->min_w, b->max_w);
+        h = clamp_limit(h, b->min_h, b->max_h);
+        NSRect want = NSMakeRect(c.origin.x, c.origin.y + c.size.height - h, w, h);
+        [b->window setFrame:[b->window frameRectForContentRect:want] display:YES];
+    }
 }
 
 void backend_set_pos(BackendWindow *b, int x, int y)
 {
-    NSRect c = content_rect(b);
-    NSRect want = NSMakeRect(x, primary_height() - y - c.size.height, c.size.width, c.size.height);
-    [b->window setFrameOrigin:[b->window frameRectForContentRect:want].origin];
+    @autoreleasepool
+    {
+        NSRect c = content_rect(b);
+        NSRect want = NSMakeRect(x, primary_height() - y - c.size.height, c.size.width, c.size.height);
+        [b->window setFrameOrigin:[b->window frameRectForContentRect:want].origin];
+    }
 }
 
 float backend_content_scale(BackendWindow *b)
 {
-    return (float)[b->window backingScaleFactor];
+    float scale;
+    @autoreleasepool
+    {
+        scale = (float)[b->window backingScaleFactor];
+    }
+    return scale;
 }
 
 void backend_set_title(BackendWindow *b, const char *title)
@@ -945,8 +973,11 @@ void backend_set_size_limits(BackendWindow *b, int minw, int minh, int maxw, int
     b->min_h = minh;
     b->max_w = maxw;
     b->max_h = maxh;
-    [b->window setContentMinSize:NSMakeSize(minw > 0 ? minw : 0, minh > 0 ? minh : 0)];
-    [b->window setContentMaxSize:NSMakeSize(maxw > 0 ? maxw : FLT_MAX, maxh > 0 ? maxh : FLT_MAX)];
+    @autoreleasepool
+    {
+        [b->window setContentMinSize:NSMakeSize(minw > 0 ? minw : 0, minh > 0 ? minh : 0)];
+        [b->window setContentMaxSize:NSMakeSize(maxw > 0 ? maxw : FLT_MAX, maxh > 0 ? maxh : FLT_MAX)];
+    }
 }
 
 /* ========================================================================== */
@@ -955,66 +986,96 @@ void backend_set_size_limits(BackendWindow *b, int minw, int minh, int maxw, int
 
 void backend_minimize(BackendWindow *b)
 {
-    [b->window miniaturize:nil];
+    @autoreleasepool
+    {
+        [b->window miniaturize:nil];
+    }
 }
 
 void backend_maximize(BackendWindow *b)
 {
-    if (![b->window isZoomed])
-        [b->window zoom:nil]; /* zoom toggles: only when it is not zoomed already */
+    @autoreleasepool
+    {
+        if (![b->window isZoomed])
+            [b->window zoom:nil]; /* zoom toggles: only when it is not zoomed already */
+    }
 }
 
 void backend_restore(BackendWindow *b)
 {
-    if ([b->window isMiniaturized])
-        [b->window deminiaturize:nil];
-    else if ([b->window isZoomed])
-        [b->window zoom:nil];
+    @autoreleasepool
+    {
+        if ([b->window isMiniaturized])
+            [b->window deminiaturize:nil];
+        else if ([b->window isZoomed])
+            [b->window zoom:nil];
+    }
 }
 
 void backend_show(BackendWindow *b)
 {
-    [b->window makeKeyAndOrderFront:nil];
+    @autoreleasepool
+    {
+        [b->window makeKeyAndOrderFront:nil];
+    }
 }
 
 void backend_hide(BackendWindow *b)
 {
-    [b->window orderOut:nil];
+    @autoreleasepool
+    {
+        [b->window orderOut:nil];
+    }
 }
 
 void backend_focus(BackendWindow *b)
 {
-    /* a window that is not on screen cannot take the focus (as on X11, asking is not an error and does nothing) */
-    if (![b->window isVisible])
-        return;
-    [NSApp activateIgnoringOtherApps:YES];
-    [b->window makeKeyAndOrderFront:nil];
+    @autoreleasepool
+    {
+        /* a window that is not on screen cannot take the focus (as on X11, asking is not an error and does nothing) */
+        if (![b->window isVisible])
+            return;
+        [NSApp activateIgnoringOtherApps:YES];
+        [b->window makeKeyAndOrderFront:nil];
+    }
 }
 
 void backend_request_attention(BackendWindow *b)
 {
     (void)b;
-    [NSApp requestUserAttention:NSInformationalRequest]; /* the Dock icon bounces once, if the application is not active */
+    @autoreleasepool
+    {
+        [NSApp requestUserAttention:NSInformationalRequest]; /* the Dock icon bounces once, if the application is not active */
+    }
 }
 
 bool backend_get_flag(BackendWindow *b, int flag)
 {
-    switch (flag)
-    {
-    case WIN_FLAG_FOCUSED:
-        return [b->window isKeyWindow] ? true : false;
-    case WIN_FLAG_MINIMIZED:
-        return [b->window isMiniaturized] ? true : false;
-    case WIN_FLAG_MAXIMIZED:
-        return [b->window isZoomed] ? true : false;
-    case WIN_FLAG_VISIBLE:
-        /* a window in the Dock is still shown as far as the program is concerned, as on Win32 */
-        return [b->window isVisible] || [b->window isMiniaturized];
-    case WIN_FLAG_HOVERED:
+    if (flag == WIN_FLAG_HOVERED)
         return b->hovered;
-    default:
-        return false;
+    bool on = false;
+    @autoreleasepool
+    {
+        switch (flag)
+        {
+        case WIN_FLAG_FOCUSED:
+            on = [b->window isKeyWindow];
+            break;
+        case WIN_FLAG_MINIMIZED:
+            on = [b->window isMiniaturized];
+            break;
+        case WIN_FLAG_MAXIMIZED:
+            on = [b->window isZoomed];
+            break;
+        case WIN_FLAG_VISIBLE:
+            /* a window in the Dock is still shown as far as the program is concerned, as on Win32 */
+            on = [b->window isVisible] || [b->window isMiniaturized];
+            break;
+        default:
+            break;
+        }
     }
+    return on;
 }
 
 void *backend_native_handle(BackendWindow *b, NativeHandleType type)
@@ -1246,5 +1307,5 @@ bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void 
     (void)instance;
     (void)allocator;
     (void)out_surface;
-    return not_yet("Vulkan surfaces");
+    return not_yet("Vulkan surface creation");
 }
