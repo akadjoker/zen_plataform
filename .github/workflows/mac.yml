@@ -38,7 +38,7 @@ jobs:
           cmake --version | head -1
           echo "GUI session: $(launchctl managername 2>&1)"
           ps -ax -o pid,comm | grep -E "WindowServer|loginwindow|Finder" | grep -v grep || true
-          system_profiler SPDisplaysDataType 2>&1 | head -40 || true
+          /usr/sbin/system_profiler -detailLevel mini SPDisplaysDataType 2>&1 | head -40 || true
 
       # ---- phase 1: the library with no window ----
       - name: Fake backend, build (-Wall -Wextra)
@@ -73,16 +73,70 @@ jobs:
         continue-on-error: true
         run: ctest --test-dir build-fake-asan --output-on-failure --timeout 240
 
+      # ---- phase 2: the native backend (AppKit), on the runner's own window server ----
+      - name: Native backend, build (-Wall -Wextra)
+        id: native_build
+        continue-on-error: true
+        run: |
+          cmake -S . -B build-native -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS="-Wall -Wextra" -DCMAKE_OBJC_FLAGS="-Wall -Wextra"
+          cmake --build build-native -j4 -- -k 2>&1 | tee build-native.log
+          test "${PIPESTATUS[0]}" = 0
+      - name: Native backend, warnings of our own code
+        id: native_warn
+        continue-on-error: true
+        run: |
+          if grep "warning:" build-native.log | grep -v "$WARN_FILTER"; then echo "warnings above"; exit 1; fi
+          echo "no warnings"
+      - name: Native backend, ctest
+        id: native_test
+        continue-on-error: true
+        env:
+          ZP_REQUIRE_DISPLAY: "1"
+        run: ctest --test-dir build-native --output-on-failure --timeout 120
+      - name: Native backend, window test output
+        id: native_window
+        continue-on-error: true
+        env:
+          ZP_REQUIRE_DISPLAY: "1"
+        run: ctest --test-dir build-native -R test_cocoa_window -V --timeout 120
+
+      - name: Native backend + ASan/UBSan, build
+        id: native_asan_build
+        continue-on-error: true
+        run: |
+          cmake -S . -B build-native-asan -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_SANITIZE=ON \
+                -DCMAKE_C_FLAGS="-Wall -Wextra" -DCMAKE_OBJC_FLAGS="-Wall -Wextra"
+          cmake --build build-native-asan -j4 -- -k 2>&1 | tee build-native-asan.log
+          test "${PIPESTATUS[0]}" = 0
+      - name: Native backend + ASan/UBSan, ctest
+        id: native_asan_test
+        continue-on-error: true
+        env:
+          ZP_REQUIRE_DISPLAY: "1"
+        run: ctest --test-dir build-native-asan --output-on-failure --timeout 240
+      - name: Native backend + ASan/UBSan, window test output
+        id: native_asan_window
+        continue-on-error: true
+        env:
+          ZP_REQUIRE_DISPLAY: "1"
+        run: ctest --test-dir build-native-asan -R test_cocoa_window -V --timeout 240
+
       - name: Verdict
         if: always()
         run: |
-          echo "fake build:       ${{ steps.fake_build.outcome }}"
-          echo "fake warnings:    ${{ steps.fake_warn.outcome }}"
-          echo "fake ctest:       ${{ steps.fake_test.outcome }}"
-          echo "fake asan build:  ${{ steps.fake_asan_build.outcome }}"
-          echo "fake asan ctest:  ${{ steps.fake_asan_test.outcome }}"
-          if [ "${{ steps.fake_build.outcome }}" != success ] || [ "${{ steps.fake_warn.outcome }}" != success ] ||
-             [ "${{ steps.fake_test.outcome }}" != success ] || [ "${{ steps.fake_asan_build.outcome }}" != success ] ||
-             [ "${{ steps.fake_asan_test.outcome }}" != success ]; then
-            exit 1
-          fi
+          failed=0
+          check() { echo "$1: $2"; [ "$2" = success ] || failed=1; }
+          check "fake build         " "${{ steps.fake_build.outcome }}"
+          check "fake warnings      " "${{ steps.fake_warn.outcome }}"
+          check "fake ctest         " "${{ steps.fake_test.outcome }}"
+          check "fake asan build    " "${{ steps.fake_asan_build.outcome }}"
+          check "fake asan ctest    " "${{ steps.fake_asan_test.outcome }}"
+          check "native build       " "${{ steps.native_build.outcome }}"
+          check "native warnings    " "${{ steps.native_warn.outcome }}"
+          check "native ctest       " "${{ steps.native_test.outcome }}"
+          check "native window test " "${{ steps.native_window.outcome }}"
+          check "native asan build  " "${{ steps.native_asan_build.outcome }}"
+          check "native asan ctest  " "${{ steps.native_asan_test.outcome }}"
+          check "native asan window " "${{ steps.native_asan_window.outcome }}"
+          exit $failed
