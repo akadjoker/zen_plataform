@@ -99,6 +99,7 @@ jobs:
         continue-on-error: true
         env:
           ZP_REQUIRE_DISPLAY: "1"
+          ZP_TEST_DISPLAY_MODES: "1"
         run: ctest --test-dir build-native -R test_cocoa_window -V --timeout 120
 
       - name: Native backend + ASan/UBSan, build
@@ -120,6 +121,7 @@ jobs:
         continue-on-error: true
         env:
           ZP_REQUIRE_DISPLAY: "1"
+          ZP_TEST_DISPLAY_MODES: "1"
         run: ctest --test-dir build-native-asan -R test_cocoa_window -V --timeout 240
 
       # information only (not in the verdict): what the leaks tool finds in the window test after its 300 create/destroy rounds
@@ -135,6 +137,17 @@ jobs:
           sed -n '1,/^Binary Images/p' ../../leaks.log | grep -v "^ *0x[0-9a-f]* - " | cut -c1-200 | head -150
           echo "--- leaks that name this library or AppKit objects of a window:"
           grep -E "Zen[A-Z]|backend_cocoa|NSWindow|NSTrackingArea|NSThemeFrame" ../../leaks.log | cut -c1-200 | head -40 || true
+
+      # information only (not in the verdict): the library as a dylib, which exports only the public API
+      - name: Native backend, shared library build
+        continue-on-error: true
+        run: |
+          cmake -S . -B build-shared -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+                -DPLATFORM_BUILD_TESTS=OFF -DCMAKE_C_FLAGS="-Wall -Wextra" -DCMAKE_OBJC_FLAGS="-Wall -Wextra"
+          cmake --build build-shared -j4 2>&1 | grep -E "error|warning:|Linking|Built target platform" | grep -v stb_ | head -30
+          ls -l build-shared/libplatform.dylib
+          nm -gU build-shared/libplatform.dylib | grep -c " T _" || true
+          nm -gU build-shared/libplatform.dylib | grep -E " T _(backend_|zen_)" | head -5 || true
 
       - name: Verdict
         if: always()
