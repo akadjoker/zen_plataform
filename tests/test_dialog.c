@@ -1,5 +1,5 @@
 /*
- * test_dialog.c - the zenity / kdialog / xdg-open plumbing, with stand-in programs.
+ * test_dialog.c - the zenity / kdialog / xdg-open plumbing, with stand-in programs (open on macOS).
  * The test puts scripts called zenity, kdialog and xdg-open alone on PATH. Each logs
  * its arguments and prints a canned answer, so the arguments the platform builds and
  * the way it reads the answer are checked without opening a window.
@@ -13,6 +13,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* the program that opens a URL: xdg-open, and open on macOS */
+#if defined(__APPLE__)
+#define OPENER "open"
+#else
+#define OPENER "xdg-open"
+#endif
 
 static int g_pass, g_fail;
 
@@ -51,7 +58,7 @@ static void setup(void)
         exit(1);
     snprintf(g_log, sizeof g_log, "%s/log.txt", g_dir);
     write_stub("zenity");
-    write_stub("xdg-open");
+    write_stub(OPENER);
     setenv("PATH", g_dir, 1);
     setenv("ZEN_STUB_LOG", g_log, 1);
 }
@@ -217,6 +224,9 @@ static void test_parent(void)
     if (!platform_init())
         return;
     WindowConfig cfg = {.title = "parent", .width = 80, .height = 60, .x = WINDOW_POS_UNDEFINED, .y = WINDOW_POS_UNDEFINED};
+#if defined(__APPLE__)
+    cfg.render = RENDER_VULKAN; /* a window with no drawing of its own: the native macOS backend has no OpenGL yet */
+#endif
     PlatformWindow *w = window_create(&cfg);
     if (w)
     {
@@ -224,7 +234,12 @@ static void test_parent(void)
         snprintf(want, sizeof want, "--attach=%lu", (unsigned long)(uintptr_t)window_native_handle(w, NATIVE_WINDOW));
         answer("", 0);
         CHECK(message_box(w, MESSAGE_INFO, "T", "m"));
+#if defined(__APPLE__)
+        /* the native handle there is an NSWindow, not a window id zenity could attach to: no attach is asked for */
+        CHECK(!logged("--modal") && !logged(want));
+#else
         CHECK(logged("--modal") && logged(want));
+#endif
         window_destroy(w);
     }
     platform_shutdown();
@@ -238,7 +253,7 @@ int main(void)
     test_url();
     test_parent();
     test_fallbacks();
-    const char *files[] = {"zenity", "kdialog", "xdg-open", "log.txt"};
+    const char *files[] = {"zenity", "kdialog", OPENER, "log.txt"};
     for (int i = 0; i < 4; i++)
     {
         char path[300];

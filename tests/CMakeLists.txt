@@ -131,6 +131,13 @@ if(PLATFORM_BACKEND_WAYLAND)
     endif()
 endif()
 
+# The dialog plumbing is the same on macOS (the fake backend and the native one alike): stand-in programs on PATH.
+if(APPLE)
+    add_executable(test_dialog test_dialog.c)
+    target_link_libraries(test_dialog PRIVATE platform)
+    add_test(NAME test_dialog COMMAND test_dialog)
+endif()
+
 if(PLATFORM_BACKEND_X11)
     add_executable(test_gl_x11 test_gl_x11.c)
     target_link_libraries(test_gl_x11 PRIVATE platform)

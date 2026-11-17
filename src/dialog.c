@@ -5,6 +5,8 @@
  * executables import no more than they did).
  * Web: alert() and confirm() for the boxes, window.open for URLs.
  * Other POSIX systems: zenity or kdialog, started without a shell.
+ * macOS: URLs go through /usr/bin/open; the boxes and file dialogs are not native yet
+ * (zenity or kdialog are used when installed, else an error says so).
  */
 #include "platform.h"
 #include "error_internal.h"
@@ -389,7 +391,13 @@ bool open_url(const char *url)
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+/* A library cannot refer to environ directly on macOS; the C runtime hands out its address. */
+#include <crt_externs.h>
+#define environ (*_NSGetEnviron())
+#else
 extern char **environ;
+#endif
 
 #define MAX_ARGS 64
 #define MAX_OUTPUT 65536
@@ -502,14 +510,19 @@ static Tool pick_tool(char *path, size_t cap)
         return TOOL_ZENITY;
     if (find_tool("kdialog", path, cap))
         return TOOL_KDIALOG;
+#if defined(__APPLE__)
+    /* TODO(mac phase 6): the native message boxes and file dialogs (dialog_cocoa.m) */
+    error_set("native dialogs are not implemented on macOS yet (no zenity or kdialog found either)");
+#else
     error_set("no dialog program found: install zenity or kdialog");
+#endif
     return TOOL_NONE;
 }
 
 /* The window id a dialog should attach to: X11 only (elsewhere the handle is not an XID). */
 static unsigned long parent_xid(PlatformWindow *parent)
 {
-#ifdef ZEN_BACKEND_WAYLAND
+#if defined(ZEN_BACKEND_WAYLAND) || defined(__APPLE__)
     (void)parent;
     return 0;
 #else
@@ -751,14 +764,23 @@ bool open_url(const char *url)
     if (bad_url(url))
         return error_set("invalid URL");
     char exe[512];
-    if (!find_tool("xdg-open", exe, sizeof exe))
+#if defined(__APPLE__)
+    /* /usr/bin/open hands the URL (or file) to Launch Services. PATH is looked at first, as for xdg-open, so a test can
+       put a stand-in of its own on it; on a normal PATH that is /usr/bin/open. */
+    const char *opener = "open";
+    if (!find_tool(opener, exe, sizeof exe))
+        snprintf(exe, sizeof exe, "%s", "/usr/bin/open");
+#else
+    const char *opener = "xdg-open";
+    if (!find_tool(opener, exe, sizeof exe))
         return error_set("xdg-open was not found");
+#endif
 
     /* Start it detached: some browsers keep xdg-open alive until they exit. A double
        fork leaves nothing to reap and nothing to wait for. */
     pid_t pid = fork();
     if (pid < 0)
-        return error_set("cannot start xdg-open");
+        return error_set("cannot start %s", opener);
     if (pid == 0)
     {
         pid_t grand = fork();
@@ -771,7 +793,7 @@ bool open_url(const char *url)
                 dup2(null, 1);
                 dup2(null, 2);
             }
-            char *argv[] = {"xdg-open", (char *)url, NULL};
+            char *argv[] = {(char *)opener, (char *)url, NULL};
             execv(exe, argv);
             _exit(127);
         }
@@ -781,7 +803,7 @@ bool open_url(const char *url)
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
     {
     }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? true : error_set("cannot start xdg-open");
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? true : error_set("cannot start %s", opener);
 }
 
 #endif
