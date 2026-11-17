@@ -462,8 +462,8 @@ static void pointer_in_window(BackendWindow *b, int *x, int *y)
 {
     NSPoint m = [NSEvent mouseLocation];
     NSRect c = content_rect(b);
-    *x = (int)floor(m.x - c.origin.x);
-    *y = (int)floor(c.origin.y + c.size.height - m.y);
+    *x = (int)floor(m.x - c.origin.x + 0.5);
+    *y = (int)floor(c.origin.y + c.size.height - m.y + 0.5);
 }
 
 static void push_mouse_move(BackendWindow *b, int x, int y, int dx, int dy)
@@ -1287,10 +1287,16 @@ static void modal_end(BackendWindow *b)
     key_text(owner, event);
 }
 
+/* The release of a key whose press never came to this window says nothing, and is not passed on: the menu took the press of
+   Cmd+Q, or the key went down while another window had the focus. */
 - (void)keyUp:(NSEvent *)event
 {
-    if (owner)
-        push_key(owner, [event keyCode], false, false, translate_mods([event modifierFlags]));
+    if (!owner)
+        return;
+    unsigned short code = [event keyCode];
+    if (code < KEYMAP_SIZE && !owner->held[code])
+        return;
+    push_key(owner, code, false, false, translate_mods([event modifierFlags]));
 }
 
 - (void)flagsChanged:(NSEvent *)event
