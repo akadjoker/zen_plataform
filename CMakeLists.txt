@@ -197,6 +197,9 @@ elseif(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
     # NSOpenGLContext of a window sits on and the shared context of gl_worker_* is made with. Carbon is included for the
     # virtual key codes (kVK_*), which are constants in a header: nothing of it is linked.
     target_link_libraries(platform PUBLIC "-framework Cocoa" "-framework CoreGraphics" "-framework OpenGL")
+    # A program that links zen_2d, zen_ui and platform names libplatform.a more than once (each of them needs it), which the
+    # Apple linker warns about; it is as harmless as it is on the other linkers, which say nothing.
+    target_link_options(platform INTERFACE "LINKER:-no_warn_duplicate_libraries")
 elseif(UNIX AND NOT PLATFORM_USE_FAKE AND NOT APPLE)
     find_package(X11 REQUIRED)
     find_package(Threads REQUIRED)
