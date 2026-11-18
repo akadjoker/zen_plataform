@@ -112,6 +112,15 @@ int confirm_box(PlatformWindow *parent, const char *title, const char *message)
 
 /* ---- file dialogs ---- */
 
+/* The path of a file URL in UTF-8 as the URL says it (the name as the file system reports it), not -fileSystemRepresentation, which
+   is the decomposed (NFD) form of it: see file_url_path in backend_cocoa.m, which a dropped file gets the same way. */
+static const char *file_url_path(NSURL *url)
+{
+    NSURL *path_url = [url filePathURL];
+    NSString *path = [(path_url ? path_url : url) path];
+    return path ? [path UTF8String] : NULL;
+}
+
 /* The extensions the filters allow: "*.png;*.jpg" is png and jpg. The panel has no list of filters to choose from, so the
    filters are one list of all their extensions; a filter that allows every file ("*" or "*.*") leaves the panel unrestricted. */
 static NSArray *allowed_extensions(const FileFilter *filters, int count)
@@ -222,7 +231,7 @@ static int run_panel(PanelKind kind, const char *title, const char *default_path
             bool fits = out && cap > 0;
             for (NSUInteger i = 0; i < [urls count] && fits; i++)
             {
-                const char *path = [[urls objectAtIndex:i] fileSystemRepresentation];
+                const char *path = file_url_path([urls objectAtIndex:i]);
                 size_t n = path ? strlen(path) : 0;
                 if (used + n + 1 > cap)
                 {

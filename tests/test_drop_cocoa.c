@@ -29,6 +29,30 @@ static id make_dragging_info(void)
     return msg_id(msg_id((id)cls, "alloc"), "init");
 }
 
+/* The URL of a path with the bytes of the path as they are: every byte that is not a letter, a digit or one of -._~/ is a percent
+   escape. The URL is made from that string (URLWithString:), not from the path (fileURLWithPath:), so that what the pasteboard
+   holds is certain to be the name the test means (a composed e-acute stays composed) and does not depend on whether NSURL puts a
+   path in some form of its own on the way: it is what the source of a drop says, and the program is told the same. */
+static id url_of_path(const char *path)
+{
+    char url[1024] = "file://";
+    size_t n = strlen(url);
+    static const char hex[] = "0123456789ABCDEF";
+    for (const unsigned char *p = (const unsigned char *)path; *p && n + 4 < sizeof url; p++)
+    {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || strchr("-._~/", *p))
+            url[n++] = (char)*p;
+        else
+        {
+            url[n++] = '%';
+            url[n++] = hex[*p >> 4];
+            url[n++] = hex[*p & 15];
+        }
+    }
+    url[n] = '\0';
+    return msg_id_id(ns_class("NSURL"), "URLWithString:", ns_string(url));
+}
+
 /* a pasteboard of its own with these paths as file URLs */
 static void fill(const char *const *paths, int n)
 {
@@ -36,8 +60,32 @@ static void fill(const char *const *paths, int n)
     msg_void(g_pasteboard, "clearContents");
     id urls = msg_id(ns_class("NSMutableArray"), "array");
     for (int i = 0; i < n; i++)
-        msg_void_id(urls, "addObject:", msg_id_id(ns_class("NSURL"), "fileURLWithPath:", ns_string(paths[i])));
+        msg_void_id(urls, "addObject:", url_of_path(paths[i]));
     MSG(unsigned char, id, SEL, id)(g_pasteboard, sel_registerName("writeObjects:"), urls);
+}
+
+static void print_hex(const char *label, const char *s)
+{
+    printf("  %s:", label);
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++)
+        printf(" %02X", *p);
+    printf("%s\n", s ? "" : " (null)");
+}
+
+/* What the pasteboard hands to whoever reads file URLs from it, in each of the ways AppKit has of turning one into a path, for a
+   failure to say where the name changed. */
+static void dump_pasteboard_urls(void)
+{
+    id urls = MSG(id, id, SEL, id, id)(g_pasteboard, sel_registerName("readObjectsForClasses:options:"),
+                                       msg_id_id(ns_class("NSArray"), "arrayWithObject:", ns_class("NSURL")), NULL);
+    unsigned long n = urls ? msg_ulong(urls, "count") : 0;
+    for (unsigned long i = 0; i < n; i++)
+    {
+        id u = MSG(id, id, SEL, unsigned long)(urls, sel_registerName("objectAtIndex:"), i);
+        print_hex("pasteboard URL, absoluteString", msg_cstr(msg_id(u, "absoluteString"), "UTF8String"));
+        print_hex("pasteboard URL, path", msg_cstr(msg_id(u, "path"), "UTF8String"));
+        print_hex("pasteboard URL, fileSystemRepresentation", msg_cstr(u, "fileSystemRepresentation"));
+    }
 }
 
 static unsigned long enter(PlatformWindow *w, id info)
@@ -87,7 +135,14 @@ int main(void)
     seen_reset();
     CHECK(drop(w, info));
     e = seen_nth(EVENT_WINDOW_DROP, 0);
-    CHECK(e && e->data.drop.count == 1 && strcmp(e->data.drop.paths[0], odd[0]) == 0);
+    bool odd_ok = e && e->data.drop.count == 1 && strcmp(e->data.drop.paths[0], odd[0]) == 0;
+    CHECK(odd_ok);
+    if (!odd_ok)
+    {
+        print_hex("wanted", odd[0]);
+        print_hex("got   ", e && e->data.drop.count == 1 ? e->data.drop.paths[0] : NULL);
+        dump_pasteboard_urls();
+    }
 
     /* a drag of something that is not files is refused: no operation, no event */
     g_pasteboard = msg_id(ns_class("NSPasteboard"), "pasteboardWithUniqueName");

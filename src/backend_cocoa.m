@@ -775,6 +775,20 @@ static NSArray *pasteboard_files(NSPasteboard *pb)
     return [pb readObjectsForClasses:[NSArray arrayWithObject:[NSURL class]] options:only_files];
 }
 
+/* The path a file URL names, in UTF-8, as the URL says it: the name as whoever made the URL (the Finder, a program) wrote it, which is
+   what the file system reports, with its Unicode form left as it is. Not -fileSystemRepresentation, which is the file system's own
+   form of the name and, as it is known to be (Apple's page does not say), the decomposed (NFD) one: a composed e-acute (U+00E9) comes
+   out as "e" and a combining accent (U+0301), bytes the program never saw and that do not compare equal to the name it knows;
+   test_drop_cocoa failed on exactly such a name in run 44285580324. On Linux a dropped path is the bytes of the URI, decoded, and no
+   more. Opening the file works with either form on APFS and HFS+. A file reference URL (file:///.file/id=...) is turned into the
+   path URL first. */
+static const char *file_url_path(NSURL *url)
+{
+    NSURL *path_url = [url filePathURL];
+    NSString *path = [(path_url ? path_url : url) path];
+    return path ? [path UTF8String] : NULL;
+}
+
 /* A drop of files raises EVENT_WINDOW_DROP with their paths (UTF-8), which stay valid until the next drop. */
 static bool drop_files(BackendWindow *b, NSPasteboard *pb)
 {
@@ -788,7 +802,7 @@ static bool drop_files(BackendWindow *b, NSPasteboard *pb)
         return false;
     for (NSUInteger i = 0; i < n; i++)
     {
-        const char *path = [[urls objectAtIndex:i] fileSystemRepresentation];
+        const char *path = file_url_path([urls objectAtIndex:i]);
         char *copy = path ? strdup(path) : NULL;
         if (copy)
             b->drop_paths[b->drop_count++] = copy;
