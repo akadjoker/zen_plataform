@@ -21,3 +21,6 @@ notes/
 .idea/
 compile_commands.json
 .cache/
+
+# what the macOS job writes (tools/mac_ci.sh)
+ci-logs/

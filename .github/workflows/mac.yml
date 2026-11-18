@@ -1,7 +1,20 @@
 name: macOS
 
 # The native macOS port is developed on branches called mac-*. The job runs only when it is started by hand (the Actions tab, or
-# `gh workflow run mac.yml --ref <branch>`): a push to those branches makes no run at all, so a push costs nothing.
+# `gh workflow run mac.yml --ref <branch>`): a push to those branches makes no run at all, so a push costs nothing. There is no other
+# trigger and there must not be one.
+#
+# The runs are few, so one run has to say everything there is to say:
+#  - every build goes on after an error (make -k, -ferror-limit=0) and shows the errors of ALL the files, then builds again one
+#    file at a time so that the errors of each file come out together (tools/mac_ci.sh build);
+#  - every test runs, with its own timeout, and a failed or hung test stops no other (tools/mac_ci.sh test; the tests print a
+#    line at a time, so a test that is stopped leaves what it had said);
+#  - every step goes on after a failure and the Verdict step at the end is what turns red;
+#  - the logs of everything, the images the tests wrote, the crash reports and a picture of the desktop are uploaded whatever
+#    happened (artifacts `logs` and `ui-frames`), and the job summary lists the errors and the failed tests.
+# The configurations, in the order of what they can show: the fake backend (no window; what the merge of main can have broken),
+# the native backend in Release, the native backend with ASan + UBSan, the fake backend with ASan + UBSan. One job with steps,
+# not a matrix: the runner minutes are the same and there is one machine to be acquired, not several.
 on:
   workflow_dispatch:
 
@@ -16,113 +29,193 @@ jobs:
       group: mac-${{ github.ref }}
       cancel-in-progress: true
     runs-on: macos-latest
-    timeout-minutes: 40
+    timeout-minutes: 100
     env:
       # warnings that come from the vendored stb headers are not ours
       WARN_FILTER: "stb_"
+      # -ferror-limit=0: clang stops after 20 errors in a file by default, and the first run has many to show
+      ZP_WARN: "-Wall -Wextra -ferror-limit=0"
+      # the compile commands are printed (the SDK, the deployment target and the ARC flag are in them)
+      VERBOSE: "1"
+      CMAKE_COLOR_DIAGNOSTICS: "OFF"
+      # the native tests need the window server, and say so when they have none (a failure, not a green run that tested nothing)
+      ZP_REQUIRE_DISPLAY: "1"
+      # the display mode switch of test_cocoa_window (the scale change); it is undone when that test ends
+      ZP_TEST_DISPLAY_MODES: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
     steps:
       - uses: actions/checkout@v4
 
       - name: Machine, OS and toolchain
         run: |
-          sw_vers
-          uname -a
-          sysctl -n machdep.cpu.brand_string || true
-          xcodebuild -version || true
-          xcrun clang --version
-          echo "SDK: $(xcrun --show-sdk-version)  $(xcrun --show-sdk-path)"
-          cmake --version | head -1
-          echo "GUI session: $(launchctl managername 2>&1)"
-          ps -ax -o pid,comm | grep -E "WindowServer|loginwindow|Finder" | grep -v grep || true
-          /usr/sbin/system_profiler -detailLevel mini SPDisplaysDataType 2>&1 | head -40 || true
+          mkdir -p ci-logs
+          {
+            echo "== runner image"
+            echo "ImageOS=${ImageOS:-} ImageVersion=${ImageVersion:-} RUNNER_OS=${RUNNER_OS:-} RUNNER_ARCH=${RUNNER_ARCH:-} RUNNER_NAME=${RUNNER_NAME:-}"
+            echo "== system"
+            sw_vers
+            uname -a
+            sysctl -n machdep.cpu.brand_string || true
+            sysctl hw.model hw.ncpu hw.memsize || true
+            echo "== Xcode and SDK"
+            xcode-select -p || true
+            xcodebuild -version || true
+            ls -d /Applications/Xcode* || true
+            echo "SDK: $(xcrun --sdk macosx --show-sdk-version)  $(xcrun --sdk macosx --show-sdk-path)"
+            xcrun --find clang
+            xcrun clang --version
+            echo "== build tools"
+            cmake --version | head -1
+            /usr/bin/make --version | head -1
+            ninja --version || true
+            brew --version | head -1 || true
+            echo "== session"
+            echo "GUI session: $(launchctl managername 2>&1)"
+            ps -ax -o pid,comm | grep -E "WindowServer|loginwindow|Finder|Dock$|SystemUIServer" | grep -v grep || true
+            /usr/sbin/system_profiler -detailLevel mini SPDisplaysDataType 2>&1 | head -40 || true
+            echo "== disk"
+            df -h . || true
+          } 2>&1 | tee ci-logs/machine.txt
 
-      # ---- phase 1: the library with no window ----
-      - name: Fake backend, build (-Wall -Wextra)
+      # ---- the fake backend: no window, nothing of AppKit; what the merge of main (the threads' new names) can have broken ----
+      - name: Fake backend, Release, build
         id: fake_build
         continue-on-error: true
-        run: |
-          cmake -S . -B build-fake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DPLATFORM_USE_FAKE=ON \
-                -DCMAKE_C_FLAGS="-Wall -Wextra"
-          cmake --build build-fake -j4 -- -k 2>&1 | tee build-fake.log
-          test "${PIPESTATUS[0]}" = 0
-      - name: Fake backend, warnings of our own code
+        timeout-minutes: 10
+        run: tools/mac_ci.sh build fake -DCMAKE_BUILD_TYPE=Release -DPLATFORM_USE_FAKE=ON -DCMAKE_C_FLAGS="$ZP_WARN" -DCMAKE_OBJC_FLAGS="$ZP_WARN"
+      - name: Fake backend, Release, warnings of our own code
         id: fake_warn
         continue-on-error: true
-        run: |
-          if grep "warning:" build-fake.log | grep -v "$WARN_FILTER"; then echo "warnings above"; exit 1; fi
-          echo "no warnings"
-      - name: Fake backend, ctest
+        run: tools/mac_ci.sh warnings fake
+      - name: Fake backend, Release, every test
         id: fake_test
         continue-on-error: true
-        run: ctest --test-dir build-fake --output-on-failure --timeout 120
+        timeout-minutes: 10
+        run: tools/mac_ci.sh test fake
 
-      - name: Fake backend + ASan/UBSan, build
-        id: fake_asan_build
-        continue-on-error: true
-        run: |
-          cmake -S . -B build-fake-asan -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_USE_FAKE=ON \
-                -DPLATFORM_SANITIZE=ON -DCMAKE_C_FLAGS="-Wall -Wextra"
-          cmake --build build-fake-asan -j4 -- -k 2>&1 | tee build-fake-asan.log
-          test "${PIPESTATUS[0]}" = 0
-      - name: Fake backend + ASan/UBSan, ctest
-        id: fake_asan_test
-        continue-on-error: true
-        run: ctest --test-dir build-fake-asan --output-on-failure --timeout 240
-
-      # ---- phase 2: the native backend (AppKit), on the runner's own window server ----
-      - name: Native backend, build (-Wall -Wextra)
+      # ---- the native backend (AppKit), on the runner's own window server ----
+      - name: Native backend, Release, build
         id: native_build
         continue-on-error: true
-        run: |
-          cmake -S . -B build-native -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_C_FLAGS="-Wall -Wextra" -DCMAKE_OBJC_FLAGS="-Wall -Wextra"
-          cmake --build build-native -j4 -- -k 2>&1 | tee build-native.log
-          test "${PIPESTATUS[0]}" = 0
-      - name: Native backend, warnings of our own code
+        timeout-minutes: 15
+        run: tools/mac_ci.sh build native -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$ZP_WARN" -DCMAKE_OBJC_FLAGS="$ZP_WARN"
+      - name: Native backend, Release, warnings of our own code
         id: native_warn
         continue-on-error: true
+        run: tools/mac_ci.sh warnings native
+
+      # the library's names against Apple's headers, and nothing else: it is the first test, and it needs no window
+      - name: Native backend, Release, names against Apple's headers (test_cocoa_names)
+        id: native_names
+        continue-on-error: true
+        timeout-minutes: 5
+        run: ctest --test-dir build-native -R '^test_cocoa_names$' -V --no-tests=error --timeout 60
+
+      # MoltenVK and the Vulkan loader, so that test_vulkan_cocoa can try a real instance and surface (the loader looks in the
+      # Homebrew folders, which vulkan.c knows). Information only: the runner may have no GPU for it, and the test says so.
+      - name: MoltenVK and Vulkan loader (Homebrew)
+        id: moltenvk
+        continue-on-error: true
+        timeout-minutes: 8
         run: |
-          if grep "warning:" build-native.log | grep -v "$WARN_FILTER"; then echo "warnings above"; exit 1; fi
-          echo "no warnings"
-      - name: Native backend, ctest
+          brew install molten-vk vulkan-loader 2>&1 | tail -n 30
+          P=$(brew --prefix)
+          ls -l "$P"/lib/libvulkan* "$P"/lib/libMoltenVK* 2>&1 | head
+          ls -l "$P"/etc/vulkan/icd.d/ 2>&1 | head
+          if [ -f "$P/etc/vulkan/icd.d/MoltenVK_icd.json" ]; then
+            echo "VK_ICD_FILENAMES=$P/etc/vulkan/icd.d/MoltenVK_icd.json" >> "$GITHUB_ENV"
+            echo "VK_DRIVER_FILES=$P/etc/vulkan/icd.d/MoltenVK_icd.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: Native backend, Release, every test
         id: native_test
         continue-on-error: true
-        env:
-          ZP_REQUIRE_DISPLAY: "1"
-        run: ctest --test-dir build-native --output-on-failure --timeout 120
-      # the window, GL, pixel, input and toolkit tests again with their own output (what each checked, the numbers it printed)
-      - name: Native backend, window test output
-        id: native_window
-        continue-on-error: true
-        env:
-          ZP_REQUIRE_DISPLAY: "1"
-          ZP_TEST_DISPLAY_MODES: "1"
-        run: ctest --test-dir build-native -R cocoa -V --timeout 120
+        timeout-minutes: 25
+        run: tools/mac_ci.sh test native
 
       - name: Native backend + ASan/UBSan, build
         id: native_asan_build
         continue-on-error: true
-        run: |
-          cmake -S . -B build-native-asan -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_SANITIZE=ON \
-                -DCMAKE_C_FLAGS="-Wall -Wextra" -DCMAKE_OBJC_FLAGS="-Wall -Wextra"
-          cmake --build build-native-asan -j4 -- -k 2>&1 | tee build-native-asan.log
-          test "${PIPESTATUS[0]}" = 0
-      - name: Native backend + ASan/UBSan, ctest
+        timeout-minutes: 15
+        run: tools/mac_ci.sh build native-asan -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_SANITIZE=ON -DCMAKE_C_FLAGS="$ZP_WARN" -DCMAKE_OBJC_FLAGS="$ZP_WARN"
+      - name: Native backend + ASan/UBSan, warnings of our own code
+        id: native_asan_warn
+        continue-on-error: true
+        run: tools/mac_ci.sh warnings native-asan
+      - name: Native backend + ASan/UBSan, every test
         id: native_asan_test
         continue-on-error: true
-        env:
-          ZP_REQUIRE_DISPLAY: "1"
-        run: ctest --test-dir build-native-asan --output-on-failure --timeout 240
-      - name: Native backend + ASan/UBSan, window test output
-        id: native_asan_window
+        timeout-minutes: 30
+        run: tools/mac_ci.sh test native-asan
+
+      - name: Fake backend + ASan/UBSan, build
+        id: fake_asan_build
         continue-on-error: true
-        env:
-          ZP_REQUIRE_DISPLAY: "1"
-          ZP_TEST_DISPLAY_MODES: "1"
-        run: ctest --test-dir build-native-asan -R cocoa -V --timeout 240
+        timeout-minutes: 10
+        run: tools/mac_ci.sh build fake-asan -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_USE_FAKE=ON -DPLATFORM_SANITIZE=ON -DCMAKE_C_FLAGS="$ZP_WARN" -DCMAKE_OBJC_FLAGS="$ZP_WARN"
+      - name: Fake backend + ASan/UBSan, every test
+        id: fake_asan_test
+        continue-on-error: true
+        timeout-minutes: 10
+        run: tools/mac_ci.sh test fake-asan
+
+      # information only (not in the verdict): what the leaks tool finds in the window test after its 300 create/destroy rounds
+      - name: Native backend, leaks report
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          cd build-native/tests
+          leaks --atExit -- ./test_cocoa_window > ../../ci-logs/leaks.log 2>&1 || true
+          # the summary and what the tool says about each leak, up to the list of images it prints last
+          sed -n '1,/^Binary Images/p' ../../ci-logs/leaks.log | grep -v "^ *0x[0-9a-f]* - " | cut -c1-200 | head -150
+          echo "--- leaks that name this library or AppKit objects of a window:"
+          grep -E "Zen[A-Z]|backend_cocoa|NSWindow|NSTrackingArea|NSThemeFrame" ../../ci-logs/leaks.log | cut -c1-200 | head -40 || true
+
+      # information only (not in the verdict): the library as a dylib, which exports only the public API
+      - name: Native backend, shared library build
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          cmake -S . -B build-shared -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+                -DPLATFORM_BUILD_TESTS=OFF -DCMAKE_C_FLAGS="$ZP_WARN" -DCMAKE_OBJC_FLAGS="$ZP_WARN"
+          cmake --build build-shared -j4 -- -k 2>&1 | tee ci-logs/shared.build.log | grep -E "error|warning:|Linking|Built target platform" | grep -v stb_ | head -30
+          ls -l build-shared/libplatform.dylib
+          nm -gU build-shared/libplatform.dylib | grep -c " T _" || true
+          nm -gU build-shared/libplatform.dylib | grep -E " T _(backend_|zen_)" | head -5 || true
+
+      # what a crash leaves (the system's reports of the processes of this run), and a picture of the desktop as the tests left it
+      # (a dialog that is still open shows here); needs no permission to be asked for, and the picture may be black without one
+      - name: Crash reports and the desktop
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p ci-logs/crash-reports
+          for d in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+            ls -l "$d" 2>&1 | tail -n 20
+            find "$d" -type f -mmin -180 \( -name 'test_*' -o -name 'hello*' -o -name '*.ips' -o -name '*.crash' \) -exec cp {} ci-logs/crash-reports/ \; 2>/dev/null || true
+          done
+          ls -l ci-logs/crash-reports
+          screencapture -x ci-logs/desktop-at-the-end.png 2>&1 || true
+          mkdir -p ci-logs/test-images
+          for d in build-native build-native-asan; do
+            [ -d "$d/test-images" ] && cp "$d"/test-images/*.png ci-logs/test-images/ 2>/dev/null || true
+          done
+          ls ci-logs | head -80
+
+      # the complete logs (configure, build, the sequential pass with the errors, every test's output), the crash reports and the picture
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 30
 
       # the frames test_ui_cocoa wrote (the toolkit's software and GL renderers, and what the window server shows of each)
-      - name: Frames of the toolkit, as images
+      - name: Upload the frames of the toolkit, as images
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -131,47 +224,25 @@ jobs:
             build-native/test-images/*.png
             build-native-asan/test-images/*.png
           if-no-files-found: warn
-
-      # information only (not in the verdict): what the leaks tool finds in the window test after its 300 create/destroy rounds
-      - name: Native backend, leaks report
-        continue-on-error: true
-        timeout-minutes: 6
-        env:
-          ZP_REQUIRE_DISPLAY: "1"
-        run: |
-          cd build-native/tests
-          leaks --atExit -- ./test_cocoa_window > ../../leaks.log 2>&1 || true
-          # the summary and what the tool says about each leak, up to the list of images it prints last
-          sed -n '1,/^Binary Images/p' ../../leaks.log | grep -v "^ *0x[0-9a-f]* - " | cut -c1-200 | head -150
-          echo "--- leaks that name this library or AppKit objects of a window:"
-          grep -E "Zen[A-Z]|backend_cocoa|NSWindow|NSTrackingArea|NSThemeFrame" ../../leaks.log | cut -c1-200 | head -40 || true
-
-      # information only (not in the verdict): the library as a dylib, which exports only the public API
-      - name: Native backend, shared library build
-        continue-on-error: true
-        run: |
-          cmake -S . -B build-shared -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-                -DPLATFORM_BUILD_TESTS=OFF -DCMAKE_C_FLAGS="-Wall -Wextra" -DCMAKE_OBJC_FLAGS="-Wall -Wextra"
-          cmake --build build-shared -j4 2>&1 | grep -E "error|warning:|Linking|Built target platform" | grep -v stb_ | head -30
-          ls -l build-shared/libplatform.dylib
-          nm -gU build-shared/libplatform.dylib | grep -c " T _" || true
-          nm -gU build-shared/libplatform.dylib | grep -E " T _(backend_|zen_)" | head -5 || true
+          retention-days: 30
 
       - name: Verdict
         if: always()
         run: |
+          tools/mac_ci.sh summary | tee -a "$GITHUB_STEP_SUMMARY"
           failed=0
           check() { echo "$1: $2"; [ "$2" = success ] || failed=1; }
-          check "fake build         " "${{ steps.fake_build.outcome }}"
-          check "fake warnings      " "${{ steps.fake_warn.outcome }}"
-          check "fake ctest         " "${{ steps.fake_test.outcome }}"
-          check "fake asan build    " "${{ steps.fake_asan_build.outcome }}"
-          check "fake asan ctest    " "${{ steps.fake_asan_test.outcome }}"
-          check "native build       " "${{ steps.native_build.outcome }}"
-          check "native warnings    " "${{ steps.native_warn.outcome }}"
-          check "native ctest       " "${{ steps.native_test.outcome }}"
-          check "native window test " "${{ steps.native_window.outcome }}"
-          check "native asan build  " "${{ steps.native_asan_build.outcome }}"
-          check "native asan ctest  " "${{ steps.native_asan_test.outcome }}"
-          check "native asan window " "${{ steps.native_asan_window.outcome }}"
+          check "fake build            " "${{ steps.fake_build.outcome }}"
+          check "fake warnings         " "${{ steps.fake_warn.outcome }}"
+          check "fake tests            " "${{ steps.fake_test.outcome }}"
+          check "native build          " "${{ steps.native_build.outcome }}"
+          check "native warnings       " "${{ steps.native_warn.outcome }}"
+          check "native names test     " "${{ steps.native_names.outcome }}"
+          check "native tests          " "${{ steps.native_test.outcome }}"
+          check "native asan build     " "${{ steps.native_asan_build.outcome }}"
+          check "native asan warnings  " "${{ steps.native_asan_warn.outcome }}"
+          check "native asan tests     " "${{ steps.native_asan_test.outcome }}"
+          check "fake asan build       " "${{ steps.fake_asan_build.outcome }}"
+          check "fake asan tests       " "${{ steps.fake_asan_test.outcome }}"
+          echo "information only: MoltenVK ${{ steps.moltenvk.outcome }}"
           exit $failed
