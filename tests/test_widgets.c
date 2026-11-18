@@ -381,6 +381,60 @@ static void test_listbox_selection(PlatformWindow *w, UiContext *ui)
     CHECK(rect_count >= 1);
 }
 
+/* A list box in a panel that is shorter than the list wants (a cell of one row and a hint of six rows: 168 high in a panel of
+   180 that has the label above it): what the rows draw is clipped to the panel too, so the last lines are not drawn under
+   its bottom edge, and a click on the part of the list that is outside the panel selects nothing. */
+static void widgets_listbox_in_panel(UiContext *ui)
+{
+    static const char *items[] = {"Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta"};
+    if (zui_group_begin(ui, "panel", zui_rect(20, 20, 300, 180), ZUI_GROUP_BORDER))
+    {
+        zui_row(ui, 24, 1);
+        zui_label(ui, "Panel");
+        zui_row(ui, 28, 1);
+        g_list_changed = zui_listbox(ui, "plist", items, 8, &g_list_selected, 6);
+        zui_group_end(ui);
+    }
+}
+
+static void test_listbox_stays_in_panel(PlatformWindow *w, UiContext *ui)
+{
+    g_list_selected = -1;
+    g_list_changed = -1;
+    const UiDrawList *dl = run_frame(w, ui, widgets_listbox_in_panel);
+    int texts = 0, outside = 0;
+    for (int i = 0; i < dl->count; i++)
+    {
+        const UiCmd *c = &dl->cmds[i];
+        if (c->type != UI_CMD_TEXT)
+            continue;
+        texts++;
+        /* every text of the panel is clipped to the panel (20, 20, 300, 180) */
+        if (c->clip.x < 20 || c->clip.y < 20 || c->clip.x + c->clip.w > 320 || c->clip.y + c->clip.h > 200)
+            outside++;
+    }
+    CHECK(texts >= 6); /* the label and the rows */
+    CHECK(outside == 0);
+
+    /* a click where the list is drawn but the panel is not (y = 215, the sixth row of the list, under the panel) selects nothing */
+    fake_mouse_move(w, 100, 215);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    run_frame(w, ui, widgets_listbox_in_panel);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    fake_mouse_move(w, 100, 215);
+    run_frame(w, ui, widgets_listbox_in_panel);
+    CHECK(g_list_selected == -1);
+
+    /* and one inside it still does (the second row: the list starts at 20 + 10 + 24 + 6 = 60, a row is 28) */
+    fake_mouse_move(w, 100, 60 + 28 + 14);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    run_frame(w, ui, widgets_listbox_in_panel);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    fake_mouse_move(w, 100, 60 + 28 + 14);
+    run_frame(w, ui, widgets_listbox_in_panel);
+    CHECK(g_list_selected == 1);
+}
+
 /* ------------------------------------------------------------------ combo -- */
 
 static int  g_combo_selected;
@@ -954,6 +1008,7 @@ int main(void)
         test_progress_bar(w, ui);
         test_selectable_click(w, ui);
         test_listbox_selection(w, ui);
+        test_listbox_stays_in_panel(w, ui);
         test_combo_open(w, ui);
         test_toggle_group_switch(w, ui);
         test_icon_command(w, ui);
@@ -1007,6 +1062,7 @@ int main(void)
         test_progress_bar(w, ui);
         test_selectable_click(w, ui);
         test_listbox_selection(w, ui);
+        test_listbox_stays_in_panel(w, ui);
         test_combo_open(w, ui);
         test_toggle_group_switch(w, ui);
         test_icon_command(w, ui);
