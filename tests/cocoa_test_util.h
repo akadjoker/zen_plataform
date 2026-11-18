@@ -192,6 +192,35 @@ UNUSED_FN void pump_frames(PlatformWindow *w, int n)
     }
 }
 
+/* What was seen since the last reset, one entry for each event, for a failure to say what happened and not only that it did. */
+UNUSED_FN void dump_seen(const char *when)
+{
+    printf("  events seen %s (%d):", when, g_seen_count);
+    for (int i = 0; i < g_seen_count; i++)
+    {
+        const Event *e = &g_seen[i];
+        switch (e->type)
+        {
+        case EVENT_MOUSE_BUTTON:
+            printf(" [button %d %s at %d,%d]", e->data.mouse.button, e->data.mouse.down ? "down" : "up", e->data.mouse.x, e->data.mouse.y);
+            break;
+        case EVENT_MOUSE_MOVE:
+            printf(" [move to %d,%d]", e->data.mouse.x, e->data.mouse.y);
+            break;
+        case EVENT_WINDOW_FOCUS:
+            printf(" [focus %s]", e->data.focus.gained ? "gained" : "LOST");
+            break;
+        case EVENT_KEY:
+            printf(" [key %d %s]", e->data.key.key, e->data.key.down ? "down" : "up");
+            break;
+        default:
+            printf(" [event type %d]", (int)e->type);
+            break;
+        }
+    }
+    printf("%s\n", g_seen_count ? "" : " none");
+}
+
 UNUSED_FN int seen_count(EventType type)
 {
     int n = 0;

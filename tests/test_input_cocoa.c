@@ -68,10 +68,42 @@ static void send_key(bool down, unsigned short code, unsigned long flags, const 
     pump_frame(g_w);
 }
 
+/* The two Control keys never go through the application's queue, in either pass: AppKit looks at the flags of the events that pass
+   through NSApplication for a double tap of Control, which is the system's default shortcut for Dictation, and the two taps of
+   test_modifiers (the left key, then the right, a few milliseconds apart) put up "Do you want to enable Dictation?" in the middle of
+   the run. That window belongs to another application and took the key window from the test's: in run 44285580324 the posted pass of
+   the Release build lost its mouse buttons just after the modifiers (the focus loss lets go of the buttons), the ASan build, which
+   ran after the dialog was up, passed, and the desktop picture at the end of that run shows the dialog. What the library does with a
+   modifier is the same for every key of the table, and Shift, Option and Command are still posted; the Control events go to the
+   view, which is all the routing they would have added. */
+static bool is_control_key(unsigned short code)
+{
+    return code == 0x3B || code == 0x3E;
+}
+
 static void send_flags(unsigned short code, unsigned long flags)
 {
-    deliver(event_key(g_w, NS_FLAGS_CHANGED, code, flags, "", false));
+    id event = event_key(g_w, NS_FLAGS_CHANGED, code, flags, "", false);
+    if (g_routed && !is_control_key(code))
+        post(event);
+    else
+        to_view(g_w, "flagsChanged:", event);
     pump_frame(g_w);
+}
+
+static bool make_key_window(void);
+
+/* The posted events need the test window to be the key one (the first responder of the key window gets the keys, and a
+   window that is not active does not take a click as one); when something took it, say so and get it back, which is the
+   precondition and not an allowance: the numbers that follow say what the window was. */
+static void need_key_window(const char *before)
+{
+    if (!g_routed || (window_is_focused(g_w) && msg_bool(ns_window(g_w), "isKeyWindow")))
+        return;
+    printf("  note: the test window was not the key window before %s (focused %d, isKeyWindow %d, NSApp isActive %d): it is made the key window again\n",
+           before, (int)window_is_focused(g_w), (int)msg_bool(ns_window(g_w), "isKeyWindow"), (int)msg_bool(ns_app(), "isActive"));
+    make_key_window();
+    seen_reset();
 }
 
 static const Event *only_key(void)
@@ -465,6 +497,7 @@ static void test_focus_loss(void)
 
 static void test_moves(void)
 {
+    need_key_window("the moves");
     int cw, ch;
     window_get_size(g_w, &cw, &ch);
     /* the four corners, the middle, and out of the window on every side: positions in points from the top left, as
@@ -506,21 +539,41 @@ static void test_buttons(void)
         int button;
         unsigned long down, up;
     } basic[] = {{MOUSE_LEFT, NS_LEFT_DOWN, NS_LEFT_UP}, {MOUSE_RIGHT, NS_RIGHT_DOWN, NS_RIGHT_UP}};
+    need_key_window("the buttons");
     for (size_t i = 0; i < 2; i++)
     {
+        const char *name = i == 0 ? "left" : "right";
         seen_reset();
         deliver(event_mouse(g_w, basic[i].down, 33, 44, 0, 1));
         pump_frame(g_w);
         const Event *e = button_event(0);
-        CHECK(e && seen_count(EVENT_MOUSE_BUTTON) == 1 && e->data.mouse.button == basic[i].button && e->data.mouse.down &&
-              e->data.mouse.x == 33 && e->data.mouse.y == 44);
-        CHECK(mouse_button_down(g_w, basic[i].button) && mouse_button_pressed(g_w, basic[i].button));
+        bool came = e && seen_count(EVENT_MOUSE_BUTTON) == 1 && e->data.mouse.button == basic[i].button && e->data.mouse.down &&
+                    e->data.mouse.x == 33 && e->data.mouse.y == 44;
+        bool held = mouse_button_down(g_w, basic[i].button) && mouse_button_pressed(g_w, basic[i].button);
+        CHECK(came);
+        CHECK(held);
+        if (!came || !held)
+        {
+            printf("  %s button down at 33,44 (button %d): event %s, polled down %d pressed %d; window focused %d, key %d\n", name,
+                   basic[i].button, came ? "as wanted" : "NOT as wanted", (int)mouse_button_down(g_w, basic[i].button),
+                   (int)mouse_button_pressed(g_w, basic[i].button), (int)window_is_focused(g_w), (int)msg_bool(ns_window(g_w), "isKeyWindow"));
+            dump_seen("after the press");
+        }
         seen_reset();
         deliver(event_mouse(g_w, basic[i].up, 33, 44, 0, 1));
         pump_frame(g_w);
         e = button_event(0);
-        CHECK(e && e->data.mouse.button == basic[i].button && !e->data.mouse.down && e->data.mouse.x == 33 && e->data.mouse.y == 44);
-        CHECK(!mouse_button_down(g_w, basic[i].button) && mouse_button_released(g_w, basic[i].button));
+        bool went = e && e->data.mouse.button == basic[i].button && !e->data.mouse.down && e->data.mouse.x == 33 && e->data.mouse.y == 44;
+        bool let_go = !mouse_button_down(g_w, basic[i].button) && mouse_button_released(g_w, basic[i].button);
+        CHECK(went);
+        CHECK(let_go);
+        if (!went || !let_go)
+        {
+            printf("  %s button up at 33,44 (button %d): event %s, polled down %d released %d; window focused %d, key %d\n", name,
+                   basic[i].button, went ? "as wanted" : "NOT as wanted", (int)mouse_button_down(g_w, basic[i].button),
+                   (int)mouse_button_released(g_w, basic[i].button), (int)window_is_focused(g_w), (int)msg_bool(ns_window(g_w), "isKeyWindow"));
+            dump_seen("after the release");
+        }
     }
 
     /* the middle button and the two side ones are the "other" buttons of AppKit, numbered 2, 3 and 4; a made-up event of
@@ -562,6 +615,7 @@ static void test_buttons(void)
 /* A drag is moves with a button down, and goes on outside the window: positions past its edges are told as they are. */
 static void test_drags(void)
 {
+    need_key_window("the drags");
     deliver(event_mouse(g_w, NS_LEFT_DOWN, 50, 50, 0, 1));
     pump_frame(g_w);
     seen_reset();
