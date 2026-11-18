@@ -203,6 +203,18 @@ if(PLATFORM_BACKEND_X11)
 endif()
 
 
+# The library's names against Apple's: platform.h and the internal headers included after Cocoa, Carbon, OpenGL, QuartzCore and
+# Mach in an Objective-C file, with a thread, a mutex and a condition variable of the library. It needs no window, so it is
+# built and run for the fake backend on macOS too (OBJC is enabled in the top CMakeLists.txt).
+if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    add_executable(test_cocoa_names test_cocoa_names.m)
+    set_source_files_properties(test_cocoa_names.m PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
+    target_include_directories(test_cocoa_names PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_cocoa_names PRIVATE platform "-framework Cocoa" "-framework CoreGraphics" "-framework OpenGL" "-framework QuartzCore")
+    add_test(NAME test_cocoa_names COMMAND test_cocoa_names)
+    set_tests_properties(test_cocoa_names PROPERTIES TIMEOUT 60)
+endif()
+
 # The macOS window, events and monitors, on the window server of a graphical session.
 if(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
     add_executable(test_cocoa_window test_cocoa_window.c)

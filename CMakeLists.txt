@@ -8,6 +8,12 @@ endif()
 
 project(platform LANGUAGES C)
 
+# macOS: the native backend is Objective-C, and so is the test that checks the library's names against Apple's headers
+# (tests/test_cocoa_names.m, which every macOS build has, the fake backend's too).
+if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    enable_language(OBJC)
+endif()
+
 # Static CRT: executables and the library depend on no runtime DLL (vcruntime, ...).
 # MSVC is only defined once the compiler is known, so this goes after project().
 if(MSVC)
@@ -54,7 +60,6 @@ elseif(APPLE)
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         message(FATAL_ERROR "No native iOS backend; configure with -DPLATFORM_USE_FAKE=ON for a headless build")
     endif()
-    enable_language(OBJC)
     # dialog_cocoa.m: the message boxes, the file dialogs and open_url with the system's own (dialog.c leaves them to it)
     set(BACKEND_SRC src/backend_cocoa.m src/dialog_cocoa.m)
     set(PLATFORM_BACKEND_COCOA ON)
