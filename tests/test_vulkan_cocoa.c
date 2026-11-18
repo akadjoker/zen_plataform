@@ -4,8 +4,9 @@
  * has none, so there it is said and skipped), a real instance and a surface made on a window, whose view must then have a
  * CAMetalLayer as its layer, as large as the view and at the display's scale, that follows a resize.
  *
- * WRITTEN, NEVER COMPILED OR RUN: made when no run of the macOS job was allowed (see docs/MAC-PORT.md); checked only for
- * syntax against stand-in headers. Skips (77) without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
+ * Run on a macOS runner (run 44285580324): 18 of 18 checks, Release and ASan; with the Vulkan loader and MoltenVK from Homebrew
+ * (the job installs them) a real instance and a surface were made, and the view's layer was a CAMetalLayer. Skips (77) without a
+ * graphical session, unless ZP_REQUIRE_DISPLAY is set.
  */
 #include "cocoa_test_util.h"
 

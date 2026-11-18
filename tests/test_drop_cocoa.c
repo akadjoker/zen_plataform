@@ -3,8 +3,9 @@
  * NSDraggingInfo (a class made at run time that answers draggingPasteboard with a pasteboard of file URLs) given to the view's
  * NSDraggingDestination methods, as AppKit gives it a real one; the dragging of a real file from the Finder cannot be made here.
  *
- * WRITTEN, NEVER COMPILED OR RUN: made when no run of the macOS job was allowed (see docs/MAC-PORT.md); checked only for
- * syntax against stand-in headers. Skips (77) without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
+ * Run on a macOS runner (run 44285580324): 108 of 109 checks; the one that failed was the path with a composed accent (the backend
+ * handed over the decomposed form: fixed after that run, not run again). Skips (77) without a graphical session, unless
+ * ZP_REQUIRE_DISPLAY is set.
  */
 #include "cocoa_test_util.h"
 

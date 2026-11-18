@@ -5,8 +5,8 @@
  * method itself (a Japanese or Chinese keyboard, the dead keys of the layout) is not started. What the program sees is the
  * library's own: EVENT_CHAR, EVENT_TEXT_EDIT, char_get_pressed, window_text_composition.
  *
- * WRITTEN, NEVER COMPILED OR RUN: this file was made when no run of the macOS job was allowed (see docs/MAC-PORT.md); it was
- * checked only for syntax against stand-in headers. Skips (77) without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
+ * Run on a macOS runner (run 44285580324): 81 of 81 checks, Release and ASan. The input method itself was not started. Skips (77)
+ * without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
  */
 #include "cocoa_test_util.h"
 

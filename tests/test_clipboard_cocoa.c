@@ -5,8 +5,9 @@
  * characters), PNG (an image round trip), text/uri-list (file URLs), a custom MIME type (bytes with NULs), several
  * representations of one content, clearing, replacing, and the NUL the library puts after what it returns.
  *
- * WRITTEN, NEVER COMPILED OR RUN: made when no run of the macOS job was allowed (see docs/MAC-PORT.md); checked only for
- * syntax against stand-in headers. Skips (77) without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
+ * Run on a macOS runner (run 44285580324): text, PNG and the URI list passed; the custom MIME type failed (NSPasteboard takes only
+ * UTIs: fixed after that run with src/pasteboard_type.h, not run again). Skips (77) without a graphical session, unless
+ * ZP_REQUIRE_DISPLAY is set.
  */
 #include "cocoa_test_util.h"
 

@@ -7,8 +7,9 @@
  * options, parentWindow). A real trackpad, the system's drag of a window by a title bar, and what the Dock shows cannot be made
  * here; the gesture events are made-up objects with the methods the view reads (phase, magnification, rotation, deltaX, deltaY).
  *
- * WRITTEN, NEVER COMPILED OR RUN: made when no run of the macOS job was allowed (see docs/MAC-PORT.md); checked only for
- * syntax against stand-in headers. Skips (77) without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
+ * Run on a macOS runner (run 44285580324): 100 of 102 checks; the two that failed were the level of a popup and of a tooltip (AppKit
+ * resets the level of a child window to its parent's: fixed in the backend after that run, not run again). Skips (77) without a
+ * graphical session, unless ZP_REQUIRE_DISPLAY is set.
  */
 #include "cocoa_test_util.h"
 

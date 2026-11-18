@@ -24,9 +24,9 @@
  * software surface drawn from the view's drawRect. Keyboard and mouse: the view turns NSEvents into the library's events;
  * the key table is built from Apple's virtual key codes (kVK_*).
  *
- * Everything the backend interface has is here. Nothing of the macOS backend has been seen working beyond what docs/MAC-PORT.md
- * lists as run on a Mac: the code of the later phases (text input, clipboard and drop, window modes and looks, trackpad gestures,
- * the Vulkan surface) was written when no run was allowed, and is marked so there.
+ * Everything the backend interface has is here, and has been compiled and run on a macOS runner (runs 44160945847 and
+ * 44285580324; docs/MAC-PORT.md says what each phase's tests showed there, what a runner cannot show, and the checks that failed
+ * in the second run and were fixed after it, which are marked there as not run again).
  */
 /* Apple has deprecated OpenGL since macOS 10.14 and says so for every call; this file is the only one that uses it. */
 #define GL_SILENCE_DEPRECATION 1

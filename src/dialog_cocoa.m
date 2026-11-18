@@ -8,7 +8,9 @@
  * has to be used from the main thread, where AppKit lives. `parent` only decides where the dialog comes from: a modal panel is
  * the application's, not a sheet of one window.
  *
- * WRITTEN, NEVER COMPILED OR RUN: made when no run of the macOS job was allowed (see docs/MAC-PORT.md).
+ * Compiled and run on a macOS runner (run 44285580324, test_dialog_cocoa, 20 of 20 checks, Release and ASan): every dialog opens
+ * and is ended by an abort timer, and a cancel is no error. What a person picks in a panel was not tried. The paths a panel
+ * returns are the URL's path as it says it (file_url_path), changed after that run and not run again (docs/MAC-PORT.md).
  */
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h> /* CGSessionCopyCurrentDictionary */
