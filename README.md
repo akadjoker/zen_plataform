@@ -60,7 +60,8 @@ Objective-C over AppKit (`src/backend_cocoa.m`, the only file of the library tha
 window, OpenGL, the pixel surface, the keyboard and mouse, text input, the clipboard, drops, dialogs, window modes and looks, Vulkan and
 the toolkit's frames (`test_cocoa_window`, `test_gl_cocoa`, `test_gl_worker_cocoa`, `test_pixels_cocoa`, `test_input_cocoa`,
 `test_text_cocoa`, `test_clipboard_cocoa`, `test_drop_cocoa`, `test_dialog_cocoa`, `test_window_cocoa`, `test_vulkan_cocoa`,
-`test_ui_cocoa`) need a graphical session and skip without one;
+`test_ui_cocoa`) need a graphical session and skip without one; `test_cocoa_names` (the library's names against the headers of Cocoa, Carbon,
+OpenGL, QuartzCore and Mach, with a thread, a mutex and a condition variable) needs none and is built by the fake backend on macOS too;
 `test_ui_cocoa` writes the toolkit's software and GL frames as PNG files into `test-images/` of the build folder. There is no Mac among the machines it is developed
 on, so `.github/workflows/mac.yml` builds and tests it on a GitHub macOS runner. It runs only when it is started by hand (the Actions tab or `gh workflow run mac.yml --ref <branch>`; a push makes no run). `docs/MAC-PORT.md` says where the port stands (the
 phases, what the runner showed, what could not be verified, the next steps).
