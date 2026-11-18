@@ -90,3 +90,19 @@ real, sem saltos), mas ha uma perda que se prova com o mesmo programa:
   Falta uma forma de continuar a leitura nas gravacoes seguintes (um DIR* ou um cookie por pasta) se isso importar.
 - Os temporarios do nome da ronda 3 (`caminho.<hex>.tmp`, sem a marca `.zsave-`) nao se limpam: nao se distinguem de um
   ficheiro de outro programa.
+
+## O clip em vigor da zen_ui (ramo zen-ui-clip)
+
+Desde o commit do grupo e da janela, `zui_listbox`, `zui_group_begin` e `zui_window_begin` cortam o clip que poem pelo que esta em vigor
+(`ui_rect_within`) e `ui_hovered` pede que o rato esteja dentro de `ui->clip`: o que um painel esconde nao desenha nem apanha o rato.
+A regra para quem escreve um widget: quem poe `ui->clip` por atribuicao (e nao por `ui_push_container`, que o guarda e o repoe) tem de o
+repor antes de abrir um grupo, uma janela ou uma lista, senao estes cortam-se pelo clip velho. O dialogo de ficheiros fazia-o
+(`ui->clip = sb`, `= hr`) e a lista de ficheiros saia vazia; corrigido (`ui->clip = panel` antes do grupo `dlg_files`) com o teste
+`test_dialog_flow` (`text_visible`). O contorno e o fundo desse grupo passam a ver-se (antes pintavam-se com o clip velho).
+
+- `zui_statusbar_begin` poe `ui->clip = bar` sem cortar pelo clip em vigor (a barra e do ecra todo, em baixo; dentro de um painel mais
+  pequeno o conteudo sairia). Nao se mexeu: nao ha teste que o mostre e nenhum exemplo a poe dentro de um painel.
+- Um widget que a janela esconde ja nao apanha o rato (por leitura do codigo, `ui_hovered`); o teste de "um widget rolado para fora de
+  um grupo nao apanha o rato" nao existe. Os exemplos `demo_widgets_pixel` e `demo_dock_pixel`, guiados com cliques por um Xvfb
+  privado (menus, combo, lista, arrastar janelas), ficam pixel a pixel iguais aos da main, com a unica excepcao do contorno do grupo
+  do dialogo de ficheiros.
