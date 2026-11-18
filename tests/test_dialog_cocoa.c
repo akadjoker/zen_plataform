@@ -10,12 +10,15 @@
  */
 #include "cocoa_test_util.h"
 
-/* The modal session ends 0.6 s after this call; the timer is dropped when the dialog is back, so it cannot fire outside one. */
+/* The modal session is ended every half second from 0.5 s after this call, until the dialog is back: the dialogs of macOS take a
+   moment to come up (the open and save panels are made by a service of their own), and one abort that comes before the dialog
+   is in its modal loop would end nothing and leave it waiting for a person for the rest of the test. The timer is dropped when the
+   dialog is back, and no run loop turns between the two, so it cannot fire outside a dialog. */
 static id arm_abort(void)
 {
     id timer = MSG(id, id, SEL, double, id, SEL, id, unsigned char)(ns_class("NSTimer"),
-                                                                    sel_registerName("timerWithTimeInterval:target:selector:userInfo:repeats:"), 0.6,
-                                                                    ns_app(), sel_registerName("abortModal"), NULL, 0);
+                                                                    sel_registerName("timerWithTimeInterval:target:selector:userInfo:repeats:"), 0.5,
+                                                                    ns_app(), sel_registerName("abortModal"), NULL, 1);
     MSG(void, id, SEL, id, CFStringRef)(msg_id(ns_class("NSRunLoop"), "currentRunLoop"), sel_registerName("addTimer:forMode:"), timer, kCFRunLoopCommonModes);
     return timer;
 }

@@ -6,6 +6,7 @@
  * Skips (77) without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
  */
 #include "platform.h"
+#include "test_boot.h"
 
 #include <stdio.h>
 #include <stdlib.h>

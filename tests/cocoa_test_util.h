@@ -11,6 +11,7 @@
 #define COCOA_TEST_UTIL_H
 
 #include "platform.h"
+#include "test_boot.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>

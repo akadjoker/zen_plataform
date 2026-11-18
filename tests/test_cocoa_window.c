@@ -13,6 +13,7 @@
  * the window is, in the same top-left convention) and, read-only, AppKit through the Objective-C runtime's C interface.
  */
 #include "platform.h"
+#include "test_boot.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
