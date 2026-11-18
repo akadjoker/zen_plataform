@@ -7,14 +7,13 @@ virtual, one 1024x768 display of scale 1, an Aqua session where real windows wor
 (`gh workflow run mac.yml --ref mac-backend`, then `gh run list --branch mac-backend` and `gh run view <id> --log`); a push makes no
 run. A runner is sometimes not acquired for 15 minutes ("not acquired by Runner"): start it again.
 
-**The owner stopped the use of runs after run 44160945847 (the last one made). Everything written after it was never compiled by
-the real compiler.** The code was only checked for syntax against stand-in headers written from memory (a clang on Linux with
-`-fsyntax-only`), which finds typos and C mistakes but proves nothing about Apple's actual signatures. The first thing to do with a
-Mac, or with one allowed run, is to run the job once and fix what the compiler says.
-
-On 2026-11-18 the branch was prepared for exactly one run: `main` (beb1db0) merged in, everything never compiled desk-checked, the
-workflow made to report everything at once. "Preparation for the one run" below says what was done and with what proof, and "Reading
-the run" is the checklist for its logs.
+**The owner allowed few runs.** Run 44160945847 (commit b3ca21a) compiled and ran phases 1 to 4. Run 44285580324 (commit 3fca0cd, 2026-11-18,
+macOS 26.7.2, Xcode 26.6, SDK 26.5) was the single run for everything written after it, phases 5 to 8, and the merge of `main`: **everything
+compiled, with no error and no warning of our own, in the four configurations** (the code had been desk-checked against stand-in
+headers before it, see "Preparation for the one run"), and 4 of the 35 tests failed in each native configuration, three of them in both.
+"What run 44285580324 showed" below has the facts, the cause and the fix of each failure, and what the next run has to confirm. **The
+fixes made after that run (commits 52506da, 1525b9e, 6568c9b, badd284 and the CI changes) were not run, and the next run may be the only one:
+where a check gave too little information it now prints the values.**
 
 ## State of each phase
 
@@ -23,15 +22,88 @@ the run" is the checklist for its logs.
 | 1, 2 | the library without a window; windows, events, monitors, live callback | compiled and run on macOS, reviewed |
 | 3 | OpenGL (NSOpenGLContext, CGL worker context), the pixel surface, zen_2d and the examples | compiled and run at run 44160945847: `test_gl_cocoa` 153/153, `test_gl_worker_cocoa` 71/71, builds without warnings. `test_pixels_cocoa` and `test_ui_cocoa` failed only on a comparison that included the window's rounded bottom corners; fixed in commit 9d305f5, **not run again** |
 | 4 | keyboard, mouse, cursors | compiled and run at run 44160945847. In `test_input_cocoa` the pass with events given to the view passed the whole key table (96 keys), buttons, drags, scroll (AppKit's deltas printed against the library's), warp, captured mode, cursors (all eleven) and 230 custom cursors; the 70 failures were test-side (typing keys sent with no character, the press queue not drained, two text edge cases) plus one backend fix (the text switch outside the pump, commit 129670e). Those fixes were **not run again** |
-| 5 | text input (`NSTextInputClient`, preedit, caret rectangle) | **written, never compiled**, desk-checked (`test_text_cocoa`) |
-| 6 | clipboard (`NSPasteboard`), file drop, native dialogs (`dialog_cocoa.m`) | **written, never compiled**, desk-checked (`test_clipboard_cocoa`, `test_drop_cocoa`, `test_dialog_cocoa`) |
-| 7 | fullscreen and window modes, Dock icon, opacity, always on top, undecorated windows, window kinds, hit test, trackpad gestures | **written, never compiled**, desk-checked (`test_window_cocoa`) |
-| 8 | Vulkan surface (`VK_EXT_metal_surface`, `CAMetalLayer`) | **written, never compiled**, desk-checked (`test_vulkan_cocoa`); gamepads stay the stub (`gamepad_stub.c`) |
+| 5 | text input (`NSTextInputClient`, preedit, caret rectangle) | **compiled and run at run 44285580324**: `test_text_cocoa` 81/81 (Release and ASan): commits of text, composition (marked text) with the caret in bytes, the 63-byte cut, the switch off, focus loss, the caret rectangle in screen coordinates, 20 windows destroyed while composing. The input context is driven the way AppKit drives it; a real input method was not started |
+| 6 | clipboard (`NSPasteboard`), file drop, native dialogs (`dialog_cocoa.m`) | **compiled and run**: dialogs `test_dialog_cocoa` 20/20 (each dialog opens and is ended by the abort timer; a cancel is no error; a person's choice was not tried). Clipboard: text, PNG round trip and the URI list passed (36 checks); the custom MIME type **failed** (NSPasteboard takes only UTIs, 5 checks), fixed in 1525b9e, **not run again**. Drop: 108 of 109; a name with a composed accent **failed**, fixed in 6568c9b, **not run again** |
+| 7 | fullscreen and window modes, Dock icon, opacity, always on top, undecorated windows, window kinds, hit test, trackpad gestures | **compiled and run**: `test_window_cocoa` 100/102. Proven: both fullscreen modes (1024x768 at 0,0 on a 1024x768 monitor, style, level 25, presentation options 10, the way back), opacity, always on top, decorations on and off, the icon, dialog/utility parents, the hit test (an edge drag of +40,+30 gives 340x230 from 300x200, limits hold), gestures from made-up events (pinch 160 to 594 points, rotation -30.0 degrees, four swipes). **Failed**: the level of a popup and of a tooltip (AppKit resets a child window's level to its parent's), fixed in 52506da, **not run again** |
+| 8 | Vulkan surface (`VK_EXT_metal_surface`, `CAMetalLayer`) | **compiled and run**: `test_vulkan_cocoa` 18/18 (Release and ASan); the job installed the Vulkan loader and MoltenVK with Homebrew, a real instance and surface were made, the view's layer is a `CAMetalLayer` with `wantsLayer`, its size and scale checks and the resize passed; gamepads stay the stub (`gamepad_stub.c`) |
 
-Last macOS run: 44160945847 at commit b3ca21a (phases 1 to 4). Last fully green run: none (the Linux X11 and fake builds pass 34/34 and
-23/23 at every commit, merge of main included).
+Last macOS run: 44285580324 at commit 3fca0cd (all phases). Last fully green run: none (fake 24/24 in both configurations, native Release
+31/35, native ASan 32/35). The Linux X11 and fake builds pass 34/34 and 23/23 at every commit, the fixes after the run included.
+
+## What run 44285580324 showed
+
+Machine: runner image `macos26` 20261112.0504.1, macOS 26.7.2 (25G332), Apple M1 (Virtual) with 3 CPUs and 7 GB, Xcode 26.6 (SDK 26.5, Apple
+clang 21.0.0), CMake 4.4.5, GNU Make 3.81, an Aqua session with a WindowServer, one display "Apple Virtual" of 1024x768 at scale 1 and 60 Hz,
+12 display modes (none with the same points and another scale, so the scale-change checks were skipped). The tests took 67 s in the native Release
+configuration, 113 s under ASan, 10 s and 39 s for the fake backend.
+
+Build: **0 errors in all four configurations; the only warnings are the two of the vendored `stb_image.h`**
+(`native.warnings.txt` and the others are empty). The compile commands carry `-mmacosx-version-min=11.0`, `-fno-objc-arc` and
+`-Wunguarded-availability` on the two `.m` files, and no warning of availability or deprecation came out (so the stand-in headers did not
+hide one). The link accepted `-Xlinker -no_warn_duplicate_libraries`, the frameworks Cocoa, CoreGraphics, OpenGL and QuartzCore were enough
+(Metal, CoreVideo, IOKit, GameController and UniformTypeIdentifiers headers were included by `test_cocoa_names` without a collision, and
+it passed: 10 of 10, the library's names do not meet Apple's).
+
+Tests: fake 24/24 (Release and ASan). Native Release 31/35, native ASan 32/35. Passed in both: `test_cocoa_names`, `test_cocoa_window`
+(166/166, 167/167 under the leaks tool), `test_gl_cocoa` (153), `test_pixels_cocoa` (162; **0 pixels differ** from the window server's
+picture, the rounded-corner fix of 9d305f5 works), `test_text_cocoa`, `test_dialog_cocoa`, `test_vulkan_cocoa`, `test_gl_worker_cocoa` (71), `test_ui_cocoa`
+(12; 0 of 268800 pixels differ for both renderers, and the two renderers agree in 100% of the blocks), `test_crash`, `test_thread` and the
+other portable ones. `test_input_cocoa` passed 695/695 under ASan and failed 4 of 697 in Release.
+
+### The four failures
+
+| test | what the log had | cause | fixed in |
+|---|---|---|---|
+| `test_input_cocoa.c:516, 517, 522, 523`, Release only | the left or right button down at 33,44 in the pass with events posted to the application's queue did not come as one event with its position, the polled state was not down/pressed; then the release was not one either. The values were not printed. The pass given straight to the view and the whole ASan run were fine | **the test, not the library.** The desktop picture at the end of the run shows the system's own "Do you want to enable Dictation?" dialog (its text: "press the Control key twice"). The test's `test_modifiers` posts the left Control and, milliseconds later, the right Control through `NSApplication`, which looks at the flags of the events that pass through it for a double tap of Control (the default dictation shortcut). The dialog is another application's window; it took the key window from the test's (the core then lets go of the held buttons in the stream before the focus loss, and ignores a release of a button that is not held), and all four failures are what that gives for one press and release. The ASan build ran after the dialog was already on the screen. Not timing, not event order, not a click that activates a window. Sure about the dialog and the mechanism of the failures; **not sure that the posted Control events are what raised it (the F5 key of the key table is the other candidate)**, and the log has no time stamps | badd284: the two Control keys' events go to the view in both passes; the button checks print the button, every event seen (with `focus LOST`), the polled state, key window and active state; `need_key_window` before the moves, buttons and drags of the posted pass notes and restores the key window; the job takes a picture of the desktop every 4 s during the tests (575d481) |
+| `test_clipboard_cocoa.c:83, 86, 88, 94, 97` | AppKit's own line: `'application/x-zen-test' is not a valid UTI string.  Cannot set data for an invalid UTI.` Text, PNG and the URI list passed | **the library.** `NSPasteboard` names what it holds by UTI and `setData:forType:` says NO to anything else; the backend gave it the MIME string, ignored the NO, and `clipboard_set_data` said true with nothing written. The test's expectation (the data is there and reads back) was right, except that its oracle looked in AppKit under the MIME string | 1525b9e: `src/pasteboard_type.h` turns a MIME type into a UTI (the types the system knows are its UTI: `text/html` is `public.html`, `image/jpeg` is `public.jpeg`, ...; any other is `com.zen-platform.mime.` plus the type spelled with letters, digits, hyphen and period: `application/x-zen-test` is `com.zen-platform.mime.application-sx-dzen-dtest`); the refusal of `setString:forType:` and `setData:forType:` is now an error; the test's oracle reads that type, writes `public.html` and `public.jpeg` as other programs would, and prints the pasteboard's types on failure. Sure the library was wrong; fairly sure (85%) that a valid-looking UTI is accepted (Qt does the same with its own prefix) |
+| `test_drop_cocoa.c:90` | the path of the dropped file with an odd name did not match byte for byte; the two-file drop with spaces, the refused non-file and the 50 drops passed. The bytes were not printed | **the library, if the cause is what it appears to be.** The odd name has a composed e-acute and an ideograph. The backend read paths with `-[NSURL fileSystemRepresentation]`, the file system's form of the name, which is known (Apple's page does not say) to be the decomposed (NFD) one; the program got bytes it never saw and that do not compare equal to the name it knows. The other backends hand over the URI's bytes decoded and no more | 6568c9b: `file_url_path` gives `[[url filePathURL] path]` (the name as the URL says it) for dropped files and for the paths of the file dialogs; the test makes its URL from the bytes (percent-escaped `URLWithString:`), so the pasteboard certainly holds the composed name, and prints wanted and got as hex and the pasteboard URL's `absoluteString`, `path` and `fileSystemRepresentation`. About 70% sure: the log has no bytes |
+| `test_window_cocoa.c:208, 209` | the popup and the tooltip: "no title bar bit AND level == 101" false for both; the two windows that have a level check once attached | **the library.** The style cannot have the title bit (borderless plus non-activating panel). `apply_level` ran before `addChildWindow:ordered:`, and AppKit gives a child window its parent's level when it is attached (not in Apple's pages; OpenJDK's macOS port and Electron both found it and set the level again after attaching). `setHidesOnDeactivate:NO` (a8d81a7) and the panel class do not touch the level | 52506da: `attach_to_parent` re-applies the level, `apply_level` re-applies the levels of the windows attached to it (setting a window's level sets its children's too); the test prints style and level numbers for each kind. About 85% sure |
+
+### What else the logs showed
+
+* **The Dictation dialog stayed on the screen** from the Release `test_input_cocoa` to the end of the job (the picture at the end): the
+  runner has nobody to answer it, and it is another application's window, so the tests that ran after it (`test_dialog_cocoa`, the
+  ASan configuration) were run with it there, and passed.
+* Dialogs: `test_dialog_cocoa` took 6.8 s for eight dialogs (message box twice, confirm, open, save, folder, several files, open with a
+  filter that allows everything), 0.85 s each on average: each was ended by the first or second tick of the abort timer, and none
+  waited for the 90 s alarm; `confirm_box` ended by the abort returns 0.
+* `leaks`: 96 leaks of 6272 bytes, **all of one root**, an `NSXPCConnection` to `com.apple.linkd.autoShortcut` made by Apple's `AppIntents` and
+  `LinkServices`; none names this library, AppKit windows or `Zen*` classes. Heap growth in 300 create/destroy rounds: 594 to 738 bytes a
+  round for plain windows (blocks go down or up by about 4 a round, windows on screen 1 -> 1, NSApp windows 2 -> 2), 2016 bytes a round with GL
+  contexts (220 rounds): not leaks as the tool counts them, not looked into further.
+* Crash reports: 25, **all of `test_crash`**, which crashes on purpose (17 `EXC_BAD_ACCESS` SIGSEGV, 4 SIGBUS, 4 SIGABRT) and passes
+  22/22; no other process crashed.
+* The frames of `test_ui_cocoa` (artifact `ui-frames`) are right: the toolkit's "Controls" and "Dial" panels, right side up, the right colours,
+  the same in the software and the GL renderer. In both the list box inside "Controls" draws its last line ("zen_ui.c") below the panel's
+  edge: the same in both renderers, so it is the toolkit's scene and clipping, not the macOS backend.
+* The shared library (`BUILD_SHARED_LIBS=ON`) built and linked with no warning; the count of its exports was printed by a step whose
+  output is not in the artifacts (the next run writes `shared.exports.txt`). The MoltenVK step's output is not in the artifacts either
+  (`moltenvk.log` from now on); what the run proves is that the loader and MoltenVK were found and a surface was made.
+* Notes that are facts about this runner: the display offers no second scale; `mouse_capture` outside the application cannot be tried;
+  the horizontal scroll sign (`scroll 2 lines to the right: AppKit says 2.00, the library reports -2.00`) passes the test, whose
+  expectation and the backend's `-dx` come from the same reading of AppKit's convention: nothing here proves that sign against a real device.
+* `CGWindowListCreateImage` kept working from a process without any permission on macOS 26.7.
+
+### What the next run has to confirm
+
+1. `test_window_cocoa`: the popup and the tooltip are at level 101 (`check_look` prints style and level otherwise), dialog and utility levels
+   (printed as information), nothing else regressed.
+2. `test_clipboard_cocoa`: the custom type is written, found, read and held by AppKit under `com.zen-platform.mime.application-sx-dzen-dtest`;
+   `public.html` and `public.jpeg` hold the data; a too long MIME type is an error. If AppKit still logs "not a valid UTI string", the
+   rule of `pasteboard_type.h` is what to change, and the error text now says it.
+3. `test_drop_cocoa`: the odd name arrives byte for byte; if not, the hex lines say whether `absoluteString`, `path` or
+   `fileSystemRepresentation` changed it (and so whether NSURL normalises on its way and the test must compare by file identity).
+4. `test_input_cocoa`, Release: 697 checks, no `note: the test window was not the key window`; **open the `native.shots/` pictures**: no
+   Dictation dialog. If one appears, the time stamp of its first picture against the cumulative test times in `native.ctest.log` says
+   which test raised it, and the F5 key (`0x60`, in the key table) is the next candidate.
+5. Everything that passed still passes (the library changes are in the backend, `dialog_cocoa.m` and the new header), and the build has
+   no warning of our own.
 
 ## Preparation for the one run (2026-11-18)
+
+What was done before run 44285580324, kept as it was written. The run then showed what this desk check could not see: it found nothing to
+fix at compile level (there was nothing: 0 errors, 0 warnings) and four of what AppKit would do, but it missed the four failures above
+(a pasteboard that takes only UTIs, the Unicode form of a path, the level of an attached child window, a system dialog taking the focus).
 
 ### The merge of main (beb1db0)
 
@@ -120,15 +192,16 @@ Linux proof that nothing else broke (merged branch, private Xvfb, redirected HOM
 (ASan + UBSan, `-Wall -Wextra -Wpedantic`) 23/23, MinGW cross-compile with `-Wall -Wextra` no warnings (nothing run). The warnings of the
 fake build are the ones main has (stb headers, `vulkan.c` pedantic function pointer casts, `test_crash.c` infinite recursion).
 
-## Reading the run
+## Reading a run
 
 Start the job by hand (`gh workflow run mac.yml --ref mac-backend`). The job summary (Actions page) lists, per configuration, the distinct
 error lines of the build and the failed tests. The artifact `logs` holds everything: `machine.txt` (image, Xcode, SDK, session),
 `<config>.configure.log`, `<config>.build.log` (all the compile commands, `VERBOSE=1`: look for `-mmacosx-version-min=11.0`, the SDK path and
 `-fno-objc-arc` on the two `.m` files), `<config>.build-errors.log` (the errors again, one file at a time), `<config>.warnings.txt`,
 `<config>.ctest.log` (every test's whole output), `<config>.tests.txt` (one line per test), `<config>.LastTest.log`, `leaks.log`,
-`crash-reports/`, `desktop-at-the-end.png`, `test-images/`. The configurations are `fake`, `native`, `native-asan`, `fake-asan`. In this
-order:
+`crash-reports/`, `desktop-at-the-end.png`, `test-images/`, and from the next run `<config>.shots/` (a picture of the desktop every 4 seconds
+of the tests, named by the seconds since they began), `moltenvk.log` and `shared.exports.txt`. The configurations are `fake`, `native`,
+`native-asan`, `fake-asan`. In this order:
 
 1. **`machine.txt`**: the runner image, Xcode and SDK versions (a SDK older than 15 means `frameResizeCursorFromPosition:` does not exist
    and `native.build.log` will say so), `GUI session: Aqua`, a `WindowServer` process.
@@ -146,9 +219,9 @@ order:
 6. **Phase 5** `test_text_cocoa`: the `commit`, `composition`, `text input off`, `focus loss`, `caret rectangle`, `destroyed while composing`
    headings print as they go. `caret rectangle` prints the rectangle as the screen has it against the window position: compare by eye if a
    check fails.
-7. **Phase 6** `test_clipboard_cocoa` (a failure naming "public.png" or a custom type: the type strings of the pasteboard; "/tmp" in the URI
-   list: `/tmp` is a link to `/private/tmp`), `test_drop_cocoa` (the accent: the composed e-acute (U+00E9) of the test path against `fileSystemRepresentation`'s
-   decomposed form, and the same in the open panel), `test_dialog_cocoa`: each dialog is opened and aborted by a repeating timer; look for
+7. **Phase 6** `test_clipboard_cocoa` (a failure prints the library's error and the types the pasteboard holds; the `/tmp` of the URI list
+   passed, the link to `/private/tmp` did not matter), `test_drop_cocoa` (a failure prints the wanted and the received path as hex and what the
+   pasteboard's URL says by `absoluteString`, `path` and `fileSystemRepresentation`), `test_dialog_cocoa`: each dialog is opened and aborted by a repeating timer; look for
    `confirm_box ended by the abort: 0`, a `TIMEOUT` line (the panels' service did not come up) and `desktop-at-the-end.png` for a dialog
    left open. A dialog that appears and is never ended is the one thing that can hold a test until its alarm (90 s).
 8. **Phase 7** `test_window_cocoa` (the heading before each failure says `modes`, `looks`, `kinds`, `hit test`, `gestures`): `mode N: window WxH at X,Y (monitor ...)`
@@ -196,10 +269,15 @@ order:
   are `EVENT_CHAR` (same filter as before), marked text is `EVENT_TEXT_EDIT` built with `preedit.c`, and a commit ends the composition with an
   empty edit first. `window_set_text_input_rect` is what `firstRectForCharacterRange:` answers.
 * Clipboard (phase 6): the general pasteboard; text and PNG as their types, `text/uri-list` as file URLs (one pasteboard item each), other MIME
-  types as pasteboard types of that name. Only PNG is read for images (a TIFF on the pasteboard is not). A drop is `EVENT_WINDOW_DROP`;
-  the paths live in the window until the next drop. Dialogs are modal for the whole application; the filters of a file dialog become one list of
+  types as UTIs (`src/pasteboard_type.h`: NSPasteboard takes only valid UTIs, run 44285580324; the types the system knows keep its UTI, any other
+  is `com.zen-platform.mime.` plus the type with `/` as `-s`, `-` as `-d`; a refusal is an error). Only PNG is read for images (a TIFF on the pasteboard is not). A drop is `EVENT_WINDOW_DROP`;
+  the paths live in the window until the next drop, and are the URL's path as it says it (`[[url filePathURL] path]`), not `fileSystemRepresentation` (the decomposed form), as the file dialogs return them too. Dialogs are modal for the whole application; the filters of a file dialog become one list of
   extensions (the panel has no filter list); `dialog.c` leaves the dialogs to `dialog_cocoa.m` when the native backend is built
   (`ZEN_DIALOG_COCOA`) and `test_dialog` (stand-in tools) runs only for the fake backend.
+* Window levels (phase 7): a popup or tooltip is at the pop-up menu level, but `addChildWindow:ordered:` sets a child's level to its parent's and
+  `setLevel:` sets the level of the window's children, so `attach_to_parent` and `apply_level` put each window's own level back.
+* Tests that post events to the application's queue never post the Control keys: `NSApplication` takes two taps of Control for the
+  dictation shortcut and the system puts up its own dialog, which takes the key window.
 * Window modes (phase 7): both fullscreen modes are a borderless window the size of the chosen monitor, above the menu bar, with the
   Dock and the menu bar hidden while there is one (no system Space, no display mode change). The icon is the application's (Dock). The hit test
   drags with `performWindowDragWithEvent:` and resizes by its own tracking of the drag events (AppKit has no call for an edge). Trackpad
@@ -217,18 +295,17 @@ order:
 
 ## Not verified (no way to on the runner)
 
-A scale 2 display, the scale-change event, a drag with a real mouse, the pointer held by the captured mode with a real mouse, a trackpad,
-a real keyboard and input method, held keys at focus gain (`CGEventSourceKeyState` may need a permission), the global monitor of
-`mouse_capture`, the look of the diagonal resize cursors, a real drag of files from the Finder, the system's drag of a window by a
-hit-test title bar, MoltenVK (not installed on the runner).
+A scale 2 display, the scale-change event, a drag with a real mouse, the pointer held by the captured mode with a real mouse, a trackpad
+(the gesture tests use made-up events, so the real signs of `rotation` and of the horizontal scroll are assumptions), a real keyboard and
+input method, held keys at focus gain (`CGEventSourceKeyState` may need a permission), the global monitor of `mouse_capture`, the look of
+the diagonal resize cursors, a real drag of files from the Finder, the system's drag of a window by a hit-test title bar
+(`performWindowDragWithEvent:` is never called by a test), the answer of a person in a dialog, the Dock icon as the Dock shows it.
+The Vulkan surface was proven only on a runner with MoltenVK from Homebrew and no GPU of its own.
 
 ## Next steps
 
-1. Start the job once (`gh workflow run mac.yml --ref mac-backend`), read it as "Reading the run" says, and fix what the compiler says: all of
-   phases 5 to 8, the new tests, `dialog_cocoa.m`, the `-no_warn_duplicate_libraries` link option, the `QuartzCore` link. Likely trouble spots
-   not already named: the `NSCursorFrameResize*` names (phase 4, compiled), `NSPasteboard*` constants, the `NSTextInputClient` signatures,
-   `NSWindowStyleMask*`, the `-Wunguarded-availability` of anything newer than 11.0, a name that collides with Carbon, QuartzCore or Metal
-   headers (`test_cocoa_names` says it first).
-2. Then the failures of the new tests (written without ever running; the gesture tests hold only to the touch points, the module's own thresholds
-   are printed as notes).
-3. Look at the growth of the heap in the GL create/destroy rounds with `leaks` (the job already runs it on `test_cocoa_window`; add the GL test).
+1. Start the job once (`gh workflow run mac.yml --ref mac-backend`) and read it as "What the next run has to confirm" says: the four fixes of
+   the failures, and that nothing else changed. The fixes were made without a Mac and without a run.
+2. If `test_input_cocoa` fails again in Release, look at the pictures in `native.shots/` and at the values it prints before anything else.
+3. Then the unverified list above, with a Mac or a person: a real trackpad (the sign of `rotation`), the Finder drag, the input method.
+4. Look at the growth of the heap in the GL create/destroy rounds (about 2 KB a round, not a leak for the `leaks` tool) if it matters.
