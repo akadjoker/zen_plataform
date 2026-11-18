@@ -568,6 +568,22 @@ static int text_index(UiContext *ui, const char *text) /* order among the text c
     return -1;
 }
 
+/* 1 when a text command with this string is drawn where it can be seen: the clip it carries is not empty and holds the point
+   text_pos gives (a command whose clip is empty is in the list and never reaches the screen) */
+static int text_visible(UiContext *ui, const char *text)
+{
+    const UiDrawList *dl = zui_draw_list(ui);
+    for (int i = 0; i < dl->count; i++)
+        if (dl->cmds[i].type == UI_CMD_TEXT && dl->cmds[i].u.text.len == (int)strlen(text) &&
+            strncmp(dl->cmds[i].u.text.str, text, (size_t)dl->cmds[i].u.text.len) == 0)
+        {
+            const UiRect c = dl->cmds[i].clip;
+            const int x = dl->cmds[i].u.text.x + 4, y = dl->cmds[i].u.text.y + 4;
+            return c.w > 0 && c.h > 0 && x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h;
+        }
+    return 0;
+}
+
 static void click_at(PlatformWindow *w, UiContext *ui, int x, int y, UiDialogState *st, char *out, int cap)
 {
     fake_mouse_move(w, x, y);
@@ -611,6 +627,24 @@ static void test_dialog_flow(void)
     int sub = text_index(ui, "sub"), a = text_index(ui, "A.txt"), b = text_index(ui, "b.txt");
     CHECK(sub >= 0 && a > sub && b > a);
     CHECK(text_index(ui, "c.png") < 0);
+
+    /* The entries are on the screen, not only in the list of commands. The file area is a group, and a group cuts its clip by the
+       one in force: the dialog set the clips of its sidebar (and of the header of the details view) by hand and left the last
+       one in force, so the group's clip came out empty, and every view showed a file list with no files in it. The three views. */
+    int vx, vy;
+    CHECK(text_visible(ui, "sub") && text_visible(ui, "A.txt") && text_visible(ui, "b.txt"));
+    CHECK(text_pos(ui, "Detalhes", &vx, &vy));
+    click_at(w, ui, vx, vy, &st, out, sizeof out);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_visible(ui, "sub") && text_visible(ui, "A.txt") && text_visible(ui, "b.txt"));
+    CHECK(text_pos(ui, "Icones", &vx, &vy));
+    click_at(w, ui, vx, vy, &st, out, sizeof out);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_visible(ui, "sub") && text_visible(ui, "A.txt")); /* (a 400 x 300 window: the third cell is under the fold, as it should be) */
+    CHECK(text_pos(ui, "Lista", &vx, &vy));
+    click_at(w, ui, vx, vy, &st, out, sizeof out);
+    dialog_frame(w, ui, out, sizeof out);
+    CHECK(text_visible(ui, "sub") && text_visible(ui, "A.txt") && text_visible(ui, "b.txt"));
 
     /* a click on the name selects it, a second click on it soon after opens it: the path comes back */
     int x, y;

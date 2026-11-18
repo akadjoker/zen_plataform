@@ -479,6 +479,10 @@ UiDialogState zui_dialog(UiContext *ui, char *out_path, int cap)
         }
 
         UiRect lr = zui_rect(fa.x, fa.y + header_h, fa.w, fa.h - header_h);
+        /* the sidebar and the header above set their clips by hand (ui->clip = sb, = hr) and the last one is still in force: a group
+           cuts its clip by the one in force, so it would be cut by the sidebar's, and the file list came out empty. The clip the group
+           is in here is the panel's. */
+        ui->clip = panel;
         if (zui_group_begin(ui, "dlg_files", lr, ZUI_GROUP_BORDER))
         {
             UiLayout *L = ui_top(ui);
