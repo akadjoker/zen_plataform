@@ -497,6 +497,16 @@ bool zui_selectable(UiContext *ui, const char *label, bool selected)
     return false;
 }
 
+/* The part of `inner` that is inside `outer` (an empty rectangle, width and height 0, when they do not meet). */
+static UiRect ui_rect_within(UiRect outer, UiRect inner)
+{
+    int x0 = inner.x > outer.x ? inner.x : outer.x;
+    int y0 = inner.y > outer.y ? inner.y : outer.y;
+    int x1 = inner.x + inner.w < outer.x + outer.w ? inner.x + inner.w : outer.x + outer.w;
+    int y1 = inner.y + inner.h < outer.y + outer.h ? inner.y + inner.h : outer.y + outer.h;
+    return zui_rect(x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
+}
+
 int zui_listbox(UiContext *ui, const char *id_str, const char **items, int count, int *selected, int rows)
 {
     UiRect r = ui_layout_next(ui);
@@ -527,7 +537,10 @@ int zui_listbox(UiContext *ui, const char *id_str, const char **items, int count
     if (content_h > total_h)
         clip.w -= ui->style.scrollbar;
     UiRect saved_clip = ui->clip;
-    ui->clip = clip;
+    /* what the rows draw stays inside the panel the list is in too (a group, a window): a list taller than the room it was
+       given (a cell of one row and a hint of several) used to spill its last lines out under the panel */
+    UiRect visible = ui_rect_within(saved_clip, clip);
+    ui->clip = visible;
 
     int start_y = r.y - (int)*scroll;
     int changed_idx = -1;
@@ -540,7 +553,7 @@ int zui_listbox(UiContext *ui, const char *id_str, const char **items, int count
         UiRect row_rect = zui_rect(r.x, iy, clip.w, row_h);
         int id = ui_next_id(ui);
         /* clamp the hover test to the visible viewport and respect popups above */
-        bool hovered = ui_mouse_in(ui, clip) && ui_hovered(ui, row_rect);
+        bool hovered = ui_mouse_in(ui, visible) && ui_hovered(ui, row_rect);
         if (hovered) ui->hot = id;
         if (hovered && ui->in.mouse_pressed) ui->active = id;
 
