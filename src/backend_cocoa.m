@@ -971,6 +971,22 @@ static void apply_level(BackendWindow *b)
     if (b->mode != WINDOW_WINDOWED)
         level = NSMainMenuWindowLevel + 1;
     [b->window setLevel:level];
+    /* AppKit gives the child windows of a window the level it is given (test_window_cocoa saw it: the popup and the tooltip, made
+       with the pop-up menu level, had the level of their parent once attached), so the windows attached to this one get their own
+       level back. The parent chain has no cycle: a parent is a window that was alive when the child was made. */
+    for (BackendWindow *w = g.windows; w; w = w->next)
+        if (w->parent == b && w->attached)
+            apply_level(w);
+}
+
+/* The window becomes a child window of its parent's NSWindow, which keeps it above the parent and moves it with the parent. Attaching
+   resets the child's level to the parent's (nothing of Apple's says so; OpenJDK's macOS port and Electron both found it, and
+   put the level back afterwards, as this does). */
+static void attach_to_parent(BackendWindow *b)
+{
+    [b->parent->window addChildWindow:b->window ordered:NSWindowAbove];
+    b->attached = true;
+    apply_level(b);
 }
 
 /* A new style with the content where it was: the title bar goes or comes around it. */
@@ -2412,10 +2428,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
                 [NSApp activateIgnoringOtherApps:YES];
             }
             if (b->parent)
-            {
-                [b->parent->window addChildWindow:b->window ordered:NSWindowAbove];
-                b->attached = true;
-            }
+                attach_to_parent(b);
         }
         if (cfg->mode != WINDOW_WINDOWED)
             apply_mode(b, cfg->mode, cfg->monitor);
@@ -2694,10 +2707,7 @@ void backend_show(BackendWindow *b)
         else
             [b->window makeKeyAndOrderFront:nil];
         if (b->parent && !b->attached && window_alive(b->parent))
-        {
-            [b->parent->window addChildWindow:b->window ordered:NSWindowAbove];
-            b->attached = true;
-        }
+            attach_to_parent(b);
     }
 }
 

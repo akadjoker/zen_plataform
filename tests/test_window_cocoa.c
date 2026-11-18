@@ -183,6 +183,23 @@ static void test_looks(void)
     window_destroy(w);
 }
 
+/* The style and the level a window should have, said with the numbers AppKit reports when they are not those (the failure of a bare
+   CHECK of the two together left a run with no way to tell which was wrong). A level of -1000 is not checked, only reported. */
+static void check_look(const char *name, PlatformWindow *w, bool titled, long level)
+{
+    unsigned long style = style_of(w);
+    long got = level_of(w);
+    bool level_ok = level == -1000 || got == level;
+    bool ok = ((style & STYLE_TITLED) != 0) == titled && level_ok;
+    if (level == -1000)
+        printf("  %s: styleMask 0x%lX, level %ld\n", name, style, got);
+    if (!ok)
+        printf("  %s: styleMask 0x%lX (titled: %s, wanted %s), level %ld (wanted %ld), parentWindow %s, visible %d\n", name, style,
+               (style & STYLE_TITLED) ? "yes" : "no", titled ? "yes" : "no", got, level,
+               msg_id(ns_window(w), "parentWindow") ? "set" : "none", (int)window_is_visible(w));
+    CHECK(ok);
+}
+
 static void test_kinds(void)
 {
     PlatformWindow *parent = make(WINDOW_KIND_NORMAL, NULL, false);
@@ -202,12 +219,14 @@ static void test_kinds(void)
         CHECK(msg_id(ns_window(utility), "parentWindow") == ns_window(parent));
         CHECK(msg_id(ns_window(popup), "parentWindow") == ns_window(parent));
         CHECK(msg_id(ns_window(tooltip), "parentWindow") == ns_window(parent));
-        CHECK(style_of(dialog) & STYLE_TITLED);
-        CHECK((style_of(utility) & STYLE_TITLED) && (style_of(utility) & STYLE_UTILITY));
-        /* a popup and a tooltip have no title bar and are above the menus; an undecorated window is only without a title bar */
-        CHECK(!(style_of(popup) & STYLE_TITLED) && level_of(popup) == LEVEL_POPUP);
-        CHECK(!(style_of(tooltip) & STYLE_TITLED) && level_of(tooltip) == LEVEL_POPUP);
-        CHECK(!(style_of(bare) & STYLE_TITLED) && level_of(bare) == 0);
+        check_look("dialog", dialog, true, -1000);
+        CHECK(style_of(utility) & STYLE_UTILITY);
+        check_look("utility", utility, true, -1000);
+        /* a popup and a tooltip have no title bar and are above the menus (AppKit gives an attached child the level of its parent,
+           so this is also what shows that the backend put the level back); an undecorated window is only without a title bar */
+        check_look("popup", popup, false, LEVEL_POPUP);
+        check_look("tooltip", tooltip, false, LEVEL_POPUP);
+        check_look("bare", bare, false, 0);
         /* a borderless window can be the key window; a tooltip never is */
         CHECK(msg_bool(ns_window(bare), "canBecomeKeyWindow"));
         CHECK(msg_bool(ns_window(popup), "canBecomeKeyWindow"));
