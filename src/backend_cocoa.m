@@ -2352,7 +2352,12 @@ BackendWindow *backend_create(const WindowConfig *cfg)
                                                                                        backing:NSBackingStoreBuffered
                                                                                          defer:NO];
         if (panel)
+        {
             [(ZenPanel *)b->window setTakesFocus:cfg->kind != WINDOW_KIND_TOOLTIP]; /* a tooltip never takes the focus */
+            /* an NSPanel is taken off the screen whenever the application is not the active one (its default, unlike an NSWindow's);
+               the library's windows stay until the program hides or destroys them, as on the other systems */
+            [b->window setHidesOnDeactivate:NO];
+        }
         if (!b->window)
         {
             gl_destroy(b);
