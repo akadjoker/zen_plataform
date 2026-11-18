@@ -435,6 +435,155 @@ static void test_listbox_stays_in_panel(PlatformWindow *w, UiContext *ui)
     CHECK(g_list_selected == 1);
 }
 
+/* A group, and a window, inside a panel that is smaller than they are: what they draw and what takes the mouse stays inside the panel
+ * (the clip in force when they begin is the panel's: they cut theirs by it instead of replacing it). */
+static int g_gp_click[4];  /* the buttons of the inner group, a row each: clicked at least once */
+static UiRect g_win_bounds;
+static int g_win_click;
+
+static void widgets_group_in_panel(UiContext *ui)
+{
+    static const char *names[4] = {"Row0", "Row1", "Row2", "Row3"};
+    /* the outer panel is 200 by 120 at (20, 20): the inner group is 300 by 200 at (30, 50), well past its right and bottom edges
+       (the inner content starts at (40, 60): a row of 28 and a gap of 6, so row 0 is y 60 to 88 and row 3 is y 162 to 190) */
+    if (zui_group_begin(ui, "outer", zui_rect(20, 20, 200, 120), ZUI_GROUP_BORDER))
+    {
+        zui_row(ui, 24, 1);
+        zui_label(ui, "Outer");
+        if (zui_group_begin(ui, "inner", zui_rect(30, 50, 300, 200), ZUI_GROUP_BORDER))
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                zui_row(ui, 28, 1);
+                if (zui_button(ui, names[i]))
+                    g_gp_click[i]++;
+            }
+            zui_group_end(ui);
+        }
+        zui_group_end(ui);
+    }
+}
+
+static void widgets_window_in_panel(UiContext *ui)
+{
+    /* the outer panel is 200 by 160 at (20, 20); the window (60, 60, 300, 200) sticks out of its right and bottom edges: its title bar is
+       y 60 to 88 and its button y 98 to 126, from x 70 to 350 */
+    if (zui_group_begin(ui, "outer", zui_rect(20, 20, 200, 160), ZUI_GROUP_BORDER))
+    {
+        zui_row(ui, 24, 1);
+        zui_label(ui, "Outer");
+        if (zui_window_begin(ui, "Win", &g_win_bounds))
+        {
+            zui_row(ui, 28, 1);
+            if (zui_button(ui, "In window"))
+                g_win_click++;
+            zui_window_end(ui);
+        }
+        zui_group_end(ui);
+    }
+}
+
+/* every text of the frame carries a clip inside (x, y, w, h) */
+static int texts_outside(const UiDrawList *dl, int x, int y, int w, int h, int *texts)
+{
+    int outside = 0;
+    *texts = 0;
+    for (int i = 0; i < dl->count; i++)
+    {
+        const UiCmd *c = &dl->cmds[i];
+        if (c->type != UI_CMD_TEXT)
+            continue;
+        (*texts)++;
+        if (c->clip.x < x || c->clip.y < y || c->clip.x + c->clip.w > x + w || c->clip.y + c->clip.h > y + h)
+            outside++;
+    }
+    return outside;
+}
+
+/* press at (x, y), run a frame, let go, run a frame */
+static void click_at(PlatformWindow *w, UiContext *ui, void (*widgets)(UiContext *), int x, int y)
+{
+    fake_mouse_move(w, x, y);
+    run_frame(w, ui, widgets);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_move(w, x, y);
+    run_frame(w, ui, widgets);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    fake_mouse_move(w, x, y);
+    run_frame(w, ui, widgets);
+}
+
+static void test_group_stays_in_panel(PlatformWindow *w, UiContext *ui)
+{
+    memset(g_gp_click, 0, sizeof g_gp_click);
+    int texts = 0;
+    const UiDrawList *dl = run_frame(w, ui, widgets_group_in_panel);
+    int outside = texts_outside(dl, 20, 20, 200, 120, &texts);
+    CHECK(texts >= 5); /* the label and the four buttons */
+    CHECK(outside == 0);
+
+    /* row 0 where the inner group is drawn but the outer panel is not (x 260: past the panel's right edge): no click */
+    click_at(w, ui, widgets_group_in_panel, 260, 74);
+    CHECK(g_gp_click[0] == 0);
+    /* row 3, below the panel (y 175: the panel ends at 140): no click */
+    click_at(w, ui, widgets_group_in_panel, 100, 175);
+    CHECK(g_gp_click[3] == 0);
+    /* row 0 inside the panel still clicks */
+    memset(g_gp_click, 0, sizeof g_gp_click);
+    click_at(w, ui, widgets_group_in_panel, 100, 74);
+    CHECK(g_gp_click[0] == 1);
+    /* and row 2 (y 128 to 156) where the panel is: its top part (y 132) clicks, its bottom part (y 150: below the panel) does not */
+    click_at(w, ui, widgets_group_in_panel, 100, 150);
+    CHECK(g_gp_click[2] == 0);
+    memset(g_gp_click, 0, sizeof g_gp_click);
+    click_at(w, ui, widgets_group_in_panel, 100, 132);
+    CHECK(g_gp_click[2] == 1);
+}
+
+static void test_window_stays_in_panel(PlatformWindow *w, UiContext *ui)
+{
+    g_win_bounds = zui_rect(60, 60, 300, 200);
+    g_win_click = 0;
+    int texts = 0;
+    const UiDrawList *dl = run_frame(w, ui, widgets_window_in_panel);
+    int outside = texts_outside(dl, 20, 20, 200, 160, &texts);
+    CHECK(texts >= 3); /* the panel's label, the window's title and its button */
+    CHECK(outside == 0);
+
+    /* the button where the window is drawn but the panel is not (x 300): no click; inside the panel it clicks */
+    click_at(w, ui, widgets_window_in_panel, 300, 110);
+    CHECK(g_win_click == 0);
+    g_win_click = 0;
+    click_at(w, ui, widgets_window_in_panel, 100, 110);
+    CHECK(g_win_click == 1);
+
+    /* the title bar past the panel's right edge (x 300, y 74) does not take the window along when the pointer moves; inside it does */
+    fake_mouse_move(w, 300, 74);
+    run_frame(w, ui, widgets_window_in_panel);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_move(w, 300, 74);
+    run_frame(w, ui, widgets_window_in_panel);
+    fake_mouse_move(w, 320, 84);
+    run_frame(w, ui, widgets_window_in_panel);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    fake_mouse_move(w, 320, 84);
+    run_frame(w, ui, widgets_window_in_panel);
+    CHECK(g_win_bounds.x == 60 && g_win_bounds.y == 60);
+
+    g_win_bounds = zui_rect(60, 60, 300, 200);
+    fake_mouse_move(w, 100, 74);
+    run_frame(w, ui, widgets_window_in_panel);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_move(w, 100, 74);
+    run_frame(w, ui, widgets_window_in_panel);
+    fake_mouse_move(w, 110, 78);
+    run_frame(w, ui, widgets_window_in_panel);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    fake_mouse_move(w, 110, 78);
+    run_frame(w, ui, widgets_window_in_panel);
+    CHECK(g_win_bounds.x == 70 && g_win_bounds.y == 64);
+}
+
 /* ------------------------------------------------------------------ combo -- */
 
 static int  g_combo_selected;
@@ -1009,6 +1158,8 @@ int main(void)
         test_selectable_click(w, ui);
         test_listbox_selection(w, ui);
         test_listbox_stays_in_panel(w, ui);
+        test_group_stays_in_panel(w, ui);
+        test_window_stays_in_panel(w, ui);
         test_combo_open(w, ui);
         test_toggle_group_switch(w, ui);
         test_icon_command(w, ui);
@@ -1063,6 +1214,8 @@ int main(void)
         test_selectable_click(w, ui);
         test_listbox_selection(w, ui);
         test_listbox_stays_in_panel(w, ui);
+        test_group_stays_in_panel(w, ui);
+        test_window_stays_in_panel(w, ui);
         test_combo_open(w, ui);
         test_toggle_group_switch(w, ui);
         test_icon_command(w, ui);

@@ -33,10 +33,11 @@ bool ui_mouse_in(const UiContext *ui, UiRect r)
            ui->in.mouse_x < r.x + r.w && ui->in.mouse_y < r.y + r.h;
 }
 
-/* True when the mouse is over r and not swallowed by a higher popup. */
+/* True when the mouse is over r, over the part of the screen that is drawn (what a group, a window or a popup clips to: a widget
+   the panel hides does not take the mouse), and not swallowed by a higher popup. */
 bool ui_hovered(UiContext *ui, UiRect r)
 {
-    if (!ui_mouse_in(ui, r))
+    if (!ui_mouse_in(ui, r) || !ui_mouse_in(ui, ui->clip))
         return false;
     if (ui->overlay_active && ui->layer < ui->overlay_layer &&
         ui_mouse_in(ui, ui->overlay_rect))
@@ -1356,8 +1357,11 @@ bool zui_group_begin(UiContext *ui, const char *id_str, UiRect bounds, int flags
                               bounds.y + ui->style.pad_y - (int)*scroll_y,
                               inner_w,
                               bounds.h - 2 * ui->style.pad_y);
+    UiRect outer_clip = ui->clip; /* the panel this group is in (the window, when it is not in another group) */
     ui_push_container(ui, content, ui->layer);
-    ui->clip = bounds; /* push saved the outer clip; group_end restores it */
+    /* push saved the outer clip; group_end restores it. The group's own clip is cut by it: a group bigger than the room the panel
+       it is in gives it must not draw (or take the mouse) outside that panel */
+    ui->clip = ui_rect_within(outer_clip, bounds);
 
     if (ui->group_sp < 4)
     {
@@ -1459,11 +1463,12 @@ bool zui_window_begin(UiContext *ui, const char *title, UiRect *bounds)
                               bounds->y + th + ui->style.pad_y,
                               bounds->w - 2 * ui->style.pad_x,
                               bounds->h - th - 2 * ui->style.pad_y);
+    UiRect outer_clip = ui->clip; /* the panel this window is in (the whole screen, for a window of its own) */
     ui_push_container(ui, content, wl);
     /* Clip content to the window body so widgets (e.g. an expanded tree) can't
-       spill outside. The push saved the previous clip; window_end restores it. */
-    ui->clip = zui_rect(bounds->x, bounds->y + th,
-                        bounds->w, bounds->h - th);
+       spill outside, and to the panel the window is in. The push saved the previous clip; window_end restores it. */
+    ui->clip = ui_rect_within(outer_clip, zui_rect(bounds->x, bounds->y + th,
+                                                   bounds->w, bounds->h - th));
     return true;
 }
 
