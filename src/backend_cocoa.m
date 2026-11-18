@@ -73,7 +73,7 @@
 
 /* The window's content view: every event of the keyboard and the mouse arrives here, and the software surface is drawn
    by it. Declared here, above the window's struct, so the helpers below can message it. */
-@interface ZenView : NSView <NSTextInputClient>
+@interface ZenView : NSView <NSTextInputClient, NSDraggingDestination>
 {
     BackendWindow *owner;
     NSTrackingArea *area;
@@ -2074,6 +2074,21 @@ static void modal_end(BackendWindow *b)
     (void)selector;
 }
 
+/* The Metal layer of a Vulkan surface is the view's own layer, a hosted one, which AppKit leaves the size of to whoever set it: it is
+   made as big as the view each time the view changes size (without the implicit animation of a layer's frame, which would show
+   the old size for a moment). The swapchain reads the size from it. */
+- (void)setFrameSize:(NSSize)size
+{
+    [super setFrameSize:size];
+    if (owner && owner->metal_layer)
+    {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [owner->metal_layer setFrame:NSRectToCGRect([self bounds])];
+        [CATransaction commit];
+    }
+}
+
 /* ---- cursor ---- */
 
 - (void)resetCursorRects
@@ -2430,7 +2445,14 @@ void backend_destroy(BackendWindow *b)
         }
         for (BackendWindow *w = g.windows; w; w = w->next)
             if (w->parent == b)
-                w->parent = NULL; /* a window that belonged to this one does not any more */
+            {
+                /* a window that belonged to this one does not any more: it is let go of before this one goes off the screen, which
+                   would take its child windows off with it (they are ordered out with their parent) */
+                if (w->attached)
+                    [b->window removeChildWindow:w->window];
+                w->attached = false;
+                w->parent = NULL;
+            }
         [[b->window parentWindow] removeChildWindow:b->window];
         gl_destroy(b);
         [b->cursor_now release];
