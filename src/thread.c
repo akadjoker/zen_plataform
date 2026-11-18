@@ -18,34 +18,34 @@
 
 #define UNSUPPORTED() error_set("threads are not supported on the web")
 
-PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name)
+PlatformThread *create_thread(ThreadFunc fn, void *user, const char *name)
 {
     (void)fn, (void)user, (void)name;
     UNSUPPORTED();
     return NULL;
 }
-int thread_join(PlatformThread *t) { (void)t; return -1; }
-void thread_detach(PlatformThread *t) { (void)t; }
-uint64_t thread_current_id(void) { return 1; }
-PlatformMutex *mutex_create(void)
+int join_thread(PlatformThread *t) { (void)t; return -1; }
+void detach_thread(PlatformThread *t) { (void)t; }
+uint64_t current_thread_id(void) { return 1; }
+PlatformMutex *create_mutex(void)
 {
     UNSUPPORTED();
     return NULL;
 }
-void mutex_destroy(PlatformMutex *m) { (void)m; }
-void mutex_lock(PlatformMutex *m) { (void)m; }
-bool mutex_try_lock(PlatformMutex *m) { (void)m; return false; }
-void mutex_unlock(PlatformMutex *m) { (void)m; }
-PlatformCond *cond_create(void)
+void destroy_mutex(PlatformMutex *m) { (void)m; }
+void lock_mutex(PlatformMutex *m) { (void)m; }
+bool try_lock_mutex(PlatformMutex *m) { (void)m; return false; }
+void unlock_mutex(PlatformMutex *m) { (void)m; }
+PlatformCond *create_cond(void)
 {
     UNSUPPORTED();
     return NULL;
 }
-void cond_destroy(PlatformCond *c) { (void)c; }
-void cond_signal(PlatformCond *c) { (void)c; }
-void cond_broadcast(PlatformCond *c) { (void)c; }
-void cond_wait(PlatformCond *c, PlatformMutex *m) { (void)c, (void)m; }
-bool cond_wait_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms) { (void)c, (void)m, (void)ms; return false; }
+void destroy_cond(PlatformCond *c) { (void)c; }
+void signal_cond(PlatformCond *c) { (void)c; }
+void broadcast_cond(PlatformCond *c) { (void)c; }
+void wait_cond(PlatformCond *c, PlatformMutex *m) { (void)c, (void)m; }
+bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms) { (void)c, (void)m, (void)ms; return false; }
 int cpu_count(void) { return 1; }
 
 #else
@@ -97,12 +97,12 @@ static unsigned __stdcall trampoline(void *p)
     return 0;
 }
 
-PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name)
+PlatformThread *create_thread(ThreadFunc fn, void *user, const char *name)
 {
     (void)name;
     if (!fn)
     {
-        error_set("thread_create needs a function");
+        error_set("create_thread needs a function");
         return NULL;
     }
     PlatformThread *t = calloc(1, sizeof *t);
@@ -120,7 +120,7 @@ PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name)
     return t;
 }
 
-int thread_join(PlatformThread *t)
+int join_thread(PlatformThread *t)
 {
     if (!t)
         return -1;
@@ -131,7 +131,7 @@ int thread_join(PlatformThread *t)
     return r;
 }
 
-void thread_detach(PlatformThread *t)
+void detach_thread(PlatformThread *t)
 {
     if (t && XCHG(&t->state, T_DETACHED) == T_FINISHED)
     {
@@ -140,19 +140,19 @@ void thread_detach(PlatformThread *t)
     }
 }
 
-uint64_t thread_current_id(void)
+uint64_t current_thread_id(void)
 {
     return (uint64_t)GetCurrentThreadId();
 }
 
-PlatformMutex *mutex_create(void)
+PlatformMutex *create_mutex(void)
 {
     PlatformMutex *m = malloc(sizeof *m);
     if (m)
         InitializeCriticalSection(&m->cs);
     return m;
 }
-void mutex_destroy(PlatformMutex *m)
+void destroy_mutex(PlatformMutex *m)
 {
     if (m)
     {
@@ -160,22 +160,22 @@ void mutex_destroy(PlatformMutex *m)
         free(m);
     }
 }
-void mutex_lock(PlatformMutex *m) { EnterCriticalSection(&m->cs); }
-bool mutex_try_lock(PlatformMutex *m) { return TryEnterCriticalSection(&m->cs) != 0; }
-void mutex_unlock(PlatformMutex *m) { LeaveCriticalSection(&m->cs); }
+void lock_mutex(PlatformMutex *m) { EnterCriticalSection(&m->cs); }
+bool try_lock_mutex(PlatformMutex *m) { return TryEnterCriticalSection(&m->cs) != 0; }
+void unlock_mutex(PlatformMutex *m) { LeaveCriticalSection(&m->cs); }
 
-PlatformCond *cond_create(void)
+PlatformCond *create_cond(void)
 {
     PlatformCond *c = malloc(sizeof *c);
     if (c)
         InitializeConditionVariable(&c->cv);
     return c;
 }
-void cond_destroy(PlatformCond *c) { free(c); }
-void cond_signal(PlatformCond *c) { WakeConditionVariable(&c->cv); }
-void cond_broadcast(PlatformCond *c) { WakeAllConditionVariable(&c->cv); }
-void cond_wait(PlatformCond *c, PlatformMutex *m) { SleepConditionVariableCS(&c->cv, &m->cs, INFINITE); }
-bool cond_wait_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
+void destroy_cond(PlatformCond *c) { free(c); }
+void signal_cond(PlatformCond *c) { WakeConditionVariable(&c->cv); }
+void broadcast_cond(PlatformCond *c) { WakeAllConditionVariable(&c->cv); }
+void wait_cond(PlatformCond *c, PlatformMutex *m) { SleepConditionVariableCS(&c->cv, &m->cs, INFINITE); }
+bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
 {
     return SleepConditionVariableCS(&c->cv, &m->cs, ms) != 0;
 }
@@ -230,11 +230,11 @@ static void *trampoline(void *p)
     return NULL;
 }
 
-PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name)
+PlatformThread *create_thread(ThreadFunc fn, void *user, const char *name)
 {
     if (!fn)
     {
-        error_set("thread_create needs a function");
+        error_set("create_thread needs a function");
         return NULL;
     }
     PlatformThread *t = calloc(1, sizeof *t);
@@ -254,7 +254,7 @@ PlatformThread *thread_create(ThreadFunc fn, void *user, const char *name)
     return t;
 }
 
-int thread_join(PlatformThread *t)
+int join_thread(PlatformThread *t)
 {
     if (!t)
         return -1;
@@ -264,7 +264,7 @@ int thread_join(PlatformThread *t)
     return r;
 }
 
-void thread_detach(PlatformThread *t)
+void detach_thread(PlatformThread *t)
 {
     if (!t)
         return;
@@ -273,12 +273,12 @@ void thread_detach(PlatformThread *t)
         free(t);
 }
 
-uint64_t thread_current_id(void)
+uint64_t current_thread_id(void)
 {
     return (uint64_t)(uintptr_t)pthread_self();
 }
 
-PlatformMutex *mutex_create(void)
+PlatformMutex *create_mutex(void)
 {
     PlatformMutex *m = malloc(sizeof *m);
     if (!m)
@@ -295,7 +295,7 @@ PlatformMutex *mutex_create(void)
     }
     return m;
 }
-void mutex_destroy(PlatformMutex *m)
+void destroy_mutex(PlatformMutex *m)
 {
     if (m)
     {
@@ -303,11 +303,11 @@ void mutex_destroy(PlatformMutex *m)
         free(m);
     }
 }
-void mutex_lock(PlatformMutex *m) { pthread_mutex_lock(&m->m); }
-bool mutex_try_lock(PlatformMutex *m) { return pthread_mutex_trylock(&m->m) == 0; }
-void mutex_unlock(PlatformMutex *m) { pthread_mutex_unlock(&m->m); }
+void lock_mutex(PlatformMutex *m) { pthread_mutex_lock(&m->m); }
+bool try_lock_mutex(PlatformMutex *m) { return pthread_mutex_trylock(&m->m) == 0; }
+void unlock_mutex(PlatformMutex *m) { pthread_mutex_unlock(&m->m); }
 
-PlatformCond *cond_create(void)
+PlatformCond *create_cond(void)
 {
     PlatformCond *c = malloc(sizeof *c);
     if (!c)
@@ -315,7 +315,7 @@ PlatformCond *cond_create(void)
     pthread_condattr_t a;
     pthread_condattr_init(&a);
 #if !defined(__APPLE__) && defined(CLOCK_MONOTONIC)
-    pthread_condattr_setclock(&a, CLOCK_MONOTONIC); /* timeouts must not follow the wall clock (macOS: see cond_wait_timeout) */
+    pthread_condattr_setclock(&a, CLOCK_MONOTONIC); /* timeouts must not follow the wall clock (macOS: see wait_cond_timeout) */
 #endif
     int rc = pthread_cond_init(&c->c, &a);
     pthread_condattr_destroy(&a);
@@ -326,7 +326,7 @@ PlatformCond *cond_create(void)
     }
     return c;
 }
-void cond_destroy(PlatformCond *c)
+void destroy_cond(PlatformCond *c)
 {
     if (c)
     {
@@ -334,11 +334,11 @@ void cond_destroy(PlatformCond *c)
         free(c);
     }
 }
-void cond_signal(PlatformCond *c) { pthread_cond_signal(&c->c); }
-void cond_broadcast(PlatformCond *c) { pthread_cond_broadcast(&c->c); }
-void cond_wait(PlatformCond *c, PlatformMutex *m) { pthread_cond_wait(&c->c, &m->m); }
+void signal_cond(PlatformCond *c) { pthread_cond_signal(&c->c); }
+void broadcast_cond(PlatformCond *c) { pthread_cond_broadcast(&c->c); }
+void wait_cond(PlatformCond *c, PlatformMutex *m) { pthread_cond_wait(&c->c, &m->m); }
 
-bool cond_wait_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
+bool wait_cond_timeout(PlatformCond *c, PlatformMutex *m, uint32_t ms)
 {
 #if defined(__APPLE__)
     /* macOS has no pthread_condattr_setclock, and pthread_cond_timedwait counts on the wall clock, which can be set

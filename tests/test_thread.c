@@ -39,11 +39,11 @@ static int bump(void *user)
     Counter *c = user;
     for (int i = 0; i < c->times; i++)
     {
-        mutex_lock(c->m);
-        mutex_lock(c->m); /* recursive */
+        lock_mutex(c->m);
+        lock_mutex(c->m); /* recursive */
         ++*c->counter;
-        mutex_unlock(c->m);
-        mutex_unlock(c->m);
+        unlock_mutex(c->m);
+        unlock_mutex(c->m);
     }
     return 0;
 }
@@ -52,42 +52,42 @@ static uint64_t g_other_id;
 static int record_id(void *user)
 {
     (void)user;
-    g_other_id = thread_current_id();
+    g_other_id = current_thread_id();
     return 0;
 }
 
 static void test_basic(void)
 {
     int arg = 21;
-    PlatformThread *t = thread_create(returns_value, &arg, "worker");
+    PlatformThread *t = create_thread(returns_value, &arg, "worker");
     CHECK(t != NULL);
-    CHECK(t && thread_join(t) == 42);
+    CHECK(t && join_thread(t) == 42);
 
-    CHECK(thread_create(NULL, NULL, NULL) == NULL);
+    CHECK(create_thread(NULL, NULL, NULL) == NULL);
     CHECK(platform_get_error()[0] != '\0');
 
-    t = thread_create(record_id, NULL, NULL);
+    t = create_thread(record_id, NULL, NULL);
     CHECK(t != NULL);
     if (t)
-        thread_join(t);
-    CHECK(g_other_id != 0 && g_other_id != thread_current_id());
+        join_thread(t);
+    CHECK(g_other_id != 0 && g_other_id != current_thread_id());
 
     CHECK(cpu_count() >= 1);
 }
 
 static void test_mutex_counter(void)
 {
-    PlatformMutex *m = mutex_create();
+    PlatformMutex *m = create_mutex();
     CHECK(m != NULL);
     long counter = 0;
     Counter c = {m, &counter, 20000};
     PlatformThread *ts[8];
     for (int i = 0; i < 8; i++)
-        ts[i] = thread_create(bump, &c, "bump");
+        ts[i] = create_thread(bump, &c, "bump");
     for (int i = 0; i < 8; i++)
-        CHECK(ts[i] && thread_join(ts[i]) == 0);
+        CHECK(ts[i] && join_thread(ts[i]) == 0);
     CHECK(counter == 8 * 20000L);
-    mutex_destroy(m);
+    destroy_mutex(m);
 }
 
 /* ---- try_lock across threads ---- */
@@ -101,29 +101,29 @@ typedef struct
 static int try_it(void *user)
 {
     TryArg *a = user;
-    a->got = mutex_try_lock(a->m);
+    a->got = try_lock_mutex(a->m);
     if (a->got)
-        mutex_unlock(a->m);
+        unlock_mutex(a->m);
     return 0;
 }
 
 static void test_try_lock(void)
 {
-    PlatformMutex *m = mutex_create();
+    PlatformMutex *m = create_mutex();
     TryArg a = {m, true};
 
-    mutex_lock(m);
-    CHECK(mutex_try_lock(m)); /* the holder may lock again */
-    mutex_unlock(m);
-    PlatformThread *t = thread_create(try_it, &a, NULL);
-    thread_join(t);
+    lock_mutex(m);
+    CHECK(try_lock_mutex(m)); /* the holder may lock again */
+    unlock_mutex(m);
+    PlatformThread *t = create_thread(try_it, &a, NULL);
+    join_thread(t);
     CHECK(!a.got); /* another thread may not */
 
-    mutex_unlock(m);
-    t = thread_create(try_it, &a, NULL);
-    thread_join(t);
+    unlock_mutex(m);
+    t = create_thread(try_it, &a, NULL);
+    join_thread(t);
     CHECK(a.got);
-    mutex_destroy(m);
+    destroy_mutex(m);
 }
 
 /* ---- producer / consumer on a condition ---- */
@@ -143,14 +143,14 @@ static int consumer(void *user)
     Queue *q = user;
     for (;;)
     {
-        mutex_lock(q->m);
+        lock_mutex(q->m);
         while (q->count == 0)
-            cond_wait(q->not_empty, q->m);
+            wait_cond(q->not_empty, q->m);
         int v = q->items[q->head];
         q->head = (q->head + 1) % QUEUE_N;
         q->count--;
-        cond_signal(q->not_full);
-        mutex_unlock(q->m);
+        signal_cond(q->not_full);
+        unlock_mutex(q->m);
         if (v < 0)
             return 0;
         q->sum += v;
@@ -160,32 +160,32 @@ static int consumer(void *user)
 static void test_cond(void)
 {
     Queue q = {0};
-    q.m = mutex_create();
-    q.not_empty = cond_create();
-    q.not_full = cond_create();
+    q.m = create_mutex();
+    q.not_empty = create_cond();
+    q.not_full = create_cond();
     CHECK(q.m && q.not_empty && q.not_full);
 
-    PlatformThread *t = thread_create(consumer, &q, "consumer");
+    PlatformThread *t = create_thread(consumer, &q, "consumer");
     long expect = 0;
     for (int i = 0; i <= 500; i++)
     {
         int v = i == 500 ? -1 : i; /* -1 ends the consumer */
         if (i < 500)
             expect += i;
-        mutex_lock(q.m);
+        lock_mutex(q.m);
         while (q.count == QUEUE_N)
-            cond_wait(q.not_full, q.m);
+            wait_cond(q.not_full, q.m);
         q.items[(q.head + q.count) % QUEUE_N] = v;
         q.count++;
-        cond_signal(q.not_empty);
-        mutex_unlock(q.m);
+        signal_cond(q.not_empty);
+        unlock_mutex(q.m);
     }
-    CHECK(t && thread_join(t) == 0);
+    CHECK(t && join_thread(t) == 0);
     CHECK(q.sum == expect);
 
-    mutex_destroy(q.m);
-    cond_destroy(q.not_empty);
-    cond_destroy(q.not_full);
+    destroy_mutex(q.m);
+    destroy_cond(q.not_empty);
+    destroy_cond(q.not_full);
 }
 
 /* ---- timeouts ---- */
@@ -200,36 +200,36 @@ static int signal_later(void *user)
 {
     Signal *s = user;
     time_sleep(30);
-    mutex_lock(s->m);
-    cond_signal(s->c);
-    mutex_unlock(s->m);
+    lock_mutex(s->m);
+    signal_cond(s->c);
+    unlock_mutex(s->m);
     return 0;
 }
 
 static void test_timeout(void)
 {
-    Signal s = {mutex_create(), cond_create()};
+    Signal s = {create_mutex(), create_cond()};
 
-    mutex_lock(s.m);
+    lock_mutex(s.m);
     double t0 = time_seconds();
-    bool signalled = cond_wait_timeout(s.c, s.m, 60);
+    bool signalled = wait_cond_timeout(s.c, s.m, 60);
     double dt = time_seconds() - t0;
-    mutex_unlock(s.m);
+    unlock_mutex(s.m);
     CHECK(!signalled);
     CHECK(dt >= 0.05 && dt < 1.0);
 
-    PlatformThread *t = thread_create(signal_later, &s, NULL);
-    mutex_lock(s.m);
+    PlatformThread *t = create_thread(signal_later, &s, NULL);
+    lock_mutex(s.m);
     t0 = time_seconds();
-    signalled = cond_wait_timeout(s.c, s.m, 5000);
+    signalled = wait_cond_timeout(s.c, s.m, 5000);
     dt = time_seconds() - t0;
-    mutex_unlock(s.m);
+    unlock_mutex(s.m);
     CHECK(signalled);
     CHECK(dt < 2.0);
-    thread_join(t);
+    join_thread(t);
 
-    mutex_destroy(s.m);
-    cond_destroy(s.c);
+    destroy_mutex(s.m);
+    destroy_cond(s.c);
 }
 
 /* ---- detach ---- */
@@ -240,17 +240,17 @@ static PlatformMutex *g_done_mutex;
 
 static int detached_done(void)
 {
-    mutex_lock(g_done_mutex);
+    lock_mutex(g_done_mutex);
     int v = g_detached_done;
-    mutex_unlock(g_done_mutex);
+    unlock_mutex(g_done_mutex);
     return v;
 }
 
 static void set_detached_done(int v)
 {
-    mutex_lock(g_done_mutex);
+    lock_mutex(g_done_mutex);
     g_detached_done = v;
-    mutex_unlock(g_done_mutex);
+    unlock_mutex(g_done_mutex);
 }
 
 static int detached_work(void *user)
@@ -263,22 +263,22 @@ static int detached_work(void *user)
 
 static void test_detach(void)
 {
-    g_done_mutex = mutex_create();
-    PlatformThread *t = thread_create(detached_work, NULL, "detached");
-    thread_detach(t); /* before it finishes: the thread frees its own record */
+    g_done_mutex = create_mutex();
+    PlatformThread *t = create_thread(detached_work, NULL, "detached");
+    detach_thread(t); /* before it finishes: the thread frees its own record */
     for (int i = 0; i < 200 && !detached_done(); i++)
         time_sleep(5);
     CHECK(detached_done());
 
     set_detached_done(0);
-    t = thread_create(detached_work, NULL, NULL);
+    t = create_thread(detached_work, NULL, NULL);
     for (int i = 0; i < 200 && !detached_done(); i++)
         time_sleep(5);
     time_sleep(20);
-    thread_detach(t); /* after it finished: detach frees the record */
+    detach_thread(t); /* after it finished: detach frees the record */
     CHECK(detached_done());
     time_sleep(20);
-    mutex_destroy(g_done_mutex);
+    destroy_mutex(g_done_mutex);
 }
 
 int main(void)

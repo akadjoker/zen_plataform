@@ -225,7 +225,8 @@ void crash_handler_remove(void)
 
 /* sigaltstack is per thread: g_stack serves the thread that installed the handlers, and any other thread that runs
    out of its stack has nowhere to run the handler, so the kernel kills the process with no report. The threads
-   thread_create starts get a stack of their own here (not g_stack: two threads on one stack would trample each other). */
+   create_thread starts get a stack of their own here (not g_stack: two threads on one stack would trample each
+   other). */
 static _Thread_local char *t_stack;
 
 void crash_thread_enter(void)

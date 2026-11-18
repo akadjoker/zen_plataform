@@ -12,11 +12,7 @@
  * Two oracles that do not go through the backend's own getters: CoreGraphics' window list (where the window server says
  * the window is, in the same top-left convention) and, read-only, AppKit through the Objective-C runtime's C interface.
  */
-/* The Mach headers some Apple headers include declare a thread_create of their own, which platform.h's conflicts with when
-   both are in one file. This test uses the library's threads nowhere, so they are kept apart here. */
-#define thread_create zen_platform_thread_create
 #include "platform.h"
-#undef thread_create
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>

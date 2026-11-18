@@ -10,15 +10,7 @@
 #ifndef COCOA_TEST_UTIL_H
 #define COCOA_TEST_UTIL_H
 
-/* The Mach headers some Apple headers include declare a thread_create of their own, which platform.h's conflicts with when
-   both are in one file. The tests that use the library's threads include platform.h first, without this. */
-#ifndef COCOA_TEST_USES_THREADS
-#define thread_create zen_platform_thread_create
-#endif
 #include "platform.h"
-#ifndef COCOA_TEST_USES_THREADS
-#undef thread_create
-#endif
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>

@@ -49,16 +49,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Cocoa pulls in <mach/task.h>, which declares a thread_create of its own, and platform.h declares the library's
-   (thread_create(ThreadFunc, void *, const char *)): in one file the two conflict. This file calls neither, so the
-   library's goes by another name here, for the length of the library headers. */
-#define thread_create zen_platform_thread_create
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
 #include "preedit.h"
 #include "vulkan_internal.h"
-#undef thread_create
 
 #define PENDING_MAX 256
 #define MAX_MONITORS 16

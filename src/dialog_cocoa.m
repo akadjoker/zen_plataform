@@ -16,11 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Cocoa pulls in a thread_create of Mach's, which platform.h's meets (see backend_cocoa.m). */
-#define thread_create zen_platform_thread_create
 #include "platform.h"
 #include "error_internal.h"
-#undef thread_create
 
 static bool bad_url(const char *url)
 {

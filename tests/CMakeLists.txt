@@ -225,7 +225,7 @@ if(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
         if(t STREQUAL "test_ui_cocoa")
             target_link_libraries(${t} PRIVATE zen_2d zen_ui platform m "-framework CoreGraphics" "-framework CoreFoundation")
         elseif(t STREQUAL "test_gl_worker_cocoa")
-            target_link_libraries(${t} PRIVATE platform) # no Apple headers in it: the library's thread_create and Mach's cannot meet
+            target_link_libraries(${t} PRIVATE platform) # plain C, no Apple headers in it
         else()
             target_link_libraries(${t} PRIVATE platform "-framework CoreGraphics" "-framework CoreFoundation")
         endif()

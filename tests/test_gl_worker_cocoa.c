@@ -2,7 +2,7 @@
  * test_gl_worker_cocoa.c - gl_worker_*: a second GL context on another thread that shares objects with the window's, made
  * and destroyed over and over while the window's thread keeps drawing; modelled on test_gl_worker_x11.c, with the sharing
  * checked in both directions and by the contents (a buffer and a texture made on one context are read on the other, from a
- * real second thread). Plain C with no Apple headers (the library's thread_create and the Mach one cannot meet in one file).
+ * real second thread). Plain C with no Apple headers.
  * Skips (77) without a graphical session, unless ZP_REQUIRE_DISPLAY is set.
  */
 #include "platform.h"
@@ -168,7 +168,7 @@ static void test_shared_objects(PlatformWindow *w)
         return;
     }
     Job job = {.worker = worker, .rounds = 20, .window_buffer = window_buffer};
-    PlatformThread *t = thread_create(worker_main, &job, "gl-worker");
+    PlatformThread *t = create_thread(worker_main, &job, "gl-worker");
     CHECK(t != NULL);
     if (!t)
     {
@@ -182,7 +182,7 @@ static void test_shared_objects(PlatformWindow *w)
         window_swap(w);
         time_sleep(2);
     }
-    CHECK(thread_join(t) == 0);
+    CHECK(join_thread(t) == 0);
     CHECK(job.made_current);
     CHECK(job.has_version);
     CHECK(job.shader_ok);
@@ -227,7 +227,7 @@ static void test_cycles(PlatformWindow *w)
             return;
         }
         Job job = {.worker = worker, .rounds = 1};
-        PlatformThread *t = thread_create(worker_main, &job, "gl-cycle");
+        PlatformThread *t = create_thread(worker_main, &job, "gl-cycle");
         if (!t)
         {
             CHECK(false);
@@ -236,7 +236,7 @@ static void test_cycles(PlatformWindow *w)
         }
         if (i % 2)
             window_swap(w);
-        thread_join(t);
+        join_thread(t);
         made += job.made_current;
         gl_worker_destroy(worker);
         window_make_current(w);
@@ -265,7 +265,7 @@ static void test_several_workers(PlatformWindow *w)
     }
     for (int i = 0; i < 3; i++)
         if (group.job[i].worker)
-            group.thread[i] = thread_create(worker_main, &group.job[i], "gl-group");
+            group.thread[i] = create_thread(worker_main, &group.job[i], "gl-group");
     for (int i = 0; i < 20; i++)
     {
         window_begin_frame(w);
@@ -276,7 +276,7 @@ static void test_several_workers(PlatformWindow *w)
     for (int i = 0; i < 3; i++)
     {
         if (group.thread[i])
-            CHECK(thread_join(group.thread[i]) == 0);
+            CHECK(join_thread(group.thread[i]) == 0);
         CHECK(group.job[i].made_current && group.job[i].shader_ok);
         if (group.job[i].buffer)
         {

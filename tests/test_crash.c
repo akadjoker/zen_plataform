@@ -93,7 +93,7 @@ static int overflow_in_thread(void *user)
     return 0;
 }
 
-// kind: 0 invalid memory access, 1 abort, 2 stack overflow, 3 stack overflow in a thread made by thread_create
+// kind: 0 invalid memory access, 1 abort, 2 stack overflow, 3 stack overflow in a thread made by create_thread
 static void run_child(const char *path, int kind, int *signal_seen, char **report)
 {
     remove(path);
@@ -110,7 +110,7 @@ static void run_child(const char *path, int kind, int *signal_seen, char **repor
         else if (kind == 2)
             overflow(0);
         else
-            thread_join(thread_create(overflow_in_thread, NULL, "overflow"));
+            join_thread(create_thread(overflow_in_thread, NULL, "overflow"));
         _exit(4);
     }
     int status = 0;
