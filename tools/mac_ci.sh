@@ -17,17 +17,22 @@
 #                      exit status 1 if there are any.
 #   test <name> ...    every test of build-<name>, verbose, each with its own timeout (a test's TIMEOUT property wins over
 #                      ZP_CI_TEST_TIMEOUT); a failed or timed out test does not stop the others. Logs: ci-logs/<name>.ctest.log,
-#                      .LastTest.log (ctest's own), .tests.txt (one line per test).
+#                      .LastTest.log (ctest's own), .tests.txt (one line per test), and a picture of the desktop every
+#                      ZP_CI_SHOTS seconds (4; 0 for none) in ci-logs/<name>.shots/, named by the seconds since the tests began
+#                      (what a window of another application, such as a system dialog, did to the run shows in them: the
+#                      desktop picture at the end of run 44285580324 had one nothing else had told of).
 #   summary            markdown for the job summary: for every configuration the number of errors (the first ones, as the compiler
 #                      printed them), the warnings, and the tests that failed.
 #
-# ZP_CI_JOBS (4), ZP_CI_LOGS (ci-logs), ZP_CI_GENERATOR (Unix Makefiles), ZP_CI_TEST_TIMEOUT (150), WARN_FILTER (stb_).
+# ZP_CI_JOBS (4), ZP_CI_LOGS (ci-logs), ZP_CI_GENERATOR (Unix Makefiles), ZP_CI_TEST_TIMEOUT (150), ZP_CI_SHOTS (4),
+# WARN_FILTER (stb_).
 
 set -u
 LOGS=${ZP_CI_LOGS:-ci-logs}
 JOBS=${ZP_CI_JOBS:-4}
 GEN=${ZP_CI_GENERATOR:-Unix Makefiles}
 TEST_TIMEOUT=${ZP_CI_TEST_TIMEOUT:-150}
+SHOTS=${ZP_CI_SHOTS:-4}
 WARN_FILTER=${WARN_FILTER:-stb_}
 
 cmd_build() {
@@ -72,6 +77,31 @@ cmd_warnings() {
     return 0
 }
 
+# A picture of the desktop every $SHOTS seconds until shots_stop (only where there is a screencapture, so not on Linux).
+SHOTS_PID=
+shots_start() {
+    if [ "$SHOTS" -le 0 ] || ! command -v screencapture > /dev/null 2>&1; then
+        return 0
+    fi
+    mkdir -p "$LOGS/$1.shots"
+    (
+        SECONDS=0
+        while :; do
+            screencapture -x -t jpg "$LOGS/$1.shots/$(printf '%04d' "$SECONDS")s.jpg" > /dev/null 2>&1
+            sleep "$SHOTS"
+        done
+    ) &
+    SHOTS_PID=$!
+}
+
+shots_stop() {
+    if [ -n "$SHOTS_PID" ]; then
+        kill "$SHOTS_PID" > /dev/null 2>&1
+        wait "$SHOTS_PID" > /dev/null 2>&1
+        SHOTS_PID=
+    fi
+}
+
 cmd_test() {
     local name=$1 dir rc
     shift
@@ -81,8 +111,10 @@ cmd_test() {
         echo "no $dir: nothing was built"
         return 1
     fi
+    shots_start "$name"
     ctest --test-dir "$dir" -V --no-tests=error --timeout "$TEST_TIMEOUT" "$@" 2>&1 | tee "$LOGS/$name.ctest.log"
     rc=${PIPESTATUS[0]}
+    shots_stop
     cp "$dir/Testing/Temporary/LastTest.log" "$LOGS/$name.LastTest.log" 2> /dev/null || true
     grep -E '^ *[0-9]+/[0-9]+ Test +#[0-9]+: ' "$LOGS/$name.ctest.log" > "$LOGS/$name.tests.txt" || true
     return "$rc"
