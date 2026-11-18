@@ -15,6 +15,29 @@ static id general(void)
     return msg_id(ns_class("NSPasteboard"), "generalPasteboard");
 }
 
+/* A custom MIME type is a pasteboard type of this name: NSPasteboard takes only valid UTIs ("'application/x-zen-test' is not a valid
+   UTI string. Cannot set data for an invalid UTI." was what run 44285580324 logged, and no data went in), so the library spells the
+   MIME type as a UTI (src/pasteboard_type.h: lower case, '/' as "-s", '-' as "-d"). Written out here, not computed, so that a change
+   of the rule is a change of this test. */
+#define CUSTOM_MIME "application/x-zen-test"
+#define CUSTOM_TYPE "com.zen-platform.mime.application-sx-dzen-dtest"
+#define OTHER_MIME "application/x-zen-other"
+
+/* What the pasteboard holds, by type, for a failure to say (the types of its first item, and the number of items). */
+static void dump_types(const char *when)
+{
+    id types = msg_id(general(), "types");
+    unsigned long n = types ? msg_ulong(types, "count") : 0;
+    id items = msg_id(general(), "pasteboardItems");
+    printf("  pasteboard %s: %lu items, types of the first:", when, items ? msg_ulong(items, "count") : 0UL);
+    for (unsigned long i = 0; i < n; i++)
+    {
+        const char *t = msg_cstr(MSG(id, id, SEL, unsigned long)(types, sel_registerName("objectAtIndex:"), i), "UTF8String");
+        printf(" [%s]", t ? t : "?");
+    }
+    printf("%s\n", n ? "" : " (none)");
+}
+
 /* what AppKit says the pasteboard holds, for a type named as AppKit names it */
 static char *pb_string(const char *type)
 {
@@ -79,27 +102,61 @@ static void test_data(void)
 
     /* a custom type: bytes as they are, NULs included */
     const unsigned char blob[] = {0, 1, 2, 0, 255, 254, 0, 7};
-    CHECK(clipboard_set_data("application/x-zen-test", blob, sizeof blob));
-    CHECK(clipboard_has_data("application/x-zen-test"));
-    CHECK(!clipboard_has_data("application/x-zen-other"));
-    d = clipboard_get_data("application/x-zen-test", &n);
+    bool wrote = clipboard_set_data(CUSTOM_MIME, blob, sizeof blob);
+    CHECK(wrote);
+    if (!wrote)
+        printf("  clipboard_set_data(" CUSTOM_MIME "): %s\n", platform_get_error());
+    bool has = clipboard_has_data(CUSTOM_MIME);
+    CHECK(has);
+    if (!has)
+        dump_types("after clipboard_set_data");
+    CHECK(!clipboard_has_data(OTHER_MIME));
+    d = clipboard_get_data(CUSTOM_MIME, &n);
     CHECK(d && n == sizeof blob && memcmp(d, blob, sizeof blob) == 0 && d[sizeof blob] == '\0');
     fs_free(d);
-    CHECK(pb_data_length("application/x-zen-test") == sizeof blob);
-    CHECK(clipboard_get_data("application/x-zen-other", &n) == NULL);
+    unsigned long held = pb_data_length(CUSTOM_TYPE);
+    if (held != sizeof blob)
+        printf("  AppKit holds %lu bytes under " CUSTOM_TYPE " (wanted %zu)\n", held, sizeof blob);
+    CHECK(held == sizeof blob);
+    CHECK(clipboard_get_data(OTHER_MIME, &n) == NULL);
 
     /* several representations of one content, set together, each read by its own type */
-    const ClipboardItem items[] = {{CLIPBOARD_TEXT, "both", 4}, {"application/x-zen-test", blob, sizeof blob}};
-    CHECK(clipboard_set_items(items, 2));
-    CHECK(clipboard_has_data(CLIPBOARD_TEXT) && clipboard_has_data("application/x-zen-test"));
+    const ClipboardItem items[] = {{CLIPBOARD_TEXT, "both", 4}, {CUSTOM_MIME, blob, sizeof blob}};
+    bool wrote_items = clipboard_set_items(items, 2);
+    CHECK(wrote_items);
+    bool both = clipboard_has_data(CLIPBOARD_TEXT) && clipboard_has_data(CUSTOM_MIME);
+    CHECK(both);
+    if (!wrote_items || !both)
+        dump_types("after clipboard_set_items");
     CHECK(strcmp(clipboard_get(), "both") == 0);
-    d = clipboard_get_data("application/x-zen-test", &n);
+    d = clipboard_get_data(CUSTOM_MIME, &n);
     CHECK(d && n == sizeof blob);
     fs_free(d);
 
+    /* the types the system has a name for are read by other programs under that name: text/html is public.html, image/jpeg is
+       public.jpeg (what AppKit says, written out here, independent of the library's table) */
+    CHECK(clipboard_set_data("text/html", "<b>x</b>", 8));
+    CHECK(pb_data_length("public.html") == 8);
+    CHECK(clipboard_has_data("text/html") && clipboard_has_data("TEXT/HTML"));
+    d = clipboard_get_data("text/html", &n);
+    CHECK(d && n == 8 && memcmp(d, "<b>x</b>", 8) == 0);
+    fs_free(d);
+    CHECK(clipboard_set_data("image/jpeg", blob, sizeof blob));
+    CHECK(pb_data_length("public.jpeg") == sizeof blob);
+    /* a MIME type that cannot be a pasteboard type (the core refuses an empty one; this one is too long for a UTI) is an error and
+       not a success with nothing written */
+    CHECK(!clipboard_set_data("", blob, sizeof blob));
+    char too_long[300];
+    memset(too_long, 'a', sizeof too_long - 1);
+    too_long[sizeof too_long - 1] = '\0';
+    platform_clear_error();
+    CHECK(!clipboard_set_data(too_long, blob, sizeof blob));
+    CHECK(platform_get_error()[0] != '\0');
+    CHECK(!clipboard_has_data(too_long));
+
     /* setting again replaces, and count 0 clears everything */
     CHECK(clipboard_set_data(CLIPBOARD_TEXT, "only text", 9));
-    CHECK(!clipboard_has_data("application/x-zen-test"));
+    CHECK(!clipboard_has_data(CUSTOM_MIME));
     CHECK(clipboard_set_items(NULL, 0));
     CHECK(!clipboard_has_data(CLIPBOARD_TEXT));
 }

@@ -52,6 +52,7 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "pasteboard_type.h"
 #include "preedit.h"
 #include "vulkan_internal.h"
 
@@ -3132,15 +3133,19 @@ void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
 
 /* ---- clipboard: the general pasteboard ---- */
 
-/* The pasteboard type of a MIME type: text and PNG have their own, anything else is a type named as the MIME type is. Files
-   (text/uri-list) are not a type of an item but file URLs, written and read as such. */
+/* The pasteboard type of a MIME type: text and PNG have their own, and any other is the UTI that pasteboard_type.h makes of it (a
+   pasteboard type has to be a valid UTI: NSPasteboard refuses a bare MIME string, "not a valid UTI string"); nil for a MIME type that
+   has none (empty, or too long). Files (text/uri-list) are not a type of an item but file URLs, written and read as such. */
 static NSPasteboardType clipboard_type(const char *mime)
 {
     if (strcmp(mime, CLIPBOARD_TEXT) == 0)
         return NSPasteboardTypeString;
     if (strcmp(mime, CLIPBOARD_PNG) == 0)
         return NSPasteboardTypePNG;
-    return [NSString stringWithUTF8String:mime];
+    char uti[PASTEBOARD_TYPE_CAP];
+    if (!pasteboard_type_for_mime(mime, uti, sizeof uti))
+        return nil;
+    return [NSString stringWithUTF8String:uti];
 }
 
 /* The URLs of a text/uri-list: one per line, comments (#) and empty lines left out. */
@@ -3174,6 +3179,7 @@ bool backend_clipboard_set(const ClipboardItem *items, int count)
         NSPasteboardItem *item = [[NSPasteboardItem alloc] init];
         NSMutableArray *objects = [NSMutableArray array];
         bool item_used = false;
+        const char *refused = NULL; /* the first MIME type the pasteboard did not take: no type for it, or the data not accepted */
         for (int i = 0; i < count; i++)
         {
             const ClipboardItem *it = &items[i];
@@ -3186,23 +3192,29 @@ bool backend_clipboard_set(const ClipboardItem *items, int count)
             else if (strcmp(it->mime, CLIPBOARD_TEXT) == 0)
             {
                 NSString *text = [[NSString alloc] initWithBytes:it->data length:it->size encoding:NSUTF8StringEncoding];
-                if (text)
-                {
-                    [item setString:text forType:NSPasteboardTypeString];
+                if (text && [item setString:text forType:NSPasteboardTypeString])
                     item_used = true;
-                }
+                else if (!refused)
+                    refused = it->mime;
                 [text release];
             }
             else
             {
-                [item setData:[NSData dataWithBytes:it->data length:it->size] forType:clipboard_type(it->mime)];
-                item_used = true;
+                /* setData:forType: says no (and logs "not a valid UTI string") for a type it does not take, and the item would go
+                   on to the pasteboard without the data: what it says is what the program is told */
+                NSPasteboardType type = clipboard_type(it->mime);
+                if (type && [item setData:[NSData dataWithBytes:it->data length:it->size] forType:type])
+                    item_used = true;
+                else if (!refused)
+                    refused = it->mime;
             }
         }
         if (item_used)
             [objects insertObject:item atIndex:0];
         ok = [objects count] == 0 || [pb writeObjects:objects];
         [item release];
+        if (refused)
+            return error_set("the pasteboard did not take the data of \"%s\" (the others were written)", refused);
     }
     return ok ? true : error_set("cannot write the clipboard");
 }
@@ -3216,7 +3228,10 @@ bool backend_clipboard_has(const char *mime)
         if (strcmp(mime, CLIPBOARD_URIS) == 0)
             has = [pasteboard_files(pb) count] > 0;
         else
-            has = [pb availableTypeFromArray:[NSArray arrayWithObject:clipboard_type(mime)]] != nil;
+        {
+            NSPasteboardType type = clipboard_type(mime);
+            has = type && [pb availableTypeFromArray:[NSArray arrayWithObject:type]] != nil;
+        }
     }
     return has;
 }
@@ -3247,7 +3262,10 @@ void *backend_clipboard_get(const char *mime, size_t *size)
         else if (strcmp(mime, CLIPBOARD_TEXT) == 0)
             joined = [pb stringForType:NSPasteboardTypeString];
         else
-            data = [pb dataForType:clipboard_type(mime)];
+        {
+            NSPasteboardType type = clipboard_type(mime);
+            data = type ? [pb dataForType:type] : nil;
+        }
         if (joined)
         {
             bytes = [joined UTF8String];
