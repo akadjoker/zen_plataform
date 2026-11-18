@@ -11,6 +11,7 @@
  * WRITTEN, NEVER COMPILED OR RUN: made when no run of the macOS job was allowed (see docs/MAC-PORT.md).
  */
 #import <Cocoa/Cocoa.h>
+#import <ApplicationServices/ApplicationServices.h> /* CGSessionCopyCurrentDictionary */
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -41,11 +42,21 @@ static NSString *ns(const char *s)
     return r ? r : @"";
 }
 
-/* The application has to exist, and be in front, for its dialog to be seen. */
-static void bring_up(void)
+/* The application has to exist, and be in front, for its dialog to be seen. A dialog may come before platform_init (a program
+   that tells the user why it could not start): the application is made a regular one here too (backend_init does the same, and
+   asking twice changes nothing), because a program that is not in an application bundle is a background process until it says
+   otherwise, and the dialog of a background process does not come to the front. NSApplication ends the process when there is no
+   window server to talk to, so that is asked first and is an error. */
+static bool bring_up(void)
 {
+    CFDictionaryRef session = CGSessionCopyCurrentDictionary();
+    if (!session)
+        return error_set("no graphical session: the program has no connection to the window server");
+    CFRelease(session);
     [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     [NSApp activateIgnoringOtherApps:YES];
+    return true;
 }
 
 /* ---- message boxes ---- */
@@ -58,7 +69,8 @@ bool message_box(PlatformWindow *parent, MessageKind kind, const char *title, co
         return error_set("the dialogs of macOS must be used from the main thread");
     @autoreleasepool
     {
-        bring_up();
+        if (!bring_up())
+            return false;
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:ns(title)];
         [alert setInformativeText:ns(message)];
@@ -83,7 +95,8 @@ int confirm_box(PlatformWindow *parent, const char *title, const char *message)
     int answer;
     @autoreleasepool
     {
-        bring_up();
+        if (!bring_up())
+            return -1;
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:ns(title)];
         [alert setInformativeText:ns(message)];
@@ -173,7 +186,8 @@ static int run_panel(PanelKind kind, const char *title, const char *default_path
     int count = 0;
     @autoreleasepool
     {
-        bring_up();
+        if (!bring_up())
+            return 0;
         NSSavePanel *panel = kind == PANEL_SAVE ? [NSSavePanel savePanel] : [NSOpenPanel openPanel];
         if (title && title[0])
         {
