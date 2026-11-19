@@ -11,7 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static char *g_text; /* what clipboard_get last returned */
+static char *g_text;    /* what clipboard_get last returned */
+static char *g_primary; /* what clipboard_get_primary last returned */
 
 bool clipboard_set_items(const ClipboardItem *items, int count)
 {
@@ -82,4 +83,30 @@ bool clipboard_get_image(Framebuffer *out)
     if (!ok)
         return error_set("cannot decode the clipboard image");
     return true;
+}
+
+bool clipboard_has_primary_support(void)
+{
+    return core_platform_ready() && backend_primary_supported();
+}
+
+bool clipboard_set_primary(const char *utf8)
+{
+    if (!core_platform_ready())
+        return error_set("the platform is not initialized (platform_init has not succeeded)");
+    if (!backend_primary_supported())
+        return false; /* no such thing here: nothing to report, clipboard_has_primary_support says so */
+    return backend_primary_set(utf8, utf8 ? strlen(utf8) : 0);
+}
+
+const char *clipboard_get_primary(void)
+{
+    free(g_primary);
+    g_primary = NULL;
+    if (core_platform_ready() && backend_primary_supported())
+    {
+        size_t n = 0;
+        g_primary = backend_primary_get(&n);
+    }
+    return g_primary ? g_primary : "";
 }

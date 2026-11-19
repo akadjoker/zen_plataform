@@ -871,6 +871,25 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     (void)mode;
 }
 
+/* There is no primary selection here (the middle button pastes nothing): the calls say so (clipboard_has_primary_support). */
+bool backend_primary_supported(void)
+{
+    return false;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    (void)utf8, (void)len;
+    return false;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (size)
+        *size = 0;
+    return NULL;
+}
+
 /* No system clipboard yet: the content stays inside the app. */
 bool backend_clipboard_set(const ClipboardItem *items, int count)
 {

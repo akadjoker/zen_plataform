@@ -115,6 +115,14 @@ bool backend_clipboard_set(const ClipboardItem *items, int count);
 bool backend_clipboard_has(const char *mime);
 void *backend_clipboard_get(const char *mime, size_t *size);
 
+/* the primary selection (the text selected in a program, pasted by the middle button), text only. supported says whether
+   there is one (X11; Wayland when the compositor has the protocol; the fake): where it is false set returns false without an
+   error and get returns NULL. set copies the UTF-8 text; NULL or length 0 gives the selection up. get returns a malloc'd
+   copy followed by a NUL byte that *size does not count, or NULL when nobody owns the selection or it holds no text. */
+bool backend_primary_supported(void);
+bool backend_primary_set(const char *utf8, size_t len);
+void *backend_primary_get(size_t *size);
+
 /* monitors - one shared virtual coordinate space */
 int backend_monitor_count(void);
 bool backend_monitor_info(int index, MonitorInfo *out);

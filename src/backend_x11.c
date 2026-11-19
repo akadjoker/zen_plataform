@@ -96,7 +96,27 @@ typedef struct
     Atom property, target;
     const uint8_t *data; /* points into a ClipEntry; transfers are aborted when the entries go */
     size_t size, offset;
+    int sel;             /* which selection the data belongs to (SEL_*) */
 } IncrOut;
+
+/* The two selections of X11 that carry text between programs: CLIPBOARD (copy and paste) and PRIMARY (what is selected, pasted
+   with the middle button). The same code serves, offers and reads both; each has its own entries and its own memory of an
+   owner that did not answer. */
+enum
+{
+    SEL_CLIPBOARD,
+    SEL_PRIMARY,
+    SEL_COUNT
+};
+
+typedef struct
+{
+    Atom atom;              /* CLIPBOARD or XA_PRIMARY */
+    ClipEntry clip[CLIP_MAX]; /* what we offer while we own the selection */
+    int clip_count;
+    Window dead_owner;      /* an owner that did not answer, failed at once until dead_until */
+    long dead_until;        /* monotonic ms */
+} ClipSel;
 
 static struct
 {
@@ -138,18 +158,15 @@ static struct
 
     Cursor cursors[CURSOR_COUNT]; /* created on first use, shared by every window */
 
-    Window helper; /* unmapped window that owns the CLIPBOARD selection */
+    Window helper; /* unmapped window that owns the CLIPBOARD and PRIMARY selections */
     int xi_opcode;   /* XInputExtension, when XInput 2.2 touch is available */
     bool xi_touch;
     int (*xi_select)(Display *, Window, void *mask, int count); /* XISelectEvents */
-    ClipEntry clip[CLIP_MAX]; /* what we offer while we own the selection */
-    int clip_count;
-    Window clip_dead_owner; /* an owner that did not answer, failed at once until clip_dead_until */
-    long clip_dead_until;   /* monotonic ms */
+    ClipSel sel[SEL_COUNT];
     IncrOut incr[CLIP_INCR_MAX]; /* large pastes being sent in chunks */
 } g;
 
-static void clip_free_entries(void);
+static void clip_free_entries(ClipSel *s);
 static void xdnd_free_drop(BackendWindow *b);
 
 #define XDND_VERSION 5 /* the newest XDND version this file speaks */
@@ -689,8 +706,10 @@ bool backend_init(void)
             *atoms[i].atom = found[i];
     }
 
-    /* A 1x1 unmapped window owns the CLIPBOARD selection and answers conversion
-       requests, so clipboard ownership outlives any single visible window. */
+    g.sel[SEL_CLIPBOARD].atom = g.CLIPBOARD;
+    g.sel[SEL_PRIMARY].atom = XA_PRIMARY;
+    /* A 1x1 unmapped window owns the CLIPBOARD and PRIMARY selections and answers conversion
+       requests, so ownership outlives any single visible window. */
     g.helper = XCreateSimpleWindow(g.dpy, g.root, -10, -10, 1, 1, 0, 0, 0);
     XSelectInput(g.dpy, g.helper, PropertyChangeMask);
 
@@ -745,7 +764,8 @@ bool backend_init(void)
 
 void backend_shutdown(void)
 {
-    clip_free_entries();
+    for (int i = 0; i < SEL_COUNT; i++)
+        clip_free_entries(&g.sel[i]);
     for (int i = 0; i < CURSOR_COUNT; i++)
     {
         if (g.cursors[i])
@@ -2178,18 +2198,26 @@ static void process_event(BackendWindow *b, XEvent *ev)
     }
 }
 
-/* ---- clipboard, serving side: we own the CLIPBOARD selection ---- */
+/* ---- clipboard, serving side: we own the CLIPBOARD or the PRIMARY selection ---- */
+
+static ClipSel *clip_sel_of(Atom selection)
+{
+    for (int i = 0; i < SEL_COUNT; i++)
+        if (g.sel[i].atom == selection)
+            return &g.sel[i];
+    return NULL;
+}
 
 static bool clip_is_text_target(Atom t)
 {
     return t == g.UTF8_STRING || t == XA_STRING || t == g.TEXT_PLAIN || t == g.TEXT_PLAIN_UTF8 || t == g.TEXT;
 }
 
-static const ClipEntry *clip_find_target(Atom target)
+static const ClipEntry *clip_find_target(const ClipSel *s, Atom target)
 {
-    for (int i = 0; i < g.clip_count; i++)
+    for (int i = 0; i < s->clip_count; i++)
     {
-        const ClipEntry *e = &g.clip[i];
+        const ClipEntry *e = &s->clip[i];
         if (clip_mime_equal(e->mime, CLIPBOARD_TEXT) ? clip_is_text_target(target) : e->atom == target)
             return e;
     }
@@ -2204,11 +2232,12 @@ static int clip_swallow_error(Display *d, XErrorEvent *e)
     return 0;
 }
 
-static void clip_incr_abort_all(void)
+/* The transfers whose data is in the entries of `s`: they point into memory that is about to be freed. */
+static void clip_incr_abort(const ClipSel *s)
 {
     XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
     for (int i = 0; i < CLIP_INCR_MAX; i++)
-        if (g.incr[i].active)
+        if (g.incr[i].active && &g.sel[g.incr[i].sel] == s)
         {
             XSelectInput(g.dpy, g.incr[i].requestor, NoEventMask);
             g.incr[i].active = false;
@@ -2217,15 +2246,15 @@ static void clip_incr_abort_all(void)
     XSetErrorHandler(previous);
 }
 
-static void clip_free_entries(void)
+static void clip_free_entries(ClipSel *s)
 {
-    clip_incr_abort_all();
-    for (int i = 0; i < g.clip_count; i++)
+    clip_incr_abort(s);
+    for (int i = 0; i < s->clip_count; i++)
     {
-        free(g.clip[i].mime);
-        free(g.clip[i].data);
+        free(s->clip[i].mime);
+        free(s->clip[i].data);
     }
-    g.clip_count = 0;
+    s->clip_count = 0;
 }
 
 /* Send the next chunk of an INCR transfer when the requestor has read the last one
@@ -2259,9 +2288,10 @@ static bool clip_incr_property_event(const XPropertyEvent *pe)
     return false;
 }
 
-/* Answer a request for our CLIPBOARD selection (we are the owner). */
+/* Answer a request for one of our selections (we are the owner). */
 static void answer_selection_request(XSelectionRequestEvent *req)
 {
+    ClipSel *s = clip_sel_of(req->selection);
     XSelectionEvent resp = {0};
     resp.type = SelectionNotify;
     resp.display = req->display;
@@ -2274,7 +2304,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
     Atom prop = req->property != None ? req->property : req->target; /* old clients */
     XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
 
-    if (req->selection != g.CLIPBOARD)
+    if (!s)
     {
         /* not ours */
     }
@@ -2283,9 +2313,9 @@ static void answer_selection_request(XSelectionRequestEvent *req)
         Atom targets[1 + CLIP_MAX * 4];
         int n = 0;
         targets[n++] = g.TARGETS;
-        for (int i = 0; i < g.clip_count; i++)
+        for (int i = 0; i < s->clip_count; i++)
         {
-            if (clip_mime_equal(g.clip[i].mime, CLIPBOARD_TEXT))
+            if (clip_mime_equal(s->clip[i].mime, CLIPBOARD_TEXT))
             {
                 targets[n++] = g.UTF8_STRING;
                 targets[n++] = g.TEXT_PLAIN_UTF8;
@@ -2293,7 +2323,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
                 targets[n++] = XA_STRING;
             }
             else
-                targets[n++] = g.clip[i].atom;
+                targets[n++] = s->clip[i].atom;
         }
         XChangeProperty(g.dpy, req->requestor, prop, XA_ATOM, 32, PropModeReplace,
                         (unsigned char *)targets, n);
@@ -2301,7 +2331,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
     }
     else
     {
-        const ClipEntry *e = clip_find_target(req->target);
+        const ClipEntry *e = clip_find_target(s, req->target);
         if (e && e->size <= CLIP_CHUNK_MAX)
         {
             XChangeProperty(g.dpy, req->requestor, prop, req->target, 8, PropModeReplace,
@@ -2316,7 +2346,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
             {
                 if (g.incr[i].active)
                     continue;
-                g.incr[i] = (IncrOut){true, req->requestor, prop, req->target, e->data, e->size, 0};
+                g.incr[i] = (IncrOut){true, req->requestor, prop, req->target, e->data, e->size, 0, (int)(s - g.sel)};
                 XSelectInput(g.dpy, req->requestor, PropertyChangeMask);
                 long total = (long)e->size;
                 XChangeProperty(g.dpy, req->requestor, prop, g.INCR, 32, PropModeReplace,
@@ -2697,8 +2727,13 @@ static inline bool handle_global_event(XEvent *ev)
     }
     if (ev->type == SelectionClear)
     {
-        if (ev->xselectionclear.selection == g.CLIPBOARD)
-            clip_free_entries();
+        /* another program took the selection (CLIPBOARD and PRIMARY alike), or we gave it up: what we offered is not wanted
+           any more. The message may be old: the server sent it when the ownership changed, and it waits in the queue until
+           this pump, by when the selection can be ours again (clipboard_set after clipboard_set(NULL), or after another
+           program took it); the server says who owns it now, and what was just set stays. */
+        ClipSel *lost = clip_sel_of(ev->xselectionclear.selection);
+        if (lost && XGetSelectionOwner(g.dpy, lost->atom) != g.helper)
+            clip_free_entries(lost);
         return true;
     }
     return ev->type == PropertyNotify && clip_incr_property_event(&ev->xproperty);
@@ -3407,24 +3442,25 @@ bool backend_mouse_capture(BackendWindow *b, bool on)
 }
 
 /* ========================================================================== */
-/*  clipboard (CLIPBOARD selection)                                           */
+/*  clipboard (CLIPBOARD) and primary selection (PRIMARY)                     */
 /* ========================================================================== */
 
-bool backend_clipboard_set(const ClipboardItem *items, int count)
+/* Take the selection and offer `items` (copies). count 0 gives the selection up. */
+static bool clip_set(ClipSel *s, const ClipboardItem *items, int count)
 {
-    clip_free_entries();
+    clip_free_entries(s);
     if (count > CLIP_MAX)
         count = CLIP_MAX;
     for (int i = 0; i < count; i++)
     {
-        ClipEntry *e = &g.clip[g.clip_count];
+        ClipEntry *e = &s->clip[s->clip_count];
         e->mime = strdup(items[i].mime);
         e->data = malloc(items[i].size + 1);
         if (!e->mime || !e->data)
         {
             free(e->mime);
             free(e->data);
-            clip_free_entries();
+            clip_free_entries(s);
             return error_set("out of memory");
         }
         e->atom = XInternAtom(g.dpy, items[i].mime, False);
@@ -3432,37 +3468,37 @@ bool backend_clipboard_set(const ClipboardItem *items, int count)
             memcpy(e->data, items[i].data, items[i].size);
         e->data[items[i].size] = 0;
         e->size = items[i].size;
-        g.clip_count++;
+        s->clip_count++;
     }
 
-    if (g.clip_count == 0)
+    if (s->clip_count == 0)
     {
-        if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == g.helper)
-            XSetSelectionOwner(g.dpy, g.CLIPBOARD, None, CurrentTime);
+        if (XGetSelectionOwner(g.dpy, s->atom) == g.helper)
+            XSetSelectionOwner(g.dpy, s->atom, None, CurrentTime);
         XFlush(g.dpy);
         return true;
     }
-    XSetSelectionOwner(g.dpy, g.CLIPBOARD, g.helper, CurrentTime);
+    XSetSelectionOwner(g.dpy, s->atom, g.helper, CurrentTime);
     XFlush(g.dpy);
-    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) != g.helper)
+    if (XGetSelectionOwner(g.dpy, s->atom) != g.helper)
     {
-        clip_free_entries();
-        return error_set("cannot take ownership of the clipboard");
+        clip_free_entries(s);
+        return error_set("cannot take ownership of the %s", s == &g.sel[SEL_PRIMARY] ? "primary selection" : "clipboard");
     }
     return true;
 }
 
-static const ClipEntry *clip_find_mime(const char *mime)
+static const ClipEntry *clip_find_mime(const ClipSel *s, const char *mime)
 {
-    for (int i = 0; i < g.clip_count; i++)
-        if (clip_mime_equal(g.clip[i].mime, mime))
-            return &g.clip[i];
+    for (int i = 0; i < s->clip_count; i++)
+        if (clip_mime_equal(s->clip[i].mime, mime))
+            return &s->clip[i];
     return NULL;
 }
 
-static bool clip_owned(void)
+static bool clip_owned(const ClipSel *s)
 {
-    return XGetSelectionOwner(g.dpy, g.CLIPBOARD) == g.helper;
+    return XGetSelectionOwner(g.dpy, s->atom) == g.helper;
 }
 
 /* Wait for an event of `type` on the helper window, up to the timeout. */
@@ -3532,7 +3568,7 @@ static long clip_now_ms(void)
    does not answer at all (hung, or gone without letting go of the selection) costs
    one timeout; for CLIP_DEAD_MS after that it fails at once, so a paste, a "has
    data" per format and a refresh on focus do not each freeze the loop for a second. */
-static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
+static bool clip_fetch(ClipSel *s, Atom target, Atom *type, uint8_t **out, size_t *size)
 {
     XEvent ev;
     while (XCheckTypedWindowEvent(g.dpy, g.helper, SelectionNotify, &ev))
@@ -3541,16 +3577,16 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
     while (XCheckTypedWindowEvent(g.dpy, g.helper, PropertyNotify, &ev))
     {
     }
-    Window owner = XGetSelectionOwner(g.dpy, g.CLIPBOARD);
-    if (owner != None && owner == g.clip_dead_owner && clip_now_ms() < g.clip_dead_until)
+    Window owner = XGetSelectionOwner(g.dpy, s->atom);
+    if (owner != None && owner == s->dead_owner && clip_now_ms() < s->dead_until)
         return false;
     XDeleteProperty(g.dpy, g.helper, g.XSEL_DATA);
-    XConvertSelection(g.dpy, g.CLIPBOARD, target, g.XSEL_DATA, g.helper, CurrentTime);
+    XConvertSelection(g.dpy, s->atom, target, g.XSEL_DATA, g.helper, CurrentTime);
 
     if (!clip_wait_event(SelectionNotify, &ev))
     {
-        g.clip_dead_owner = owner;
-        g.clip_dead_until = clip_now_ms() + CLIP_DEAD_MS;
+        s->dead_owner = owner;
+        s->dead_until = clip_now_ms() + CLIP_DEAD_MS;
         return false;
     }
     if (ev.xselection.property == None)
@@ -3578,8 +3614,8 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
         if (clip_now_ms() - incr_start > CLIP_INCR_BASE_MS + (long)(have / 256))
         {
             free(all);
-            g.clip_dead_owner = owner; /* it is not asked again for a while: not every paste costs the whole wait */
-            g.clip_dead_until = clip_now_ms() + CLIP_DEAD_MS;
+            s->dead_owner = owner; /* it is not asked again for a while: not every paste costs the whole wait */
+            s->dead_until = clip_now_ms() + CLIP_DEAD_MS;
             return false;
         }
         do
@@ -3644,17 +3680,17 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
     return true;
 }
 
-bool backend_clipboard_has(const char *mime)
+static bool clip_has(ClipSel *s, const char *mime)
 {
-    if (clip_owned())
-        return clip_find_mime(mime) != NULL;
-    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == None)
+    if (clip_owned(s))
+        return clip_find_mime(s, mime) != NULL;
+    if (XGetSelectionOwner(g.dpy, s->atom) == None)
         return false;
 
     Atom type;
     uint8_t *list = NULL;
     size_t size = 0;
-    if (!clip_fetch(g.TARGETS, &type, &list, &size))
+    if (!clip_fetch(s, g.TARGETS, &type, &list, &size))
         return false;
     bool text = clip_mime_equal(mime, CLIPBOARD_TEXT);
     Atom want = text ? None : XInternAtom(g.dpy, mime, False);
@@ -3669,11 +3705,11 @@ bool backend_clipboard_has(const char *mime)
     return found;
 }
 
-void *backend_clipboard_get(const char *mime, size_t *size)
+static void *clip_get(ClipSel *s, const char *mime, size_t *size)
 {
-    if (clip_owned())
+    if (clip_owned(s))
     {
-        const ClipEntry *e = clip_find_mime(mime);
+        const ClipEntry *e = clip_find_mime(s, mime);
         if (!e)
             return NULL;
         uint8_t *copy = malloc(e->size + 1);
@@ -3683,7 +3719,7 @@ void *backend_clipboard_get(const char *mime, size_t *size)
         *size = e->size;
         return copy;
     }
-    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == None)
+    if (XGetSelectionOwner(g.dpy, s->atom) == None)
         return NULL;
 
     Atom type;
@@ -3691,12 +3727,12 @@ void *backend_clipboard_get(const char *mime, size_t *size)
     size_t n = 0;
     if (clip_mime_equal(mime, CLIPBOARD_TEXT))
     {
-        if (!clip_fetch(g.UTF8_STRING, &type, &data, &n))
+        if (!clip_fetch(s, g.UTF8_STRING, &type, &data, &n))
         {
             /* Latin-1 only owners: STRING, widened to UTF-8. */
             uint8_t *latin = NULL;
             size_t ln = 0;
-            if (!clip_fetch(XA_STRING, &type, &latin, &ln))
+            if (!clip_fetch(s, XA_STRING, &type, &latin, &ln))
                 return NULL;
             data = malloc(ln * 2 + 1);
             if (!data)
@@ -3718,10 +3754,44 @@ void *backend_clipboard_get(const char *mime, size_t *size)
             free(latin);
         }
     }
-    else if (!clip_fetch(XInternAtom(g.dpy, mime, False), &type, &data, &n))
+    else if (!clip_fetch(s, XInternAtom(g.dpy, mime, False), &type, &data, &n))
         return NULL;
     *size = n;
     return data;
+}
+
+bool backend_clipboard_set(const ClipboardItem *items, int count)
+{
+    return clip_set(&g.sel[SEL_CLIPBOARD], items, count);
+}
+
+bool backend_clipboard_has(const char *mime)
+{
+    return clip_has(&g.sel[SEL_CLIPBOARD], mime);
+}
+
+void *backend_clipboard_get(const char *mime, size_t *size)
+{
+    return clip_get(&g.sel[SEL_CLIPBOARD], mime, size);
+}
+
+/* PRIMARY: the text that is selected, pasted by the middle button. Always there on X11. */
+bool backend_primary_supported(void)
+{
+    return true;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    if (!utf8 || len == 0)
+        return clip_set(&g.sel[SEL_PRIMARY], NULL, 0);
+    const ClipboardItem item = {CLIPBOARD_TEXT, utf8, len};
+    return clip_set(&g.sel[SEL_PRIMARY], &item, 1);
+}
+
+void *backend_primary_get(size_t *size)
+{
+    return clip_get(&g.sel[SEL_PRIMARY], CLIPBOARD_TEXT, size);
 }
 
 /* ========================================================================== */

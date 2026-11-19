@@ -3120,6 +3120,24 @@ void *backend_clipboard_get(const char *mime, size_t *size)
     return NULL;
 }
 
+bool backend_primary_supported(void)
+{
+    return false;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    (void)utf8, (void)len;
+    return false;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (size)
+        *size = 0;
+    return NULL;
+}
+
 int backend_monitor_count(void)
 {
     return 0;

@@ -2603,6 +2603,25 @@ static bool clip_put_uris(const char *text, size_t size)
     return ok;
 }
 
+/* There is no primary selection here (the middle button pastes nothing): the calls say so (clipboard_has_primary_support). */
+bool backend_primary_supported(void)
+{
+    return false;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    (void)utf8, (void)len;
+    return false;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (size)
+        *size = 0;
+    return NULL;
+}
+
 bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
     if (!clip_open())

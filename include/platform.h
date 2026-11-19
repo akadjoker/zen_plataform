@@ -1145,6 +1145,37 @@ extern "C"
     PLATFORM_API bool clipboard_set_image(const Framebuffer *fb);
     PLATFORM_API bool clipboard_get_image(Framebuffer *out);
 
+    /* The primary selection: the text that is selected in a program, which a click of the middle mouse button pastes into
+       another one. It is a second place for text, independent of the clipboard: it changes when the user selects, not when
+       they copy, and setting one does not touch the other. Only X11 and Wayland have it; on Windows, Android and the web
+       there is no such thing (the middle button pastes nothing), and the fake backend of the tests has a second in-memory
+       buffer.
+
+       clipboard_has_primary_support: true when there is a primary selection to set and get: X11 always, Wayland when the
+       compositor offers zwp_primary_selection_device_manager_v1 and there is a seat (GNOME, KDE and wlroots do), the fake
+       backend. False before platform_init.
+
+       clipboard_set_primary(utf8): this program offers the UTF-8 text as the primary selection (the platform keeps its
+       own copy, as clipboard_set does) and becomes its owner, which makes the program that owned it before lose it. NULL or
+       "" gives the selection up: ownership is released if this program has it, and a selection another program owns is
+       left alone (an empty selection is not one). Returns true when the selection was taken or given up. Returns false,
+       and sets no error, where there is no primary selection; false with platform_get_error() when it could not be set
+       (out of memory, no ownership on X11; on Wayland the compositor accepts a selection only from the window that has
+       the keyboard focus, on the strength of its last key or button press: call it while the window is focused, from the
+       handling of the mouse button or key that made the selection). The text is served while the program runs its event loop
+       (window_begin_frame), as the clipboard is, and it is gone when the program ends: nothing keeps the primary
+       selection after its owner.
+
+       clipboard_get_primary: the text of the primary selection, ours or another program's; "" when nobody owns it, it holds no
+       text, a read failed, or there is none on this platform: it never returns NULL. The string belongs to the platform and
+       is valid until the next clipboard_get_primary. Reading from another program blocks as clipboard_get does and has the same
+       protections: one second per step on X11, a deadline for the whole of a transfer by INCR, a limit on the size, an owner that
+       did not answer is not asked again for a while. A click of the middle button is the moment to read it (EVENT_MOUSE_BUTTON,
+       MOUSE_MIDDLE), not every frame. */
+    PLATFORM_API bool clipboard_has_primary_support(void);
+    PLATFORM_API bool clipboard_set_primary(const char *utf8);
+    PLATFORM_API const char *clipboard_get_primary(void);
+
     /* ========================================================================== */
     /*  OS / filesystem                                                           */
     /* ========================================================================== */

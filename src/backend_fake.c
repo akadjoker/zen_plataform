@@ -529,6 +529,43 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     b->mouse_mode = mode;
 }
 
+/* The primary selection of the fake: a second buffer, independent of the clipboard. */
+static char *g_fake_primary;
+static size_t g_fake_primary_len;
+
+bool backend_primary_supported(void)
+{
+    return true;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    free(g_fake_primary);
+    g_fake_primary = NULL;
+    g_fake_primary_len = 0;
+    if (!utf8 || len == 0)
+        return true;
+    g_fake_primary = malloc(len + 1);
+    if (!g_fake_primary)
+        return error_set("out of memory");
+    memcpy(g_fake_primary, utf8, len);
+    g_fake_primary[len] = '\0';
+    g_fake_primary_len = len;
+    return true;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (!g_fake_primary)
+        return NULL;
+    char *copy = malloc(g_fake_primary_len + 1);
+    if (!copy)
+        return NULL;
+    memcpy(copy, g_fake_primary, g_fake_primary_len + 1);
+    *size = g_fake_primary_len;
+    return copy;
+}
+
 bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
     return clipmem_set(items, count);
