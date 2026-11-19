@@ -105,6 +105,8 @@ static struct
     bool im_lazy;              /* no input method yet: the built-in one is opened by the first key (im_open_local) */
     BackendWindow *windows;    /* every window, newest first, to give each an input context when the method opens late */
     bool detectable_repeat; /* a held key sends presses only, no synthetic releases */
+    bool io_lost;           /* the connection to the server broke (it was killed, the socket cut) */
+    XIOErrorHandler prev_io; /* the handler that was set before ours: another connection of the program goes to it */
     int xkb_event_base;     /* XKB events (XkbMapNotify, XkbNewKeyboardNotify) arrive as this event type, 0 without XKB */
     /* keycode -> Key, filled on first use from the keysym of the first group and level, dropped when the keyboard
        mapping changes (MappingNotify, XkbMapNotify, XkbNewKeyboardNotify). Stored as key + 1: 0 is "not looked up". */
@@ -153,6 +155,7 @@ struct BackendWindow
     Colormap colormap;
     XIC xic;
     BackendWindow *next; /* g.windows */
+    bool lost_told;      /* EVENT_WINDOW_CLOSE was pushed for the lost connection */
     bool has_spot;       /* backend_set_text_input_rect was called: kept for a context created later */
     int spot_x, spot_y;
     /* input method: composing text shown by the application (XIM preedit callbacks) */
@@ -561,6 +564,25 @@ static GLXContext create_context(GLXFBConfig fb, const GLConfig *gl, GLXContext 
 /*  init / shutdown                                                           */
 /* ========================================================================== */
 
+/* The server went away. Xlib's way of dealing with that is to print a message and call exit(): the program would end with
+   no chance to save anything. Two handlers take its place for this connection (the exit handler, XSetIOErrorExitHandler,
+   libX11 1.7, is only reached once the IO error handler has returned, and the default IO error handler is what ends the
+   process): they only note it. From then on every call on the connection fails at once, and the pump tells each window
+   to close. They must not call Xlib. */
+static void io_error_exit(Display *d, void *data)
+{
+    (void)d, (void)data;
+    g.io_lost = true;
+}
+
+static int io_error(Display *d)
+{
+    if (d != g.dpy && g.prev_io)
+        return g.prev_io(d); /* a connection of the program's own: as it was */
+    g.io_lost = true;
+    return 0;
+}
+
 bool backend_init(void)
 {
     /* A GL worker (gl_worker_create) makes its context current on another thread, which is a call on this
@@ -569,6 +591,19 @@ bool backend_init(void)
     g.dpy = XOpenDisplay(NULL);
     if (!g.dpy)
         return error_set("cannot open the X display");
+    {
+        SharedLibrary *x = library_open("libX11.so.6");
+        void (*set_exit)(Display *, void (*)(Display *, void *), void *) = NULL;
+        if (x)
+            *(void **)&set_exit = library_symbol(x, "XSetIOErrorExitHandler");
+        if (set_exit)
+        {
+            set_exit(g.dpy, io_error_exit, NULL);
+            g.prev_io = XSetIOErrorHandler(io_error);
+        }
+        if (x)
+            library_close(x);
+    }
     g.screen = DefaultScreen(g.dpy);
     g.root = RootWindow(g.dpy, g.screen);
     g.ctx = XUniqueContext();
@@ -699,6 +734,8 @@ void backend_shutdown(void)
         XCloseIM(g.xim);
     if (g.dpy)
         XCloseDisplay(g.dpy);
+    if (g.prev_io || g.io_lost)
+        XSetIOErrorHandler(g.prev_io);
     memset(&g, 0, sizeof g);
 }
 
@@ -1196,7 +1233,7 @@ void backend_destroy(BackendWindow *b)
         XDestroyImage(b->image);
     if (b->gc)
         XFreeGC(g.dpy, b->gc);
-    if (b->render == RENDER_GL)
+    if (b->render == RENDER_GL && !g.io_lost)
     {
         /* Leave another window's context current, unless it draws to this window. */
         if (glXGetCurrentContext() == b->glc || glXGetCurrentDrawable() == b->win)
@@ -2464,6 +2501,17 @@ static void key_taken_by_im(BackendWindow *b, XEvent *ev)
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
+    if (g.io_lost)
+    {
+        /* nothing more will come, nothing can be sent: the window is closed, once, through the usual close path */
+        if (!b->lost_told)
+        {
+            b->lost_told = true;
+            Event e = {.type = EVENT_WINDOW_CLOSE};
+            push(b, &e);
+        }
+        return;
+    }
     if (b->xdnd_converting && xdnd_now_ms() - b->xdnd_since > XDND_CONVERT_MS)
         xdnd_finish_drop(b, None); /* the source never sent the files: answer it as refused */
 
@@ -2601,9 +2649,11 @@ bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void 
     return vulkan_call_create_surface(instance, "vkCreateXlibSurfaceKHR", &info, allocator, out_surface);
 }
 
+/* GLX goes to the server through xcb, not through Xlib's checks for a connection that is gone: on a lost connection it
+   makes up an X error, and the default X error handler ends the process. None of these is called then. */
 void backend_swap(BackendWindow *b)
 {
-    if (b->render == RENDER_GL)
+    if (b->render == RENDER_GL && !g.io_lost)
         glXSwapBuffers(g.dpy, b->win);
 }
 
@@ -2613,20 +2663,20 @@ void backend_swap(BackendWindow *b)
 
 void backend_make_current(BackendWindow *b)
 {
-    if (b->render == RENDER_GL)
+    if (b->render == RENDER_GL && !g.io_lost)
         glXMakeCurrent(g.dpy, b->win, b->glc);
 }
 
 void backend_make_current_on(BackendWindow *target, BackendWindow *context)
 {
-    if (target->render == RENDER_GL && context->render == RENDER_GL)
+    if (target->render == RENDER_GL && context->render == RENDER_GL && !g.io_lost)
         glXMakeCurrent(g.dpy, target->win, context->glc);
 }
 
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     int interval = on ? 1 : 0;
-    if (b->render != RENDER_GL)
+    if (b->render != RENDER_GL || g.io_lost)
         return;
     if (g.swap_ext)
         g.swap_ext(g.dpy, b->win, interval);

@@ -1180,6 +1180,98 @@ static void test_hostile_client(void)
     window_destroy(w);
 }
 
+/* The X server goes away while the program runs (killed, the connection cut). Xlib answers that by printing a message and
+   calling exit(): the program ends on the spot, with nothing saved. The backend registers XSetIOErrorExitHandler instead:
+   every window is told to close through the usual close path (EVENT_WINDOW_CLOSE, window_should_close) and every call
+   on the lost connection fails at once. The section starts a server of its own (Xvfb with -displayfd) and kills it. */
+static pid_t g_own_xvfb = -1;
+
+static void pre_own_server(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0)
+        return;
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        close(fds[0]);
+        char fd[16];
+        snprintf(fd, sizeof fd, "%d", fds[1]);
+        FILE *null = freopen("/dev/null", "w", stderr);
+        (void)null;
+        execlp("Xvfb", "Xvfb", "-displayfd", fd, "-screen", "0", "640x480x24", "-nolisten", "tcp", (char *)NULL);
+        _exit(127);
+    }
+    close(fds[1]);
+    char buf[32] = {0};
+    ssize_t got = pid > 0 ? read(fds[0], buf, sizeof buf - 1) : -1;
+    close(fds[0]);
+    if (got > 0 && buf[0] >= '0' && buf[0] <= '9')
+    {
+        char name[40];
+        snprintf(name, sizeof name, ":%d", atoi(buf));
+        setenv("DISPLAY", name, 1);
+        g_own_xvfb = pid;
+    }
+    else if (pid > 0)
+    {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    }
+}
+
+static void test_server_goes_away(void)
+{
+    if (g_own_xvfb <= 0)
+    {
+        printf("  skipped: could not start an Xvfb of its own\n");
+        return;
+    }
+    PlatformWindow *w = make(RENDER_PIXELS, 200, 150), *w2 = make(RENDER_PIXELS, 100, 80);
+    CHECK(w != NULL && w2 != NULL);
+    if (!w || !w2)
+        return;
+    PlatformWindow *wg = make(RENDER_GL, 100, 80); /* may be NULL where there is no GLX */
+    settle(w);
+    kill(g_own_xvfb, SIGKILL);
+    waitpid(g_own_xvfb, NULL, 0);
+    bool closed = false, closed2 = false;
+    for (int i = 0; i < 100 && !(closed && closed2); i++)
+    {
+        window_begin_frame(w);
+        window_begin_frame(w2);
+        Event e;
+        while (poll_event(w, &e))
+            closed |= e.type == EVENT_WINDOW_CLOSE;
+        while (poll_event(w2, &e))
+            closed2 |= e.type == EVENT_WINDOW_CLOSE;
+        time_sleep(10);
+    }
+    CHECK(closed && closed2); /* each window is told, through the normal close path */
+    CHECK(window_should_close(w) && window_should_close(w2));
+    /* the program is alive and the calls on the lost connection come back */
+    window_set_title(w, "gone");
+    window_set_size(w, 300, 200);
+    window_show(w);
+    window_set_mode(w, WINDOW_FULLSCREEN, 0);
+    mouse_set_cursor(w, CURSOR_HAND);
+    Framebuffer fb;
+    if (window_lock_pixels(w, &fb))
+        window_present_pixels(w);
+    window_begin_frame(w);
+    (void)clipboard_get();
+    clipboard_set("x");
+    if (wg)
+    {
+        window_make_current(wg);
+        window_swap(wg);
+        window_destroy(wg);
+    }
+    window_destroy(w);
+    window_destroy(w2);
+    CHECK(true); /* got here: Xlib did not end the process */
+}
+
 static void test_clocks(void)
 {
     uint64_t prev = time_nanos();
@@ -1238,6 +1330,7 @@ int main(void)
         {"destroy inside callbacks", test_destroy_in_callbacks},
         {"events from a hostile client", test_hostile_client},
         {"shutdown inside a hook", test_shutdown_in_hook},
+        {"the server goes away", test_server_goes_away, pre_own_server},
         {"first dead key, input method opened late", test_first_dead_key_late_method, pre_dead_server},
 #endif
         {"cursors and grabs", test_cursors_and_grabs},
