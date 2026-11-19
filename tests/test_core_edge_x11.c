@@ -515,6 +515,45 @@ static void test_cursors_and_grabs(void)
     (void)d;
 }
 
+/* Many windows at once on one connection, each with its own state, destroyed in an order that is not the order they
+   were made in. */
+static void test_many_windows(void)
+{
+    enum { N = 96 };
+    PlatformWindow *w[N];
+    int made = 0;
+    for (int i = 0; i < N; i++)
+    {
+        w[i] = make(RENDER_PIXELS, 80 + i, 60 + i);
+        made += w[i] != NULL;
+        if (w[i])
+            window_set_user_ptr(w[i], &w[i]);
+    }
+    CHECK(made == N);
+    const int fds = open_fds();
+    for (int round = 0; round < 3; round++)
+        for (int i = 0; i < N; i++)
+            if (w[i])
+            {
+                window_begin_frame(w[i]);
+                char title[32];
+                snprintf(title, sizeof title, "w%d", i);
+                window_set_title(w[i], title);
+                CHECK(window_get_user_ptr(w[i]) == &w[i]);
+            }
+    for (int i = 0; i < N; i += 2) /* evens first, then the odds from the end */
+        if (w[i])
+            window_destroy(w[i]), w[i] = NULL;
+    for (int i = N - 1; i >= 0; i--)
+        if (w[i])
+        {
+            window_begin_frame(w[i]); /* the others went while this one had events waiting */
+            window_destroy(w[i]);
+            w[i] = NULL;
+        }
+    CHECK(open_fds() == fds);
+}
+
 static void test_clipboard_extremes(void)
 {
     static const struct
@@ -606,6 +645,7 @@ int main(void)
         {"titles", test_titles},
         {"state storm", test_state_storm},
         {"destroy during events", test_destroy_during_events},
+        {"many windows", test_many_windows},
 #ifdef HAVE_XTEST
         {"held across destroy", test_held_across_destroy},
         {"wheel burst", test_wheel_burst},
