@@ -214,3 +214,62 @@ dirigido que nao depende do sanitizador), o `key_mods` que ia ao servidor em cad
   `platform_wake` no filho vai acordar a espera do pai; nao se tratou (`pthread_atfork`).
 - **`process_spawn` apos `fork` usa `fprintf`.** Nao se reproduziu um bloqueio com o lock do `stderr` tomado por outro fio (o glibc 2.39
   reinicia os locks do stdio no filho); com outra libc podia haver. Trocar o `fprintf` por um `write` e trivial; nao se fez sem prova.
+
+## Clipboard, texto das teclas e a seleccao PRIMARY (ronda 5, ramo core-round5)
+
+Corrigido, cada um com um teste que falhava antes e passa depois (o que so se leu fica dito abaixo):
+
+- **Web: Ctrl+V, Shift+Insert, Ctrl+C... nao faziam nada.** O callback das teclas devolvia `EM_TRUE` (preventDefault) para todas, por isso o
+  browser nunca disparava `paste`, `copy` e `cut`, e `clipboard_get` so via o que a propria pagina tinha posto. Agora as teclas do clipboard
+  (Ctrl ou Meta com V, C, X; Shift+Insert, Ctrl+Insert, Shift+Delete) ficam para o browser, e `web/pf_web.js` ouve os tres eventos
+  (`src/backend_web.c`, o comentario "the clipboard keys and the browser's paste, copy and cut events" tem a ordem toda). Provado num Chrome sem
+  janela (`tests/web/run_clip_web.js`, `examples/clipboard_web.c`) com teclas reais (`Input.dispatchKeyEvent` com o comando de edicao) e eventos
+  sinteticos, em `http://insecure.test` (http simples, `navigator.clipboard` indefinido) e em `http://localhost` (contexto seguro), lendo o
+  clipboard do sistema de volta: 50 verificacoes passam; a mesma pagina feita com o `origin/main` falha 37 (Ctrl+V nao cola e escreve um "v",
+  Ctrl+C nao copia nada, Ctrl+A escreve um "a", em http simples nada chega ao clipboard).
+- **Web: Ctrl+letra escrevia a letra.** Agora `webkey_types_text` (`src/web_key_rules.h`, testado no host por `test_web_keys`): nada com Ctrl
+  ou Meta, excepto AltGr (Ctrl+Alt com `getModifierState("AltGraph")`).
+- **X11 e Wayland: Ctrl+1, Ctrl+menos, Ctrl+virgula, Super+a escreviam o caracter** (o Xlib e o xkbcommon so dao controlo para as letras e alguns
+  simbolos; Ctrl+espaco deu espaco no Windows). Agora nenhuma tecla com Ctrl ou Super escreve (a regra esta em `platform.h`); AltGr, tecla
+  morta e IME continuam a escrever. Testes em `test_input_x11` (XTest, teclas reais), `test_input_wayland`, `test_events` (fake, com
+  `fake_key_text`). Win32 corrigido em `handle_char` e escrito em `test_win32_input` mas so compilado (nao ha Windows).
+- **X11: um `SelectionClear` velho apagava o que se acabara de por.** `clipboard_set(NULL)` seguido de `clipboard_set("x")` mandava o conteudo
+  novo para o lixo no proximo bombeamento (o servidor manda o SelectionClear ao largar a posse; ele espera na fila). Agora pergunta-se ao servidor
+  quem e o dono antes de libertar. `test_stale_selection_clear`.
+- **PRIMARY** (`clipboard_has_primary_support`, `clipboard_set_primary`, `clipboard_get_primary`): X11 (o mesmo codigo de servir, ler e INCR do
+  CLIPBOARD, uma tabela por seleccao), Wayland (`zwp_primary_selection_device_manager_v1`), o fake (segundo buffer); Win32, Android e web dizem
+  que nao ha. Testado no X11 com dois clientes (dono de fora, dono nosso, INCR de 1 MB, dono que morre a meio, CLIPBOARD e PRIMARY independentes),
+  no Wayland contra o compositor de teste (que faz de "outro programa") e com o alvo do fuzz alargado.
+
+O que ficou por fazer ou so se leu:
+
+- **O Wayland nao tem clipboard nenhum.** `backend_clipboard_set/has/get` em `src/backend_wayland.c` so devolvem false e NULL (nao ha
+  `wl_data_device`): `clipboard_set` e `clipboard_get` nao fazem nada num Wayland nativo (um programa feito com o backend X11 funciona em XWayland). A
+  PRIMARY do Wayland foi a primeira parte do protocolo de seleccao a ser escrita; o `wl_data_device_manager` do CLIPBOARD usa o mesmo
+  esquema (fonte, oferta, pipe) e podia reaproveitar `primary_write_all` e `primary_read`. Nao se fez: nao era o pedido.
+- **A PRIMARY do Wayland so correu contra o compositor de teste**, nao contra o GNOME, o KDE ou o wlroots. Duas coisas dependem do
+  compositor real: a seleccao so se aceita com o serial da ultima tecla ou botao desta janela (`g.serial`; `clipboard_set_primary` devolve
+  true mesmo se o compositor a ignorar, e a fonte recebe `cancelled`), e a seleccao dos outros so chega a uma janela com o foco do teclado.
+- **Nao ha aviso de que outro programa tomou a PRIMARY** (o X11 sabe pelo `SelectionClear`, o Wayland por `cancelled`, mas nenhum vira evento): uma GUI
+  que quisesse tirar o realce do texto selecionado nao sabe. Um `EVENT_` novo e barato; nao se acrescentou por ser mexer no enum dos eventos.
+- **Web, so Chrome.** O Firefox e o Safari nao se correram (o Firefox nao fala CDP). Lido, nao provado: que o `paste` chegue no mesmo tick do
+  `keydown` (e o que o Chrome faz, e o que mantem a ordem; se outro browser o fizer mais tarde a tecla fica presa ate ao fim do tick e sai sem o
+  texto, sem pior do que antes), que o Firefox dispare `copy` sem selecao, e que o Safari deixe o `execCommand("copy")` da pagina fora de um
+  gesto (o texto fica pendente para o proximo gesto, `pf.pending` em `web/pf_web.js`). O AltGr provou-se com um `KeyboardEvent` sintetico com
+  `modifierAltGraph`, nao com um teclado alemao a sair de um Windows. Nao ha IME na web (o canvas nao e editavel).
+- **Web com threads.** Tres builds correram a mesma pagina no Chrome: sem threads (50 verificacoes), com `-pthread` e o programa no
+  thread do browser (25, so contexto seguro: o `SharedArrayBuffer` nao existe em http simples, logo uma build com threads nunca corre na
+  pagina do problema) e com `-sPROXY_TO_PTHREAD` e o programa num worker com `OffscreenCanvas` (25). No worker uma frame nao se pode
+  correr dentro do evento `copy` (esperar pela do worker nao serve: a frame do worker depende do agendador de frames da pagina, que nao corre
+  enquanto o thread do browser espera); o texto que o programa poe uma frame depois sai por `navigator.clipboard`, dentro da activacao do
+  utilizador, o que funcionou no Chrome. Em compensacao os `EM_ASM` que tocam na pagina passaram a `MAIN_THREAD_EM_ASM` (iguais sem threads; num
+  worker o `Module.canvas` e um OffscreenCanvas e o `document` nao existe: o `hasAttribute` do `data-fill-window` rebentava a criacao da
+  janela). O que **nao** se tocou: o arrastar de ficheiros (`pf_web_drop_*`, o MEMFS e por thread; num worker o ficheiro largado nao seria visto).
+- **Win32 so compilado.** A regra em `handle_char` (Ctrl sem Alt cala; AltGr e Ctrl+Alt) e o `test_chord_text` de `test_win32_input.c` estao
+  escritos e o MinGW compila-os com `-Wall -Wextra`, sem nunca correrem. Falta uma maquina Windows (e uma disposicao com AltGr) para ver Ctrl+espaco
+  e AltGr+tecla.
+- **Custo.** Sem valgrind (nao esta instalado) nem `perf` (o kernel nao deixa: `perf_event_paranoid` 4), as instrucoes contaram-se com um
+  contador por `ptrace` (um passo de cada vez) entre dois marcadores, uma `window_begin_frame` com 100 eventos ja na fila do servidor, depois de
+  abrir o metodo de entrada: tecla simples 362343 e 362593 instrucoes (antes) contra 362620 e 362593 (depois), ruido entre corridas do mesmo
+  binario de 1700; Ctrl+tecla 364936 contra 329746 (menos: ja nao chama `Xutf8LookupString`); movimento 209711 contra 209711 e 209738. Wayland, web e
+  Win32 nao se mediram (um teste de mascara por tecla).
