@@ -1739,6 +1739,8 @@ static void xdnd_finish_drop(BackendWindow *b, Atom prop)
 static bool xdnd_client_message(BackendWindow *b, XClientMessageEvent *m)
 {
     Atom t = m->message_type;
+    if (m->format != 32)
+        return false; /* the XDND messages are all of format 32: the words below would be other bytes */
     const long *l = m->data.l;
     Window src = (Window)l[0];
 
@@ -1879,7 +1881,10 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case ClientMessage:
         if (xdnd_client_message(b, &ev->xclient))
             break;
-        if ((Atom)ev->xclient.data.l[0] == g.WM_DELETE_WINDOW)
+        /* only the window manager's own message closes the window: WM_PROTOCOLS, format 32, the atom first (any other
+           message whose first word happened to be that atom used to) */
+        if (ev->xclient.message_type == g.WM_PROTOCOLS && ev->xclient.format == 32 &&
+            (Atom)ev->xclient.data.l[0] == g.WM_DELETE_WINDOW)
         {
             Event e = {.type = EVENT_WINDOW_CLOSE};
             push(b, &e);
@@ -1887,8 +1892,10 @@ static void process_event(BackendWindow *b, XEvent *ev)
         break;
 
     case SelectionNotify:
+        /* the answer to our XConvertSelection: the property is the one asked for (XDND_DATA) or the drop is refused;
+           another name would make us read, and then delete, any property of the window the sender chose */
         if (ev->xselection.selection == g.XdndSelection && b->xdnd_converting)
-            xdnd_finish_drop(b, ev->xselection.property);
+            xdnd_finish_drop(b, ev->xselection.property == g.XDND_DATA ? g.XDND_DATA : None);
         break;
 
     case ConfigureNotify:
@@ -1922,7 +1929,10 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case KeyPress:
         if (ev->xkey.keycode == 0 || (!b->key_early && im_copy(b, ev)))
         {
-            key_text(b, ev);
+            /* keycode 0 is what the input method puts back once it has composed a character; one sent by another
+               client (XSendEvent) is not that, and Xlib reads a composed string that is not there for it */
+            if (ev->xkey.keycode != 0 || !ev->xkey.send_event)
+                key_text(b, ev);
             break;
         }
         handle_key(b, ev, true);

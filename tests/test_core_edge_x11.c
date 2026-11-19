@@ -1029,6 +1029,145 @@ static void test_shutdown_in_hook(void)
     window_destroy(w2);
 }
 
+/* Another client of the server sends the window events that are not what they pretend to be. */
+static bool has_property(Display *d, Window w, const char *name)
+{
+    Atom a = XInternAtom(d, name, True);
+    if (!a)
+        return false;
+    Atom type;
+    int fmt;
+    unsigned long n, after;
+    unsigned char *data = NULL;
+    bool ok = XGetWindowProperty(d, w, a, 0, 16, False, AnyPropertyType, &type, &fmt, &n, &after, &data) == Success && type != None;
+    if (data)
+        XFree(data);
+    return ok;
+}
+
+static int count_events(PlatformWindow *w, int type)
+{
+    int n = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        window_begin_frame(w);
+        Event e;
+        while (poll_event(w, &e))
+            n += e.type == type;
+        time_sleep(5);
+    }
+    return n;
+}
+
+static void test_hostile_client(void)
+{
+    PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    Display *hd = XOpenDisplay(NULL); /* the other client */
+    CHECK(hd != NULL);
+    if (!hd)
+        return;
+    Window win = xwin(w);
+    settle(w);
+    Atom protocols = XInternAtom(hd, "WM_PROTOCOLS", False), del = XInternAtom(hd, "WM_DELETE_WINDOW", False);
+
+    /* a message of another type, or of another format, whose first word is the atom of WM_DELETE_WINDOW, is not a close */
+    XEvent ev;
+    memset(&ev, 0, sizeof ev);
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = win;
+    ev.xclient.message_type = XInternAtom(hd, "_NOT_WM_PROTOCOLS", False);
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = (long)del;
+    XSendEvent(hd, win, False, 0, &ev);
+    ev.xclient.message_type = protocols;
+    ev.xclient.format = 8;
+    XSendEvent(hd, win, False, 0, &ev);
+    XSync(hd, False);
+    time_sleep(20);
+    CHECK(count_events(w, EVENT_WINDOW_CLOSE) == 0);
+    CHECK(!window_should_close(w));
+    ev.xclient.format = 32; /* the real one */
+    XSendEvent(hd, win, False, 0, &ev);
+    XSync(hd, False);
+    time_sleep(20);
+    CHECK(count_events(w, EVENT_WINDOW_CLOSE) == 1);
+
+    /* a KeyPress with keycode 0 sent by a client: the input method puts those back itself, once it has composed a
+       character, and reads the composed string for them; for one of a client there is none (a crash in Xlib) */
+    memset(&ev, 0, sizeof ev);
+    ev.xkey.type = KeyPress;
+    ev.xkey.window = win;
+    ev.xkey.root = DefaultRootWindow(hd);
+    ev.xkey.state = 0xFFFF;
+    ev.xkey.keycode = 0;
+    ev.xkey.x = ev.xkey.y = 0x7FFFFFFF;
+    for (int i = 0; i < 20; i++)
+        XSendEvent(hd, win, False, 0, &ev);
+    XSync(hd, False);
+    time_sleep(20);
+    uint32_t chars[8];
+    int n = 0;
+    PlatformWindow *ws[1] = {w};
+    drain_chars(ws, 1, chars, &n, 8);
+    CHECK(n == 0);
+
+    /* an XDND drop whose source answers with a SelectionNotify naming another property of the window: nothing is read
+       from it and it is not deleted (the title is still there) */
+    Window src = XCreateSimpleWindow(hd, DefaultRootWindow(hd), 0, 0, 10, 10, 0, 0, 0);
+    Atom sel = XInternAtom(hd, "XdndSelection", False), uri = XInternAtom(hd, "text/uri-list", False);
+    XSetSelectionOwner(hd, sel, src, CurrentTime);
+    memset(&ev, 0, sizeof ev);
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = win;
+    ev.xclient.format = 32;
+    ev.xclient.message_type = XInternAtom(hd, "XdndEnter", False);
+    ev.xclient.data.l[0] = (long)src;
+    ev.xclient.data.l[1] = 5L << 24;
+    ev.xclient.data.l[2] = (long)uri;
+    XSendEvent(hd, win, False, 0, &ev);
+    ev.xclient.message_type = XInternAtom(hd, "XdndPosition", False);
+    ev.xclient.data.l[1] = 0;
+    ev.xclient.data.l[2] = 0;
+    XSendEvent(hd, win, False, 0, &ev);
+    ev.xclient.message_type = XInternAtom(hd, "XdndDrop", False);
+    ev.xclient.data.l[2] = (long)CurrentTime;
+    XSendEvent(hd, win, False, 0, &ev);
+    XSync(hd, False);
+    time_sleep(20);
+    window_begin_frame(w); /* the library asks for the uri list */
+    XSync(hd, False);
+    bool asked = false;
+    while (XPending(hd))
+    {
+        XEvent r;
+        XNextEvent(hd, &r);
+        if (r.type == SelectionRequest)
+        {
+            asked = true;
+            XSelectionEvent n2;
+            memset(&n2, 0, sizeof n2);
+            n2.type = SelectionNotify;
+            n2.requestor = r.xselectionrequest.requestor;
+            n2.selection = sel;
+            n2.target = uri;
+            n2.property = XInternAtom(hd, "_NET_WM_NAME", False); /* not the property asked for */
+            n2.time = r.xselectionrequest.time;
+            XSendEvent(hd, n2.requestor, False, 0, (XEvent *)&n2);
+        }
+    }
+    XSync(hd, False);
+    CHECK(asked);
+    time_sleep(20);
+    CHECK(count_events(w, EVENT_WINDOW_DROP) == 0);
+    CHECK(has_property(d, win, "_NET_WM_NAME"));
+    XCloseDisplay(hd);
+    window_destroy(w);
+}
+
 static void test_clocks(void)
 {
     uint64_t prev = time_nanos();
@@ -1085,6 +1224,7 @@ int main(void)
         {"wheel burst", test_wheel_burst},
         {"keymap follows", test_keymap_follows},
         {"destroy inside callbacks", test_destroy_in_callbacks},
+        {"events from a hostile client", test_hostile_client},
         {"shutdown inside a hook", test_shutdown_in_hook},
         {"first dead key, input method opened late", test_first_dead_key_late_method, pre_dead_server},
 #endif

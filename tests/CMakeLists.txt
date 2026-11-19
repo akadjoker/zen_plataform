@@ -56,6 +56,9 @@ add_unit_test(test_fs ${FS_SRC})
 add_unit_test(test_process ${PROCESS_SRC})
 if(NOT WIN32)
     # includes src/process_posix.c itself, so only its dependencies are compiled in
+    add_unit_test(test_process_hostile ${PROCESS_SRC})
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_process_hostile PRIVATE Threads::Threads)
     add_unit_test(test_process_slots src/error.c src/log.c)
     target_include_directories(test_process_slots PRIVATE ${CMAKE_SOURCE_DIR}/src)
     find_package(Threads REQUIRED)
@@ -80,6 +83,29 @@ endif()
 target_link_libraries(test_library PRIVATE ${CMAKE_DL_LIBS})
 add_unit_test(test_draw2d src/draw2d.c)
 add_unit_test(test_image src/draw2d.c src/image.c ${FS_SRC})
+
+
+# The regression inputs of the fuzz targets (tests/fuzz): the entry point libFuzzer calls, fed every file of a corpus
+# folder by a plain main, so what a fuzzer once broke stays tested with any compiler (tools/fuzz.sh runs the real fuzzers).
+# Under ASan the allocation limit is what catches the inputs that asked for gigabytes.
+function(add_fuzz_regression name corpus)
+    set(srcs "")
+    foreach(f ${ARGN})
+        list(APPEND srcs ${CMAKE_SOURCE_DIR}/${f})
+    endforeach()
+    add_executable(${name} fuzz/${name}.c fuzz/standalone_main.c ${srcs})
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(${name} PRIVATE c_std_11)
+    target_compile_definitions(${name} PRIVATE PLATFORM_STATIC)
+    target_link_libraries(${name} PRIVATE platform_sanitize)
+    add_test(NAME test_${name} COMMAND ${name} ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${corpus})
+    set_tests_properties(test_${name} PROPERTIES ENVIRONMENT "ASAN_OPTIONS=max_allocation_size_mb=1024:detect_leaks=1" TIMEOUT 120)
+endfunction()
+
+if(UNIX AND NOT APPLE)
+    add_fuzz_regression(fuzz_images images src/png.c src/image.c src/draw2d.c ${FS_SRC})
+    add_fuzz_regression(fuzz_paths paths ${FS_SRC})
+endif()
 
 if(UNIX AND NOT APPLE)
     add_unit_test(test_gamepad src/gamepad.c ${FS_SRC})
@@ -177,6 +203,13 @@ if(PLATFORM_BACKEND_X11)
     target_link_libraries(test_x11_lifecycle PRIVATE platform)
     add_test(NAME test_x11_lifecycle COMMAND test_x11_lifecycle)
     set_tests_properties(test_x11_lifecycle PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+    # The same fuzz corpus for what other X clients send a window (needs the server of the other X tests)
+    add_executable(fuzz_x11_events fuzz/fuzz_x11_events.c fuzz/standalone_main.c)
+    target_include_directories(fuzz_x11_events PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(fuzz_x11_events PRIVATE platform)
+    add_test(NAME test_fuzz_x11_events COMMAND fuzz_x11_events ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/x11_events)
+    set_tests_properties(test_fuzz_x11_events PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 
     add_executable(test_core_edge_x11 test_core_edge_x11.c)
     target_link_libraries(test_core_edge_x11 PRIVATE platform)
