@@ -255,6 +255,11 @@ static bool png_plausible(const uint8_t *d, size_t n, size_t *cap)
             unsigned depth = d[pos + 8 + 8], ctype = d[pos + 8 + 9];
             if (ctype > 6 || comps[ctype] == 0 || depth == 0 || depth > 16)
                 return false;
+            /* the depths each colour type may have (PNG 11.2.2): a gray image of 4 bits is fine, an RGBA one of 4 bits is not,
+               and stb trusts it (an assert in Debug, a decode of the wrong size otherwise) */
+            if ((ctype == 0 && depth != 1 && depth != 2 && depth != 4 && depth != 8 && depth != 16) ||
+                (ctype == 3 && depth > 8) || ((ctype == 2 || ctype == 4 || ctype == 6) && depth != 8 && depth != 16))
+                return false;
             uint64_t bpl = ((uint64_t)w * depth + 7) / 8;
             *cap = (size_t)(2 * (bpl * h * comps[ctype] + h) + 262144);
             raw_least = (uint64_t)w * h * depth * comps[ctype] / 8; /* the least the inflated data can be (Adam7 adds filter bytes) */
