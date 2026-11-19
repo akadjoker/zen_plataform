@@ -405,6 +405,130 @@ static void test_unknown_ids(void)
     waitpid(stranger, &status, 0);
 }
 
+/* ---- process_kill_tree against numbers that are not (or no longer) the group of a child ---- */
+
+/* a process that leads a group and a session of its own, as a shell or a service does, and is none of ours */
+static pid_t make_stranger(void)
+{
+    pid_t pid = (fork)();
+    if (pid == 0)
+    {
+        setsid();
+        for (;;)
+            pause();
+    }
+    for (int i = 0; i < 6000 && pid > 0 && getpgid(pid) != pid; i++)
+        sleep_ms(5);
+    return pid;
+}
+
+static void stranger_must_live(pid_t stranger, const char *what)
+{
+    sleep_ms(100); /* a signal that was sent has landed by now */
+    int status = 0;
+    bool alive = waitpid(stranger, &status, WNOHANG) == 0 && kill(stranger, 0) == 0;
+    if (!alive)
+        printf("  %s: the stranger's group was signalled\n", what);
+    CHECK(alive);
+    kill(stranger, SIGKILL);
+    waitpid(stranger, &status, 0);
+}
+
+static void test_kill_tree_recycled_number(void)
+{
+    /* a child of ours ends with nothing left in its group: the number is free for the system to give out again, and
+       the record stays in the table. When it is given out as the group of somebody else, process_kill_tree on the old
+       record must not signal that group. A real wrap of the pids cannot be made here: the record's number is changed
+       to the stranger's, which is the state the table is in after one. */
+    const char *quick[] = {"-c", "exit 0"};
+    int64_t gone = process_spawn("/bin/sh", quick, 2, false);
+    CHECK(gone > 0);
+    CHECK(finished(gone));
+    pid_t stranger = make_stranger();
+    CHECK(stranger > 0);
+    ProcessInfo *rec = find_process((pid_t)gone);
+    CHECK(rec != NULL);
+    if (rec && stranger > 0)
+        rec->pid = stranger;
+    CHECK(process_kill_tree(stranger)); /* nothing of ours is left to end: not an error */
+    stranger_must_live(stranger, "finished record, group empty");
+    if (rec)
+        rec->pid = 0; /* the record leaves the table */
+}
+
+static long read_pid(const char *file)
+{
+    for (int i = 0; i < 1500; i++)
+    {
+        FILE *f = fopen(file, "r");
+        if (f)
+        {
+            long pid = 0;
+            int n = fscanf(f, "%ld", &pid);
+            fclose(f);
+            if (n == 1 && pid > 0)
+                return pid;
+        }
+        sleep_ms(20);
+    }
+    return 0;
+}
+
+static void test_group_flag(void)
+{
+    /* the record knows whether its group still has anybody in it: set when the child is waited for, cleared by the
+       first call that finds the group empty */
+    const char *quick[] = {"-c", "exit 0"};
+    int64_t a = process_spawn("/bin/sh", quick, 2, false);
+    CHECK(a > 0 && finished(a));
+    CHECK(!find_process((pid_t)a)->group); /* the leader was alone */
+
+    const char *file = "process_slots_member.pid";
+    remove(file);
+    char script[128];
+    snprintf(script, sizeof script, "sleep 60 & echo $! > %s; exit 0", file);
+    const char *args[] = {"-c", script};
+    int64_t b = process_spawn("/bin/sh", args, 2, false);
+    long member = read_pid(file);
+    CHECK(b > 0 && member > 0);
+    CHECK(finished(b));
+    CHECK(find_process((pid_t)b)->group); /* the leader is gone, the sleep is not */
+    CHECK(process_is_running(b) == false && find_process((pid_t)b)->group);
+    kill((pid_t)member, SIGKILL);
+    /* the member is a zombie until its new parent waits for it, and a zombie is still in the group */
+    bool cleared = false;
+    for (int i = 0; i < 250 && !cleared; i++)
+    {
+        process_is_running(b);
+        cleared = !find_process((pid_t)b)->group;
+        if (!cleared)
+            sleep_ms(20);
+    }
+    if (!cleared)
+        printf("  the zombie of the killed member was never waited for (no init that does): the group stays\n");
+    else
+        CHECK(!find_process((pid_t)b)->group);
+    CHECK(process_kill_tree(b)); /* group empty or not: not an error */
+    remove(file);
+}
+
+static void test_kill_tree_not_ours(void)
+{
+    /* a process that process_spawn knows nothing about, and the number of a record that left the table */
+    pid_t stranger = make_stranger();
+    CHECK(stranger > 0);
+    CHECK(!process_kill_tree(stranger));
+    stranger_must_live(stranger, "not a child of process_spawn");
+
+    int64_t first = spawn_exit(0);
+    CHECK(first > 0 && finished(first));
+    for (int i = 0; i < PROCESS_CAP + 8; i++) /* the table forgets the oldest finished record first */
+        CHECK(spawn_exit(0) > 0);
+    CHECK(process_exit_code(first) == -1);
+    CHECK(!process_kill_tree(first));
+    CHECK(!process_kill(first));
+}
+
 int main(void)
 {
     test_pid_reuse();
@@ -413,6 +537,9 @@ int main(void)
     test_more_children_than_slots();
     test_batches();
     test_unknown_ids();
+    test_group_flag();
+    test_kill_tree_recycled_number();
+    test_kill_tree_not_ours();
     printf("test_process_slots: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

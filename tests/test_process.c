@@ -163,6 +163,206 @@ static void test_kill_tree(void)
 }
 #endif
 
+#if !defined(_WIN32)
+/* ---- process_kill_tree: the cases around the leader ---- */
+
+#include <fcntl.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+/* the pid a script wrote to a file, within 30 s; 0 if it never did */
+static long read_pid_file(const char *name)
+{
+    for (int i = 0; i < 1500; i++)
+    {
+        FILE *f = fopen(name, "r");
+        if (f)
+        {
+            long pid = 0;
+            int n = fscanf(f, "%ld", &pid);
+            fclose(f);
+            if (n == 1 && pid > 0)
+                return pid;
+        }
+        SLEEP_MS(20);
+    }
+    return 0;
+}
+
+/* a process that has not ended: a zombie is an ended one that its parent has not waited for yet */
+static bool process_alive(long pid)
+{
+    char path[64], line[512];
+    snprintf(path, sizeof path, "/proc/%ld/stat", pid);
+    FILE *f = fopen(path, "r");
+    if (f)
+    {
+        char state = '?';
+        if (fgets(line, sizeof line, f))
+        {
+            char *close = strrchr(line, ')');
+            if (close && close[1] == ' ')
+                state = close[2];
+        }
+        fclose(f);
+        return state != 'Z' && state != 'X';
+    }
+    return kill((pid_t)pid, 0) == 0; /* no /proc here: the number answers while the process, zombie or not, exists */
+}
+
+static bool ends_soon(long pid)
+{
+    for (int i = 0; i < 1500; i++)
+    {
+        if (!process_alive(pid))
+            return true;
+        SLEEP_MS(20);
+    }
+    return false;
+}
+
+/* The leader ends, a grandchild does not: the group id stays taken while any member lives (POSIX: a process id is not
+   reused while a process group with that id exists), so the number is still the group's, and process_kill_tree on the
+   finished leader ends the grandchild. Nothing left after that: a second call is not an error. */
+static void test_kill_tree_leader_gone(void)
+{
+    const char *file = "process_tree_leader_gone.pid";
+    remove(file);
+    char script[256];
+    snprintf(script, sizeof script, "sleep 60 & echo $! > %s; exit 0", file);
+    const char *args[] = {"-c", script};
+    int64_t id = process_spawn(SHELL, args, 2, false);
+    CHECK(id > 0);
+    long child = read_pid_file(file);
+    CHECK(child > 0);
+    CHECK(wait_finished(id));
+    CHECK(process_exit_code(id) == 0);
+    CHECK(process_alive(child)); /* the grandchild outlived the leader, which was waited for */
+    CHECK(process_kill(id));     /* a finished process: nothing to do, the grandchild is not touched */
+    CHECK(process_alive(child));
+    CHECK(process_kill_tree(id));
+    CHECK(ends_soon(child));
+    CHECK(process_kill_tree(id)); /* again: nothing left in the group */
+    CHECK(process_exit_code(id) == 0);
+    remove(file);
+}
+
+/* process_kill ends the child only; its grandchild stays, and process_kill_tree afterwards still reaches it */
+static void test_kill_then_kill_tree(void)
+{
+    const char *file = "process_tree_kill_then.pid";
+    remove(file);
+    char script[256];
+    snprintf(script, sizeof script, "sleep 60 & echo $! > %s; wait", file);
+    const char *args[] = {"-c", script};
+    int64_t id = process_spawn(SHELL, args, 2, false);
+    CHECK(id > 0);
+    long child = read_pid_file(file);
+    CHECK(child > 0);
+    CHECK(process_kill(id));
+    CHECK(!process_is_running(id));
+    SLEEP_MS(50);
+    CHECK(process_alive(child));
+    CHECK(process_kill_tree(id));
+    CHECK(ends_soon(child));
+    remove(file);
+}
+
+/* A child that starts its own session or group is out of reach: process_kill_tree ends the group process_spawn made and
+   nothing else. (platform.h says so.) The test ends the escaped one itself. */
+static void test_kill_tree_escaped(void)
+{
+    const char *probe[] = {"-c", "command -v setsid > /dev/null"};
+    int64_t p = process_spawn(SHELL, probe, 2, false);
+    CHECK(p > 0 && wait_finished(p));
+    if (process_exit_code(p) != 0)
+    {
+        printf("  setsid is not installed: the escaped-child case is skipped\n");
+        return;
+    }
+    const char *kept = "process_tree_kept.pid", *escaped = "process_tree_escaped.pid";
+    remove(kept);
+    remove(escaped);
+    char script[512];
+    snprintf(script, sizeof script, "setsid sh -c 'echo $$ > %s; exec sleep 60' & sleep 60 & echo $! > %s; wait", escaped, kept);
+    const char *args[] = {"-c", script};
+    int64_t id = process_spawn(SHELL, args, 2, false);
+    CHECK(id > 0);
+    long in_group = read_pid_file(kept), out_of_group = read_pid_file(escaped);
+    CHECK(in_group > 0 && out_of_group > 0);
+    CHECK(process_kill_tree(id));
+    CHECK(!process_is_running(id));
+    CHECK(ends_soon(in_group));
+    SLEEP_MS(100);
+    CHECK(process_alive(out_of_group)); /* it left the group: not reached */
+    if (out_of_group > 0)
+        kill((pid_t)out_of_group, SIGKILL);
+    CHECK(out_of_group <= 0 || ends_soon(out_of_group));
+    remove(kept);
+    remove(escaped);
+}
+
+/* A leader that ends by itself while process_kill_tree is called: whichever comes first, the call succeeds, the leader is
+   finished with a code that is its own or SIGKILL's, and the grandchild is gone. The leader waits on a pipe the test
+   closes, and the call follows after a delay that walks from before the leader's exit to after it. */
+static void test_kill_tree_while_leader_exits(void)
+{
+    int by_itself = 0, killed = 0, bad = 0;
+    for (int i = 0; i < 40; i++)
+    {
+        char file[64], script[256];
+        snprintf(file, sizeof file, "process_tree_race_%d.pid", i);
+        remove(file);
+        int gate[2];
+        CHECK(pipe(gate) == 0);
+        fcntl(gate[1], F_SETFD, FD_CLOEXEC);
+        snprintf(script, sizeof script, "sleep 60 & echo $! > %s; read x; exit 7", file);
+        const char *args[] = {"-c", script};
+        int saved = dup(0);
+        dup2(gate[0], 0);
+        int64_t id = process_spawn(SHELL, args, 2, false);
+        if (saved >= 0)
+        {
+            dup2(saved, 0);
+            close(saved);
+        }
+        close(gate[0]);
+        CHECK(id > 0);
+        long child = read_pid_file(file);
+        CHECK(child > 0);
+        close(gate[1]); /* the leader is released: it ends in a moment */
+        struct timespec ts = {0, (long)(i % 10) * 60000L};
+        nanosleep(&ts, NULL);
+        if (!process_kill_tree(id))
+            bad++;
+        int code = process_exit_code(id);
+        if (code == 7)
+            by_itself++;
+        else if (code == 9)
+            killed++;
+        else
+            bad++;
+        if (!ends_soon(child))
+            bad++;
+        remove(file);
+    }
+    printf("  kill_tree while the leader ends: %d ended by themselves first, %d killed, %d wrong\n", by_itself, killed, bad);
+    CHECK(bad == 0);
+}
+
+/* process_kill_tree on a number that is a real process but not a child of process_spawn is refused, and the ids that
+   no process has are too */
+static void test_kill_tree_refusals(void)
+{
+    CHECK(!process_kill_tree(0));
+    CHECK(!process_kill_tree(-1));
+    CHECK(!process_kill_tree(2147480000));
+    CHECK(!process_kill_tree((int64_t)getpid()));
+    CHECK(!process_kill_tree((int64_t)getppid()));
+    CHECK(!process_kill_tree(1));
+}
+#endif
+
 /* An exit code of 259 is STILL_ACTIVE to GetExitCodeProcess: it must not read as a process that never ends. The
    same child is a plain exit code elsewhere. */
 static void test_exit_code_259(void)
@@ -211,6 +411,11 @@ int main(void)
 #if !defined(_WIN32)
     test_kill_stubborn();
     test_kill_tree();
+    test_kill_tree_leader_gone();
+    test_kill_then_kill_tree();
+    test_kill_tree_escaped();
+    test_kill_tree_while_leader_exits();
+    test_kill_tree_refusals();
 #endif
     test_exit_code_259();
     test_failures();

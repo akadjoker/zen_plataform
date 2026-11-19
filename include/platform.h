@@ -604,15 +604,23 @@ extern "C"
        to call from several threads. */
     PLATFORM_API int64_t process_spawn(const char *path, const char *const *args, int argc, bool open_console);
     PLATFORM_API bool process_is_running(int64_t id);
-    /* -1 while the process runs or when the id is unknown. */
+    /* -1 while the process runs or when the id is unknown. An id that no process id can be (0, negative, wider than the
+       system's 32 bits) is unknown to every function here, and no process is touched. */
     PLATFORM_API int process_exit_code(int64_t id);
     /* Ends the process and reaps it. An id that process_spawn did not hand out, or whose record is among
        those the table has forgotten, is refused: the number may belong to some other process by now. A child that
        ended is waited for by the next call into these functions, so it does not stay a zombie. */
     PLATFORM_API bool process_kill(int64_t id);
-    /* Ends the process and everything it started that is still in its group (POSIX: the process group process_spawn
-       made; Windows: the job the process was assigned to), and reaps the process. The same rules for unknown ids
-       as process_kill. A process that already ended is known: its group is still signalled. */
+    /* Ends the process and what it started, and reaps it; a second call, or one on a process that ended, succeeds.
+       POSIX: SIGKILL to the process group process_spawn made (the process id is its id), so a grandchild that outlived
+       the leader is reached too, also after the leader ended and was waited for (the system does not give the number out
+       again while a group with it has a member). A child that left the group (setsid, setpgid) is out of reach. Once
+       the last member is gone the call does nothing and succeeds: the number may be some other process's group by then,
+       and the library does not signal it. (Between two calls into these functions the last member can go and the
+       system give the number to a stranger's group; the next call into them is what notices.)
+       Windows: the job the process was assigned to, which holds every descendant (none can leave it: the job does not
+       allow breakaway), those that outlive it included; where the process could not be put in a job (it was in one that
+       does not nest, before Windows 8) only the process is ended. The same rules for unknown ids as process_kill. */
     PLATFORM_API bool process_kill_tree(int64_t id);
 
     /* ========================================================================== */

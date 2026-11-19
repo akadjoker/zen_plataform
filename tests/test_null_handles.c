@@ -8,7 +8,9 @@
  * crash names the function; a second check reads include/platform.h and fails when a function that takes a window has no
  * row, so a new one cannot go in without its NULL case. The dialogs take the window only as a parent and accept NULL by
  * design (they are not in the table). The second half of the file calls the API before platform_init, after
- * platform_shutdown, twice in a row, and destroys a window twice and after the shutdown.
+ * platform_shutdown, twice in a row, and destroys a window twice and after the shutdown. The child process functions
+ * need no platform_init: the same bad ids (0, negative, too wide for a pid, real processes that are not children of
+ * process_spawn) are refused before the platform is up, while it is up and after it is down.
  * Built on core.c and the fake backend: the guards are in core.c, which every backend shares.
  */
 #include "platform.h"
@@ -16,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -797,6 +800,50 @@ static WindowConfig small_config(void)
     return cfg;
 }
 
+/* process_spawn and friends do not depend on platform_init: they answer the same in every state of the platform. An id
+   that is not a child of process_spawn is refused and no process is touched, whatever the number is: 0, negative, wider
+   than a pid (a pid with a bit set above bit 31 must not be read as that pid), a real process of somebody else
+   (the test, its parent, init). */
+static void process_contract(void)
+{
+    const char *sleeper[] = {"-c", "exec sleep 30"};
+    int64_t id = process_spawn("/bin/sh", sleeper, 2, false);
+    CHECK(id > 0);
+    if (id <= 0)
+        return;
+    const int64_t bad[] = {0,
+                           -1,
+                           INT64_MIN,
+                           INT64_MAX,
+                           2147480000,
+                           (int64_t)getpid(),
+                           (int64_t)getppid(),
+                           1,
+                           id + (1LL << 32),
+                           id - (1LL << 32),
+                           id | (1LL << 62)};
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    {
+        int64_t b = bad[i];
+        bool wrong = process_is_running(b) || process_exit_code(b) != -1 || process_kill(b) || process_kill_tree(b);
+        if (wrong)
+            printf("  process id %lld was not refused\n", (long long)b);
+        CHECK(!wrong);
+    }
+    CHECK(process_is_running(id)); /* none of that touched the child */
+    CHECK(process_exit_code(id) == -1);
+    CHECK(process_spawn(NULL, NULL, 0, false) == 0);
+    CHECK(process_spawn("", NULL, 0, false) == 0);
+    CHECK(process_spawn("/bin/sh", NULL, 2, false) == 0);
+    CHECK(process_spawn("/bin/sh", sleeper, -1, false) == 0);
+    CHECK(process_kill_tree(id));
+    CHECK(!process_is_running(id));
+    CHECK(process_exit_code(id) == 9); /* SIGKILL */
+    CHECK(process_kill_tree(id));      /* the second call: the record is known, nothing is left */
+    CHECK(process_kill(id));
+    CHECK(process_exit_code(id) == 9);
+}
+
 /* What needs no window, with the platform not up. */
 static void calls_without_platform(bool expect_clean)
 {
@@ -826,6 +873,7 @@ static void calls_without_platform(bool expect_clean)
     CHECK(window_create(&cfg) == NULL);
     CHECK(window_create(NULL) == NULL);
     CHECK(time_nanos() >= 0 && time_seconds() >= 0); /* the clock needs nothing */
+    process_contract();
     platform_shutdown();                              /* with the platform not up: nothing to do */
 }
 
@@ -835,6 +883,7 @@ static void test_lifecycle(void)
 
     CHECK(platform_init());
     CHECK(platform_init()); /* up already: nothing happens, still true */
+    process_contract();
     WindowConfig cfg = small_config();
     PlatformWindow *w = window_create(&cfg);
     CHECK(w != NULL);
