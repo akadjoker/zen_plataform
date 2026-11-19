@@ -140,7 +140,7 @@ extern "C"
                                        platform_web_fetch_file) */
 
         EVENT_KEY,  /* a physical key changed state */
-        EVENT_CHAR, /* text input, one Unicode codepoint */
+        EVENT_CHAR, /* text input, one Unicode codepoint; not for a shortcut (Ctrl or Super held): see "Text and shortcuts" below */
         EVENT_MOUSE_MOVE,
         EVENT_MOUSE_BUTTON,
         EVENT_MOUSE_WHEEL,
@@ -892,6 +892,24 @@ extern "C"
        key queue, so it carries layout and composed input correctly. */
     PLATFORM_API uint32_t char_get_pressed(PlatformWindow *w);
 
+    /* Text and shortcuts. EVENT_CHAR is what the user typed, and a shortcut is not typing: a key pressed while Ctrl or Super
+       (Meta: the Windows or the Command key) is held gives its EVENT_KEY, with the modifier in mods, and no EVENT_CHAR. Ctrl+A in a
+       text field selects, it does not type an "a"; Ctrl+1, Ctrl+minus, Ctrl+space and Super+a type nothing either. It is the same
+       on X11, Wayland, Windows, the web and the fake backend of the tests (Android makes no text from keys yet). Shift and Alt do not
+       change it: Shift+a is an "A", and Alt+a is an "a" where the platform makes text of it (Windows sends Alt+letter as a system
+       key, which makes none). What still types, whatever the modifiers of the key that finished it:
+         - AltGr: what a layout puts on its AltGr level is text. X11 and Wayland keep AltGr apart from Ctrl; Windows and the
+           browsers report it as Ctrl and Alt together, and there a character that comes with that pair is text (the web
+           asks the browser: getModifierState("AltGraph"); a Ctrl+Alt that is not AltGr is a shortcut).
+         - dead keys and Compose sequences: the character they compose is text. A shortcut in the middle of one is not part
+           of it: on Wayland it cancels the sequence (Ctrl+a after a dead acute is a Ctrl+a, not an a-acute); on X11 the input
+           method decides.
+         - what an input method commits (EVENT_TEXT_EDIT ends and the text arrives as EVENT_CHAR): X11 and Windows. The web
+           has no input method (a canvas is not an editable element) and the Wayland backend has no text-input protocol yet.
+       The clipboard shortcuts of the old desktops arrive as the key with its modifier, and make no text: Shift+Insert (paste),
+       Ctrl+Insert (copy) and Shift+Delete (cut) are KEY_INSERT and KEY_DELETE with KEYMOD_SHIFT or KEYMOD_CTRL in mods, on every
+       platform, to be bound next to Ctrl+V, Ctrl+C and Ctrl+X. */
+
     /* Text input and input methods. On by default: typed characters arrive as
        EVENT_CHAR and an input method may compose first (EVENT_TEXT_EDIT). A game that
        reads keys, not text, can turn it off, so no input method interferes with the
@@ -1117,7 +1135,25 @@ extern "C"
        text are not supported on Android and the web, where the data stays inside the
        app. The platform keeps its own copy of what you set. Reading blocks while
        another application answers (X11 waits up to one second per step); the owner
-       must keep running its event loop for others to be able to paste. */
+       must keep running its event loop for others to be able to paste.
+
+       The web: a page cannot read the clipboard at will, and the asynchronous API (navigator.clipboard) is not there on a page
+       opened over plain http. clipboard_get returns what the program put there, or the text the browser handed the page in a
+       paste event. Ctrl or Meta with V, C, X, and Shift+Insert, Ctrl+Insert, Shift+Delete are not swallowed by the page, so the
+       browser fires its paste, copy and cut events:
+         - paste (a key, or the browser's menu): the text becomes the clipboard content, and then the paste key reaches the
+           program (for a paste from the menu, which has no key, a Ctrl+V, Meta+V on a Mac), so clipboard_get in the handling of
+           the key returns what was pasted. A paste that holds no text (an image, files) leaves the content as it was.
+         - copy and cut: the program's frame runs once, inside the browser's event, right after the key is queued (the program
+           has not seen the key before this): what it sets with clipboard_set in answer goes to the browser's clipboard in that
+           very event, and a program that sets nothing (nothing selected) leaves the browser's clipboard alone.
+         - clipboard_set at any other time (a Copy button): navigator.clipboard when the page has it, else a hidden textarea
+           and document.execCommand("copy"); a browser that refuses outside of a gesture gets the text again at the next
+           mouse, touch or key event of the page.
+       A field of the page itself (an <input>) keeps its own paste, copy and cut. A build with the program on a worker
+       (PROXY_TO_PTHREAD) cannot run its frame inside the event: a copy or cut gets the text the program had set already, and
+       otherwise the text set a frame later is written through navigator.clipboard (such a build needs a secure context, where
+       it exists). */
 #define CLIPBOARD_TEXT "text/plain"
 #define CLIPBOARD_PNG "image/png"
 #define CLIPBOARD_URIS "text/uri-list"

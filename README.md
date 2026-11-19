@@ -377,6 +377,7 @@ src/
   clipboard.c             clipboard API (text, MIME data, PNG images)
   png.c                   minimal PNG encoder and decoder for the clipboard
   clipboard_mem.h         in-process clipboard store for fake, Android and web
+  web_key_rules.h         what the web backend decides about a key: clipboard command, text or not (no Emscripten in it)
   vulkan.c                Vulkan loader and surface creation (no Vulkan SDK needed)
   vulkan_internal.h       the few Vulkan declarations the backends use
   draw2d.c                software rasterizer over Framebuffer
@@ -399,8 +400,10 @@ tests/
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach
   test_dialog.c           zenity/kdialog/xdg-open arguments and answers, with stand-in programs
-  test_clipboard.c        clipboard API and PNG round trip (fake backend)
-  test_clipboard_x11.c    real X11 selections against forked clients, INCR included
+  test_clipboard.c        clipboard API, the primary selection and the PNG round trip (fake backend)
+  test_clipboard_x11.c    real X11 selections (CLIPBOARD and PRIMARY) against forked clients, INCR included
+  test_web_keys.c         the web backend's key rules (clipboard keys, text with Ctrl or Meta) on the host
+  tests/web/              the web clipboard and text keys in a real headless Chrome (run_clip_web.js, shell.html)
   test_multiwindow_x11.c  two windows on one X connection: events reach their own window
   test_vulkan.c           RENDER_VULKAN window, handles, a real VkSurfaceKHR (skips without a driver)
   test_draw2d.c           rasterizer tests (nearest + bilinear blit)
@@ -408,6 +411,7 @@ tests/
   test_image.c            BMP read/write round-trip
 examples/
   hello_x11.c             minimal GL example
+  clipboard_web.c         the web backend's paste, copy and cut and its text keys, in a page (tests/web/run_clip_web.js)
   raytrace.c              interactive software ray tracer
   ddemo.c                 DOOM-style ray caster
   galaxy.c                80s space shooter
