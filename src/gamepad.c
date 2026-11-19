@@ -48,6 +48,17 @@ void gamepad_poll(void)
     gamepad_backend_poll();
 }
 
+int gamepad_wait_fds(int *fds, int max)
+{
+    return gamepad_backend_wait_fds(fds, max);
+}
+
+int64_t gamepad_wait_ns(bool *live)
+{
+    *live = false;
+    return gamepad_backend_wait_ns(live);
+}
+
 void gamepad_shutdown(void)
 {
     gamepad_backend_shutdown();

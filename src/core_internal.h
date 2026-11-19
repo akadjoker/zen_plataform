@@ -107,6 +107,19 @@ bool core_platform_ready(void);
 void core_push_event(Core *core, const Event *ev);
 void core_push_char(Core *core, uint32_t codepoint);
 
+/* ---- platform_wake: what a backend's wait sleeps on besides the OS's own events (core.c) ----
+   One object for the life of the process, made at the first use and never closed (a thread may call platform_wake while the
+   main one shuts the platform down; a descriptor closed and reused under it would be written to). A wake stays pending until a
+   wait takes it, so one posted before the wait returns at once, and many posted before it count as one. */
+#if defined(_WIN32)
+void *core_wake_handle(void); /* an auto-reset event: a wait that ends on it has taken the wake. NULL if there is none */
+#else
+int core_wake_fd(void); /* readable while a wake is pending; -1 if the system gave none (and on the web, which has no wait) */
+#endif
+bool core_wake_take(void);            /* takes the pending wake, if any: true if there was one */
+int64_t core_wait_ms(int64_t ns);     /* a timeout in nanoseconds (negative: none) as a poll / Win32 one in ms, rounded up; -1 / INFINITE-like: none */
+bool core_wake_only_wait(int64_t ns); /* the wait of a platform that is not up: sleeps on the wake alone; true if woken */
+
 /* A finger from a touch screen on a desktop backend (the system gave no mouse
    events for it, or gave ones that must not be counted twice). Raises EVENT_TOUCH
    and lets the first finger act as the left mouse button. Backends with their own

@@ -11,6 +11,7 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "gamepad_internal.h"
 
 #include <wayland-client.h>
 #include <wayland-cursor.h>
@@ -2506,6 +2507,107 @@ static void dispatch(int timeout_ms)
     else
         wl_display_cancel_read(g.display);
     wl_display_dispatch_pending(g.display);
+}
+
+/* ---- sleeping until the compositor, a gamepad or platform_wake has something (platform_wait_events) ---- */
+
+#define WAIT_PADS 40 /* the descriptors of the gamepads and joysticks, and the one that watches /dev/input */
+
+/* Whether a listener has raised an event that some window's pump has not handed to the core yet. */
+static bool events_queued(void)
+{
+    for (const BackendWindow *w = g.windows; w; w = w->next)
+        if (w->queue_n > 0)
+            return true;
+    return false;
+}
+
+/* The protocol libwayland prescribes for a thread that waits on the connection: prepare_read says nobody else is about to
+   read (if it fails, what is already read is dispatched first), the output is flushed, poll, then read_events or cancel_read
+   exactly once. Everything dispatched here only fills the windows' queues (the listeners do nothing else), so the events
+   are still the pump's to hand to the core, and the wait also answers a ping of the compositor while it sleeps. The queues are
+   looked at after every dispatch: an event that arrives together with the one that ends a frame callback is already in
+   libwayland's buffer and the socket is quiet, so poll alone would sleep through it. */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    int64_t limit = timeout_ns;
+    if (g.repeat_key && g.keyboard_focus && g.repeat_rate > 0)
+    {
+        /* the compositor sends no repeats: the pump makes them, so the sleep ends when the next is due (false: the pump
+           does it, no event is waiting yet) */
+        double due = g.repeat_next - now_ms();
+        int64_t d = due > 0 ? (int64_t)(due * 1e6) : 0;
+        if (limit < 0 || d < limit)
+            limit = d;
+    }
+    const int64_t start = (int64_t)time_nanos();
+    for (;;)
+    {
+        if (g.lost || wl_display_get_error(g.display) != 0 || events_queued())
+            return true; /* a broken connection is told to each window by the pump */
+        while (wl_display_prepare_read(g.display) != 0)
+            wl_display_dispatch_pending(g.display);
+        if (events_queued())
+        {
+            wl_display_cancel_read(g.display);
+            return true;
+        }
+        bool want_out = false;
+        if (wl_display_flush(g.display) < 0)
+        {
+            if (errno != EAGAIN)
+            {
+                wl_display_cancel_read(g.display);
+                return true; /* the pump reports the lost connection */
+            }
+            want_out = true; /* the socket is full: wait until it takes more, and read meanwhile */
+        }
+        int64_t left = -1;
+        if (limit >= 0)
+        {
+            left = limit - ((int64_t)time_nanos() - start);
+            if (left < 0)
+                left = 0;
+        }
+        struct pollfd fds[2 + WAIT_PADS];
+        int pad_fds[WAIT_PADS], n = 0;
+        fds[n++] = (struct pollfd){.fd = wl_display_get_fd(g.display), .events = (short)(POLLIN | (want_out ? POLLOUT : 0))};
+        int wake = core_wake_fd();
+        if (wake >= 0)
+            fds[n++] = (struct pollfd){.fd = wake, .events = POLLIN};
+        const int first_pad = n;
+        int pads = gamepad_wait_fds(pad_fds, WAIT_PADS);
+        for (int i = 0; i < pads; i++)
+            fds[n++] = (struct pollfd){.fd = pad_fds[i], .events = POLLIN};
+        int r = poll(fds, (nfds_t)n, (int)core_wait_ms(left));
+        if (r < 0)
+        {
+            wl_display_cancel_read(g.display);
+            return false; /* EINTR: a signal; the caller may have a flag to look at */
+        }
+        if (r > 0 && (fds[0].revents & (POLLIN | POLLHUP | POLLERR)))
+            wl_display_read_events(g.display); /* a failure is the connection's error, seen at the top of the loop */
+        else
+            wl_display_cancel_read(g.display);
+        wl_display_dispatch_pending(g.display);
+        if (r > 0)
+        {
+            bool woke = wake >= 0 && (fds[1].revents & POLLIN) && core_wake_take();
+            bool pad = false;
+            for (int i = first_pad; i < n; i++)
+                pad |= fds[i].revents != 0;
+            if (woke || pad)
+                return true;
+        }
+        if (events_queued())
+            return true;
+        if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
+            return false;
+    }
+}
+
+void backend_wake(void)
+{
 }
 
 void backend_pump_events(BackendWindow *b, Core *core)

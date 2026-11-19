@@ -253,6 +253,23 @@ void gesture_update(GestureState *g, double now)
         g->current = GESTURE_NONE;
 }
 
+bool gesture_update_pending(const GestureState *g)
+{
+    switch (g->current)
+    {
+    case GESTURE_TAP:
+    case GESTURE_DOUBLETAP:
+        return g->point_count < 2;
+    case GESTURE_SWIPE_RIGHT:
+    case GESTURE_SWIPE_UP:
+    case GESTURE_SWIPE_LEFT:
+    case GESTURE_SWIPE_DOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
 unsigned gesture_state_detected(const GestureState *g)
 {
     return g->enabled & g->current;

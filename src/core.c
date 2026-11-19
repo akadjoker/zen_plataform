@@ -15,6 +15,16 @@
 #include <string.h>
 #include <time.h>
 
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <unistd.h>
+#if defined(__linux__)
+#include <sys/eventfd.h>
+#endif
+#endif
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -780,6 +790,271 @@ void app_run(PlatformWindow *w, FrameCallback frame, void *user)
         return;
     g_depth++; /* the loop and the frame callbacks: the window outlives a window_destroy made in them until this returns */
     backend_run(w->b, w, frame, user);
+    scope_leave();
+}
+
+/* ---- waiting for events ---- */
+
+/* The wake: one object for the whole life of the process, made the first time anyone needs it. platform_wake may be called by
+   any thread at any time, also while another thread shuts the platform down, so it cannot be tied to platform_init: a
+   descriptor closed with the platform and given to something else would be written to. The cost is one descriptor (two on a
+   system without eventfd) that is never closed, the same however many times the platform is started and stopped. */
+#if defined(_WIN32)
+
+static HANDLE g_wake_event;
+
+void *core_wake_handle(void)
+{
+    HANDLE h = InterlockedCompareExchangePointer(&g_wake_event, NULL, NULL);
+    if (h)
+        return h;
+    h = CreateEventW(NULL, FALSE, FALSE, NULL); /* auto-reset: the wait that ends on it takes the wake */
+    if (!h)
+        return NULL;
+    HANDLE first = InterlockedCompareExchangePointer(&g_wake_event, h, NULL);
+    if (first)
+    {
+        CloseHandle(h);
+        h = first;
+    }
+    return h;
+}
+
+static void wake_post(void)
+{
+    HANDLE h = core_wake_handle();
+    if (h)
+        SetEvent(h);
+}
+
+bool core_wake_take(void)
+{
+    HANDLE h = core_wake_handle();
+    return h && WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+}
+
+#elif defined(__EMSCRIPTEN__)
+
+int core_wake_fd(void)
+{
+    return -1;
+}
+
+static void wake_post(void)
+{
+}
+
+bool core_wake_take(void)
+{
+    return false;
+}
+
+#else
+
+/* The two ends of the wake, one more than the descriptor in each half (so that zero means "not made yet") of one word that a
+   compare-and-swap publishes: two threads that both make one never leave the readers with the read end of one and the write
+   end of the other. On Linux an eventfd is both ends. */
+static unsigned long long g_wake_pair;
+
+static bool wake_ends(int *rd, int *wr)
+{
+    unsigned long long p = __atomic_load_n(&g_wake_pair, __ATOMIC_ACQUIRE);
+    if (!p)
+    {
+        int fds[2];
+#if defined(__linux__)
+        fds[0] = fds[1] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (fds[0] < 0)
+            return false;
+#else
+        if (pipe(fds) < 0)
+            return false;
+        for (int i = 0; i < 2; i++)
+        {
+            fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+            fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL) | O_NONBLOCK);
+        }
+#endif
+        unsigned long long mine = ((unsigned long long)(unsigned)(fds[1] + 1) << 32) | (unsigned)(fds[0] + 1), none = 0;
+        if (__atomic_compare_exchange_n(&g_wake_pair, &none, mine, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            p = mine;
+        else
+        {
+            p = none; /* another thread was first: use its descriptors, close ours */
+            close(fds[0]);
+            if (fds[1] != fds[0])
+                close(fds[1]);
+        }
+    }
+    *rd = (int)(p & 0xffffffffu) - 1;
+    *wr = (int)(p >> 32) - 1;
+    return true;
+}
+
+int core_wake_fd(void)
+{
+    int rd, wr;
+    return wake_ends(&rd, &wr) ? rd : -1;
+}
+
+/* A write on a descriptor that exists: it is safe in a signal handler (errno is put back), which is the one thing a handler
+   may need to do to get a blocked loop to look at a flag. The first call of all would make the descriptor, which is only
+   reliable outside a handler; a program that wakes from a handler calls platform_wake once, or waits once, before. */
+static void wake_post(void)
+{
+    int rd, wr, saved = errno;
+    if (wake_ends(&rd, &wr))
+    {
+#if defined(__linux__)
+        unsigned long long one = 1;
+        ssize_t n = write(wr, &one, sizeof one);
+#else
+        ssize_t n = write(wr, "x", 1);
+#endif
+        (void)n; /* EAGAIN: a wake is already pending, which is all this one would have said */
+    }
+    errno = saved;
+}
+
+bool core_wake_take(void)
+{
+    int rd, wr;
+    if (!wake_ends(&rd, &wr))
+        return false;
+    bool had = false;
+    char buf[64];
+    for (;;)
+    {
+        ssize_t n = read(rd, buf, sizeof buf);
+        if (n <= 0)
+            break;
+        had = true;
+#if defined(__linux__)
+        break; /* an eventfd gives its whole count in one read */
+#endif
+    }
+    return had;
+}
+
+#endif
+
+int64_t core_wait_ms(int64_t ns)
+{
+    if (ns < 0)
+        return -1;
+    int64_t ms = ns / 1000000 + (ns % 1000000 != 0); /* never early: a deadline loop would spin on the part of a ms left */
+    return ms > 0x7fffffff ? 0x7fffffff : ms;
+}
+
+bool core_wake_only_wait(int64_t ns)
+{
+#if defined(_WIN32)
+    HANDLE h = core_wake_handle();
+    if (!h)
+        return false;
+    int64_t ms = core_wait_ms(ns);
+    return WaitForSingleObject(h, ms < 0 ? INFINITE : (DWORD)ms) == WAIT_OBJECT_0;
+#elif defined(__EMSCRIPTEN__)
+    (void)ns;
+    return true; /* nothing can be waited on in a browser: the caller goes on to its frame */
+#else
+    int fd = core_wake_fd();
+    if (fd < 0)
+        return false; /* no way to wait at all: better to return than to sleep for ever */
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    return poll(&p, 1, (int)core_wait_ms(ns)) > 0 && core_wake_take();
+#endif
+}
+
+void platform_wake(void)
+{
+    wake_post();
+    backend_wake();
+}
+
+/* State that only the next window_begin_frame changes, so a loop that sleeps between events has to run it: the release of a
+   click that came in the frame of its press (mouse_down stays true until then) and a gesture that turns from a tap into a hold
+   or ends. A window that nobody pumps keeps this true, which is the caller's to avoid. */
+static bool frame_due(void)
+{
+    for (PlatformWindow *w = g_windows; w; w = w->next)
+    {
+        if (w->dead)
+            continue;
+        const InputState *s = &w->core.in;
+        for (int b = 0; b < MOUSE_BUTTON_MAX; b++)
+            if (s->mouse_release_pending[b])
+                return true;
+        if (gesture_update_pending(&s->gesture))
+            return true;
+    }
+    return false;
+}
+
+bool platform_wait_events(double timeout_seconds)
+{
+    int64_t ns;
+    if (timeout_seconds != timeout_seconds)
+        ns = 0; /* NaN */
+    else if (timeout_seconds < 0 || timeout_seconds >= 3e9)
+        ns = -1;
+    else
+        ns = (int64_t)(timeout_seconds * 1e9);
+    if (!g_ready)
+        return core_wake_only_wait(ns);
+    if (frame_due())
+        return true;
+    return backend_wait_events(ns);
+}
+
+static bool g_frame_wanted;
+static int64_t g_frame_at = -1; /* time_nanos() of the frame the application asked for, or -1 */
+
+void app_request_frame(void)
+{
+    g_frame_wanted = true;
+}
+
+void app_request_frame_at(double seconds)
+{
+    if (seconds != seconds)
+        return;
+    int64_t at = seconds <= 0 ? 0 : seconds >= 9e9 ? INT64_MAX : (int64_t)(seconds * 1e9);
+    if (g_frame_at < 0 || at < g_frame_at)
+        g_frame_at = at;
+}
+
+void app_run_events(PlatformWindow *w, FrameCallback frame, void *user)
+{
+    if (!w || !frame)
+        return;
+    g_depth++;
+#if defined(__EMSCRIPTEN__)
+    backend_run(w->b, w, frame, user); /* the browser decides when a frame is due; there is nothing to sleep on */
+#else
+    g_frame_wanted = true; /* the first frame draws what is there */
+    while (!window_should_close(w))
+    {
+        double wait = -1;
+        if (g_frame_wanted)
+            wait = 0;
+        else if (g_frame_at >= 0)
+        {
+            int64_t left = g_frame_at - (int64_t)time_nanos();
+            wait = left > 0 ? (double)left / 1e9 : 0;
+        }
+        bool arrived = platform_wait_events(wait);
+        window_begin_frame(w);
+        bool due = g_frame_wanted || (g_frame_at >= 0 && (int64_t)time_nanos() >= g_frame_at);
+        if (!arrived && !due && w->core.in.fe_count == 0)
+            continue; /* a service tick or a wait that ran out with the deadline still ahead: nothing to show */
+        g_frame_wanted = false;
+        if (g_frame_at >= 0 && (int64_t)time_nanos() >= g_frame_at)
+            g_frame_at = -1;
+        frame(w, user);
+        window_swap(w);
+    }
+#endif
     scope_leave();
 }
 

@@ -9,6 +9,7 @@
 #include "backend.h"
 #include "win32_util.h"
 #include "error_internal.h"
+#include "gamepad_internal.h"
 #include "vulkan_internal.h"
 #include "png_internal.h"
 #include "mime_util.h"
@@ -151,12 +152,17 @@ struct BackendWindow
 /* Events raised while the window is being driven by an API call (ShowWindow,
    SetWindowPos) arrive outside the pump; they wait here and are delivered at the
    start of the next pump, so begin_frame never discards them. */
+static int g_pending_total; /* items waiting in every window's list: backend_wait_events returns while there are any */
+
 static void push(BackendWindow *b, Event *e)
 {
     if (b->pumping && b->core)
         core_push_event(b->core, e);
     else if (b->pending_count < PENDING_MAX)
+    {
         b->pending[b->pending_count++] = (PendingItem){.ev = *e};
+        g_pending_total++;
+    }
 }
 
 static void push_touch(BackendWindow *b, TouchPhase phase, int id, float x, float y)
@@ -172,6 +178,7 @@ static void push_touch(BackendWindow *b, TouchPhase phase, int id, float x, floa
         it.ev.data.touch.x = x;
         it.ev.data.touch.y = y;
         b->pending[b->pending_count++] = it;
+        g_pending_total++;
     }
 }
 
@@ -180,7 +187,10 @@ static void push_char(BackendWindow *b, uint32_t cp)
     if (b->pumping && b->core)
         core_push_char(b->core, cp);
     else if (b->pending_count < PENDING_MAX)
+    {
         b->pending[b->pending_count++] = (PendingItem){.is_char = true, .cp = cp};
+        g_pending_total++;
+    }
 }
 
 static UINT window_dpi(HWND hwnd)
@@ -1866,6 +1876,7 @@ void backend_destroy(BackendWindow *b)
 {
     if (!b)
         return;
+    g_pending_total -= b->pending_count;
     if (b->cursor_mode == MOUSE_MODE_CAPTURED)
         ClipCursor(NULL);
     set_raw_mouse(b, false);
@@ -1910,6 +1921,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         else
             core_push_event(core, &b->pending[i].ev);
     }
+    g_pending_total -= b->pending_count;
     b->pending_count = 0;
 
     b->pumping = true;
@@ -1922,6 +1934,53 @@ void backend_pump_events(BackendWindow *b, Core *core)
     }
     release_stuck_keys(b);
     b->pumping = false;
+}
+
+/* MsgWaitForMultipleObjectsEx with the wake event and every kind of input message, MWMO_INPUTAVAILABLE so that a message
+   that a PeekMessage has looked at and left (or one that arrived between the pump's last look and now) still ends the
+   wait: without the flag the wait only sees messages that came after the queue was last examined. Messages SENT to a
+   window by another thread are dispatched by the system inside this call (that is how the window procedure runs for
+   them); what they push goes to the pending lists, so the lists are looked at after every return. Gamepads cannot be waited
+   on: gamepad_wait_ns says when the next poll is due. Not run (no Windows here): compiled with MinGW only. */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    HANDLE wake = (HANDLE)core_wake_handle();
+    int64_t limit = timeout_ns;
+    bool live = false;
+    int64_t pads = gamepad_wait_ns(&live);
+    if (pads >= 0 && (limit < 0 || pads < limit))
+        limit = pads;
+    else
+        live = false; /* the caller's own timeout comes first: that tick is not a device's */
+    const int64_t start = (int64_t)time_nanos();
+    for (;;)
+    {
+        if (g_pending_total > 0)
+            return true;
+        int64_t left = -1;
+        if (limit >= 0)
+        {
+            left = limit - ((int64_t)time_nanos() - start);
+            if (left < 0)
+                left = 0;
+        }
+        int64_t ms = core_wait_ms(left);
+        DWORD n = wake ? 1 : 0;
+        DWORD r = MsgWaitForMultipleObjectsEx(n, wake ? &wake : NULL, ms < 0 ? INFINITE : (DWORD)(ms > 0x7ffffff0 ? 0x7ffffff0 : ms),
+                                              QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (r == WAIT_OBJECT_0 + n || (wake && r == WAIT_OBJECT_0))
+            return true; /* a message, or the wake (an auto-reset event: the wait took it) */
+        if (r == WAIT_FAILED)
+            return true; /* nothing to sleep on: let the caller go on rather than spin here */
+        if (g_pending_total > 0)
+            return true;
+        if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
+            return live;
+    }
+}
+
+void backend_wake(void)
+{
 }
 
 void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void *user)

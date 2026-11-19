@@ -354,6 +354,76 @@ extern "C"
     typedef void (*FrameCallback)(PlatformWindow *w, void *user);
     PLATFORM_API void app_run(PlatformWindow *w, FrameCallback frame, void *user);
 
+    /* ---- Sleeping until something happens (an application that is idle uses no CPU) ----
+       app_run and a loop of window_begin_frame calls run flat out (vsync, if the window has it, is all that slows them).
+       A program that draws only when something changed sleeps in platform_wait_events instead:
+
+           while (!window_should_close(w)) {
+               platform_wait_events(-1);       // or a timeout in seconds: a blinking caret, a clock
+               window_begin_frame(w);          // the events the wait woke for are here
+               ... handle input, draw if anything changed ...
+           }
+
+       platform_wait_events(timeout_seconds) returns when the OS has events for the application's windows, when platform_wake
+       is called, when a gamepad has input, or when the timeout has passed (negative: no limit; 0: look and return, a poll).
+       It returns true when something is waiting for the next window_begin_frame (events, a wake, a gamepad) and false when
+       the time ran out. It never consumes an event: window_begin_frame and poll_event see them exactly as if the wait had not
+       been there, so a loop that calls it before every frame loses nothing. Events that are already waiting (in the
+       connection, or read earlier by a call that had to wait for the server) make it return at once, true.
+       It may also return false early, before the timeout and with nothing for the application: a signal arrived (EINTR: the
+       handler's flag can be looked at), or the backend has work of its own that only window_begin_frame does and that is due
+       (see below). Call window_begin_frame after every return, true or false, and loop: that is the whole contract.
+       What the wait does not starve (it returns in time for each, so the next window_begin_frame serves it):
+         - a click released in the frame of its press, and a gesture that turns from a tap into a hold or ends (the state
+           that only the next window_begin_frame changes): true at once;
+         - gamepads and joysticks: on Linux their descriptors are watched (true when one has input or a device comes or goes);
+           on Windows XInput and winmm cannot be waited on, so while a pad is plugged in the sleep is at most 8 ms, and with
+           none at most one second (the pad scan);
+         - a key held, with the window focused (X11 only): false after at most 0.1 s, the time the check for a key release
+           the server never sent is due; the keyboard's own auto-repeat arrives as events and needs nothing (Wayland has no
+           server-side repeat: the sleep ends in time for each repeat the library makes itself, false);
+         - a drag-and-drop whose source never sends the files (X11): false when the five seconds it is given are up;
+         - clipboard transfers in progress are served by the events they raise (true), a paste in progress is a call that
+           does not return to the loop; input-method pre-edit and cursor shape changes arrive as events or are done by the
+           call that asks for them; live resize on Windows runs inside the OS and is served by the live callback (the wait is
+           not called then).
+       Not waited on, so documented rather than hidden: an input method that talks over a socket of its own instead of the X
+       connection (rare; the ones in use go through the connection); another thread of the program that reads the X
+       connection itself (a GL or Vulkan driver may take events off it while it waits for its own reply) can leave events in a
+       queue while the socket is quiet: call platform_wake after it, or wait with a timeout. On the web there is nothing to
+       sleep on (the browser calls the frame): it returns true at once. On Android it sleeps in the looper (events, wake).
+       Call it from the thread that drives the windows, not from an event hook, a hit test or a live callback. Before
+       platform_init succeeds or after platform_shutdown it sleeps on the wake alone (true only if woken).
+
+       platform_wake() makes a wait that is blocked return true, or the next one if none is blocked now: a wake that finds no
+       wait stays pending and ends the next wait at once, once (wakes that come before it count as one). It is for the
+       other threads (a worker that finished, a timer, a socket reader: set the data, then wake), and it may be called from any
+       thread at any time, also before platform_init and while another thread shuts the platform down. It is async-signal-safe
+       once the platform has been initialized or waited on (it is a write to a descriptor that exists), so a signal handler
+       can use it. Ten thousand wakes from four threads against a waiting main thread lose none (tests/test_wait.c, run
+       under ThreadSanitizer). Nothing is delivered with the wake: it carries no data, the waker's own queue does. */
+    PLATFORM_API bool platform_wait_events(double timeout_seconds);
+    PLATFORM_API void platform_wake(void);
+
+    /* app_run for programs that draw on demand: the loop sleeps in platform_wait_events and runs the frame callback only when
+       events arrived, platform_wake was called, the frame called app_request_frame (an animation going on), or the time
+       given to app_request_frame_at has come. The first frame always runs. window_begin_frame still runs on every turn, so
+       input state, edges and should_close stay exact; window_swap runs after a frame only. Idle, it uses no CPU: the
+       process sleeps in poll(2). On the web the browser paces the frames and this is app_run.
+
+           static void frame(PlatformWindow *w, void *user) {
+               draw(w);
+               if (animating) app_request_frame();                       // again, now
+               else if (caret_blinks) app_request_frame_at(time_seconds() + 0.5);
+           }
+           ... app_run_events(w, frame, &state);
+
+       app_request_frame and app_request_frame_at are for the thread that runs the loop (from another one, call
+       platform_wake: that makes the next frame run too). Of two deadlines the earlier counts, and a frame run clears them. */
+    PLATFORM_API void app_run_events(PlatformWindow *w, FrameCallback frame, void *user);
+    PLATFORM_API void app_request_frame(void);
+    PLATFORM_API void app_request_frame_at(double seconds); /* on the clock of time_seconds() */
+
     /* Iterate the events collected this frame. Returns false when the queue is
        empty. Does not clear input state, so state queries stay valid in the same
        frame. */

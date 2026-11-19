@@ -52,10 +52,15 @@ struct BackendWindow
 
 /* ---- helpers shared with the injection API below ---- */
 
+static int g_pending_total; /* injected items no pump has delivered yet, in every window: what backend_wait_events looks at */
+
 static void enqueue(BackendWindow *b, const FakeItem *it)
 {
     if (b->pending_count < FAKE_PENDING_MAX)
+    {
         b->pending[b->pending_count++] = *it;
+        g_pending_total++;
+    }
 }
 
 /* ========================================================================== */
@@ -94,6 +99,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
 
 void backend_destroy(BackendWindow *b)
 {
+    g_pending_total -= b->pending_count;
     free(b->px);
     free(b);
 }
@@ -111,7 +117,21 @@ void backend_pump_events(BackendWindow *b, Core *core)
         else
             core_push_event(core, &it->ev);
     }
+    g_pending_total -= b->pending_count;
     b->pending_count = 0;
+}
+
+/* The fake has no connection to wait on: what can end the sleep is an injected item (put there by the same thread, so
+   already in g_pending_total, and the wait returns at once) and platform_wake from another thread. */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    if (g_pending_total > 0)
+        return true;
+    return core_wake_only_wait(timeout_ns);
+}
+
+void backend_wake(void)
+{
 }
 
 void *backend_native_handle(BackendWindow *b, NativeHandleType type)

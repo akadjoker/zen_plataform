@@ -13,6 +13,7 @@
 #include "vulkan_internal.h"
 #include "mime_util.h"
 #include "preedit.h"
+#include "gamepad_internal.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -39,6 +40,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <time.h>
 
@@ -2498,6 +2501,158 @@ static void key_taken_by_im(BackendWindow *b, XEvent *ev)
     }
 }
 
+/* ---- sleeping until the server, a gamepad or platform_wake has something (platform_wait_events) ---- */
+
+#define WAIT_PADS 40 /* the descriptors of the gamepads and joysticks, and the one that watches /dev/input */
+
+static bool handle_global_event(XEvent *ev);
+
+/* How long the pump can wait for work that is not an event: -1 for none. A key held in a focused window is looked at (the
+   server is asked whether it really is down) every STUCK_KEY_INTERVAL; a drop that waits for its files gives up
+   XDND_CONVERT_MS after it began. */
+static int64_t wait_service_ns(void)
+{
+    int64_t ns = -1;
+    for (const BackendWindow *b = g.windows; b; b = b->next)
+    {
+        if (b->xdnd_converting)
+        {
+            long left = XDND_CONVERT_MS + 1 - (xdnd_now_ms() - b->xdnd_since); /* the pump gives up when it is more than that */
+            int64_t d = left > 0 ? (int64_t)left * 1000000 : 0;
+            ns = ns < 0 || d < ns ? d : ns;
+        }
+        if (b->focused)
+        {
+            bool any = false;
+            for (int kc = 0; kc < 256 && !any; kc++)
+                any = b->kc_down[kc];
+            if (any)
+            {
+                int64_t d = (int64_t)(STUCK_KEY_INTERVAL * 1e9);
+                ns = ns < 0 || d < ns ? d : ns;
+            }
+        }
+    }
+    return ns;
+}
+
+/* The order is what makes this free of the lost wake-up: XPending first (it flushes our requests, reads what the server has
+   sent into Xlib's queue, and also sees events that xcb under Xlib has queued, which XQLength does not), and only when it
+   says nothing is there, poll on the socket. Events that something else read off the socket (a reply wait in this
+   thread earlier, say) are in that queue and make XPending return them; the socket itself is quiet then and poll would
+   sleep through them. The other end of the race, a call in another thread of ours that leaves events in the queue while
+   this one is between XPending and poll, is closed where those calls are (the GL worker: wake_if_queued). */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    for (const BackendWindow *b = g.windows; b; b = b->next)
+        if (b->pending_n > 0)
+            return true; /* read by another window's pump, kept for this one: the pump has it */
+    int64_t limit = timeout_ns, service = wait_service_ns();
+    if (service >= 0 && (limit < 0 || service < limit))
+        limit = service;
+    const int64_t start = (int64_t)time_nanos();
+    for (;;)
+    {
+        if (g.io_lost)
+            return true;
+        if (!g.windows)
+        {
+            /* No window is left (the program destroyed them all and sleeps until a wake, or a new window): the events that
+               are still coming (the ones for the windows that went) have no pump to be read by and would end every wait at
+               once, for ever. What is for the clipboard is served, the rest is dropped. */
+            while (XPending(g.dpy) > 0)
+            {
+                XEvent ev;
+                XNextEvent(g.dpy, &ev);
+                if (!XFilterEvent(&ev, None))
+                    handle_global_event(&ev);
+            }
+        }
+        else if (XPending(g.dpy) > 0)
+            return true;
+        int64_t left = -1;
+        if (limit >= 0)
+        {
+            left = limit - ((int64_t)time_nanos() - start);
+            if (left < 0)
+                left = 0;
+        }
+        struct pollfd fds[2 + WAIT_PADS];
+        int pad_fds[WAIT_PADS], n = 0;
+        fds[n++] = (struct pollfd){.fd = ConnectionNumber(g.dpy), .events = POLLIN};
+        int wake = core_wake_fd();
+        if (wake >= 0)
+            fds[n++] = (struct pollfd){.fd = wake, .events = POLLIN};
+        const int first_pad = n;
+        int pads = gamepad_wait_fds(pad_fds, WAIT_PADS);
+        for (int i = 0; i < pads; i++)
+            fds[n++] = (struct pollfd){.fd = pad_fds[i], .events = POLLIN};
+        int r = poll(fds, (nfds_t)n, (int)core_wait_ms(left));
+        if (r < 0)
+            return false; /* EINTR: a signal; the caller may have a flag to look at */
+        if (r > 0)
+        {
+            if (fds[0].revents & POLLNVAL)
+                return true; /* the connection's descriptor is gone: let the pump find out */
+            bool woke = wake >= 0 && (fds[1].revents & POLLIN) && core_wake_take();
+            bool pad = false;
+            for (int i = first_pad; i < n; i++)
+                pad |= fds[i].revents != 0;
+            if (woke || pad)
+                return true;
+        }
+        if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
+            return g.io_lost || (g.windows && XPending(g.dpy) > 0);
+    }
+}
+
+void backend_wake(void)
+{
+}
+
+/* After a call another thread made on the connection (the GL worker's, which waits for replies): the replies it waited for
+   may have been preceded by events, which Xlib then keeps in its queue while the socket is quiet. The main thread's wait
+   would not see them. A wake does. */
+static void wake_if_queued(void)
+{
+    if (XEventsQueued(g.dpy, QueuedAlready) > 0)
+        platform_wake();
+}
+
+/* The events that belong to no window: the keyboard mapping changing, and the clipboard (the selection is owned through
+   the helper window, which no pump of a window has to be told about). True when the event was one of them. */
+static bool handle_global_event(XEvent *ev)
+{
+    if (ev->type == MappingNotify)
+    {
+        if (ev->xmapping.request != MappingPointer)
+        {
+            XRefreshKeyboardMapping(&ev->xmapping); /* Xlib's own copy, which XLookupKeysym reads */
+            keymap_changed();
+        }
+        return true;
+    }
+    if (g.xkb_event_base && ev->type == g.xkb_event_base)
+    {
+        int t = ((const XkbAnyEvent *)ev)->xkb_type;
+        if (t == XkbMapNotify || t == XkbNewKeyboardNotify)
+            keymap_changed();
+        return true;
+    }
+    if (ev->type == SelectionRequest)
+    {
+        answer_selection_request(&ev->xselectionrequest);
+        return true;
+    }
+    if (ev->type == SelectionClear)
+    {
+        if (ev->xselectionclear.selection == g.CLIPBOARD)
+            clip_free_entries();
+        return true;
+    }
+    return ev->type == PropertyNotify && clip_incr_property_event(&ev->xproperty);
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
@@ -2540,34 +2695,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
         else if (XFilterEvent(&ev, None))
             continue;
-        if (ev.type == MappingNotify)
-        {
-            if (ev.xmapping.request != MappingPointer)
-            {
-                XRefreshKeyboardMapping(&ev.xmapping); /* Xlib's own copy, which XLookupKeysym reads */
-                keymap_changed();
-            }
-            continue;
-        }
-        if (g.xkb_event_base && ev.type == g.xkb_event_base)
-        {
-            int t = ((const XkbAnyEvent *)&ev)->xkb_type;
-            if (t == XkbMapNotify || t == XkbNewKeyboardNotify)
-                keymap_changed();
-            continue;
-        }
-        if (ev.type == SelectionRequest)
-        {
-            answer_selection_request(&ev.xselectionrequest);
-            continue;
-        }
-        if (ev.type == SelectionClear)
-        {
-            if (ev.xselectionclear.selection == g.CLIPBOARD)
-                clip_free_entries();
-            continue;
-        }
-        if (ev.type == PropertyNotify && clip_incr_property_event(&ev.xproperty))
+        if (handle_global_event(&ev))
             continue;
 #if ZEN_HAVE_XI2
         if (ev.type == GenericEvent && g.xi_touch && ev.xcookie.extension == g.xi_opcode)
@@ -2718,14 +2846,16 @@ BackendGLWorker *backend_gl_worker_create(BackendWindow *b)
         backend_gl_worker_destroy(worker);
         return NULL;
     }
+    wake_if_queued();
     return worker;
 }
 
 bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current)
 {
-    if (!current)
-        return glXMakeContextCurrent(g.dpy, None, None, NULL) == True;
-    return glXMakeContextCurrent(g.dpy, worker->pbuffer, worker->pbuffer, worker->glc) == True;
+    Bool ok = current ? glXMakeContextCurrent(g.dpy, worker->pbuffer, worker->pbuffer, worker->glc)
+                      : glXMakeContextCurrent(g.dpy, None, None, NULL);
+    wake_if_queued();
+    return ok == True;
 }
 
 void backend_gl_worker_destroy(BackendGLWorker *worker)
@@ -2734,6 +2864,7 @@ void backend_gl_worker_destroy(BackendGLWorker *worker)
         glXDestroyPbuffer(g.dpy, worker->pbuffer);
     if (worker->glc)
         glXDestroyContext(g.dpy, worker->glc);
+    wake_if_queued();
     free(worker);
 }
 

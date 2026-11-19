@@ -512,6 +512,17 @@ void backend_destroy(BackendWindow *b)
     free(b);
 }
 
+/* Nothing can be slept on in a browser: the page calls the frame, so a wait is a frame ready to run. */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    (void)timeout_ns;
+    return true;
+}
+
+void backend_wake(void)
+{
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;

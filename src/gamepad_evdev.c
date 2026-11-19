@@ -631,6 +631,29 @@ void gamepad_backend_poll(void)
     }
 }
 
+/* A device's descriptor turns readable when it has input and hangs up when it is unplugged; the inotify one when a node of
+   /dev/input appears or goes. All of them are read by gamepad_backend_poll, so a wait that returns on any of them is
+   followed by a frame that serves it. */
+int gamepad_backend_wait_fds(int *fds, int max)
+{
+    int n = 0;
+    if (g_inotify >= 0 && n < max)
+        fds[n++] = g_inotify;
+    for (int i = 0; i < GAMEPAD_MAX && n < max; i++)
+        if (g_dev[i].used && g_dev[i].fd >= 0)
+            fds[n++] = g_dev[i].fd;
+    for (int i = 0; i < JOYSTICK_MAX && n < max; i++)
+        if (g_joy[i].used && g_joy[i].fd >= 0)
+            fds[n++] = g_joy[i].fd;
+    return n;
+}
+
+int64_t gamepad_backend_wait_ns(bool *live)
+{
+    (void)live;
+    return -1; /* everything above wakes the wait by itself */
+}
+
 void gamepad_backend_shutdown(void)
 {
     for (int i = 0; i < GAMEPAD_MAX; i++)
