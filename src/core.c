@@ -463,6 +463,16 @@ void core_push_event(Core *core, const Event *ev)
 }
 
 
+/* A finger's coordinate as the pixel of the mouse it drives (and touch_x / touch_y): the system sends finite values, a driver or
+   a bug may not (NaN, infinity, 1e38), and a float that does not fit an int is undefined behaviour to convert. Out of range is
+   clamped to what a window coordinate can mean, NaN is the origin. */
+static int touch_pixel(float v)
+{
+    if (!(v == v))
+        return 0;
+    return v < -1e9f ? -1000000000 : v > 1e9f ? 1000000000 : (int)v;
+}
+
 void core_push_touch(Core *core, TouchPhase phase, int id, float x, float y, float pressure)
 {
     InputState *s = &core->in;
@@ -488,21 +498,21 @@ void core_push_touch(Core *core, TouchPhase phase, int id, float x, float y, flo
         s->primary_active = true;
         s->primary_touch = id;
         Event m = {.type = EVENT_MOUSE_MOVE};
-        m.data.mouse.x = (int)x;
-        m.data.mouse.y = (int)y;
+        m.data.mouse.x = touch_pixel(x);
+        m.data.mouse.y = touch_pixel(y);
         core_push_event(core, &m);
         Event b = {.type = EVENT_MOUSE_BUTTON};
         b.data.mouse.button = MOUSE_LEFT;
         b.data.mouse.down = true;
-        b.data.mouse.x = (int)x;
-        b.data.mouse.y = (int)y;
+        b.data.mouse.x = touch_pixel(x);
+        b.data.mouse.y = touch_pixel(y);
         core_push_event(core, &b);
     }
     else if (phase == TOUCH_MOVE && s->primary_active && s->primary_touch == id)
     {
         Event m = {.type = EVENT_MOUSE_MOVE};
-        m.data.mouse.x = (int)x;
-        m.data.mouse.y = (int)y;
+        m.data.mouse.x = touch_pixel(x);
+        m.data.mouse.y = touch_pixel(y);
         core_push_event(core, &m);
     }
     else if (up && s->primary_active && s->primary_touch == id)
@@ -511,8 +521,8 @@ void core_push_touch(Core *core, TouchPhase phase, int id, float x, float y, flo
         Event b = {.type = EVENT_MOUSE_BUTTON};
         b.data.mouse.button = MOUSE_LEFT;
         b.data.mouse.down = false;
-        b.data.mouse.x = (int)x;
-        b.data.mouse.y = (int)y;
+        b.data.mouse.x = touch_pixel(x);
+        b.data.mouse.y = touch_pixel(y);
         core_push_event(core, &b);
     }
     s->synth = false;
@@ -1725,13 +1735,13 @@ int touch_x(PlatformWindow *w, int index)
 {
     if (!w)
         return 0;
-    return (index >= 0 && index < w->core.in.touch_count) ? (int)w->core.in.touch[index].x : 0;
+    return (index >= 0 && index < w->core.in.touch_count) ? touch_pixel(w->core.in.touch[index].x) : 0;
 }
 int touch_y(PlatformWindow *w, int index)
 {
     if (!w)
         return 0;
-    return (index >= 0 && index < w->core.in.touch_count) ? (int)w->core.in.touch[index].y : 0;
+    return (index >= 0 && index < w->core.in.touch_count) ? touch_pixel(w->core.in.touch[index].y) : 0;
 }
 void touch_position(PlatformWindow *w, int index, float *x, float *y)
 {

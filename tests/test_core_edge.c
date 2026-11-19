@@ -220,11 +220,36 @@ static void test_frame_scopes_defer_destroy(void)
     CHECK(core_window_count() == before);
 }
 
+/* A finger at a coordinate that is not a number, or too large for an int (a driver or a bug: the system sends finite values):
+   the mouse it drives and touch_x / touch_y get a clamped pixel, not the undefined result of converting the float (the fuzzer
+   found it: inf is outside the range of representable values of type int). */
+static void test_touch_coordinates_out_of_range(void)
+{
+    PlatformWindow *w = make();
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    const float inf = __builtin_inff(), nan = __builtin_nanf("");
+    fake_real_touch(w, 1, inf, -inf, TOUCH_DOWN);
+    window_begin_frame(w);
+    CHECK(mouse_x(w) == 1000000000 && mouse_y(w) == -1000000000);
+    CHECK(touch_count(w) == 1);
+    CHECK(touch_x(w, 0) == 1000000000 && touch_y(w, 0) == -1000000000);
+    fake_real_touch(w, 1, nan, 1e38f, TOUCH_MOVE);
+    window_begin_frame(w);
+    CHECK(mouse_x(w) == 0 && mouse_y(w) == 1000000000);
+    fake_real_touch(w, 1, 1e20f, nan, TOUCH_UP);
+    window_begin_frame(w);
+    CHECK(touch_count(w) == 0);
+    window_destroy(w);
+}
+
 int main(void)
 {
     if (!platform_init())
         return 1;
     test_frame_scopes_defer_destroy();
+    test_touch_coordinates_out_of_range();
     PlatformWindow *w = make();
     CHECK(w != NULL);
     if (!w)
