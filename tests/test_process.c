@@ -15,6 +15,9 @@
 #define SHELL_FLAG "/c"
 #define SLEEP_MS(ms) Sleep(ms)
 #else
+#include <errno.h>
+#include <signal.h>
+#include <sys/types.h>
 #include <time.h>
 #define SHELL "/bin/sh"
 #define SHELL_FLAG "-c"
@@ -119,6 +122,45 @@ static void test_kill_stubborn(void)
     CHECK(!process_is_running(b));
     CHECK(process_exit_code(a) != -1 && process_exit_code(b) != -1);
 }
+
+/* A shell with a background child: process_kill_tree ends both, process_kill alone would leave the child. */
+static void test_kill_tree(void)
+{
+    const char *pid_file = "process_tree_child.pid";
+    remove(pid_file);
+    char script[256];
+    snprintf(script, sizeof script, "sleep 60 & echo $! > %s; wait", pid_file);
+    const char *args[] = {"-c", script};
+    int64_t id = process_spawn(SHELL, args, 2, false);
+    CHECK(id > 0);
+    long child = 0;
+    for (int i = 0; i < 100 && !child; i++)
+    {
+        SLEEP_MS(20);
+        FILE *f = fopen(pid_file, "r");
+        if (f)
+        {
+            if (fscanf(f, "%ld", &child) != 1)
+                child = 0;
+            fclose(f);
+        }
+    }
+    CHECK(child > 0);
+    CHECK(kill((pid_t)child, 0) == 0);
+    CHECK(process_kill_tree(id));
+    CHECK(!process_is_running(id));
+    int gone = 0;
+    for (int i = 0; i < 100 && !gone; i++)
+    {
+        gone = kill((pid_t)child, 0) != 0 && errno == ESRCH;
+        if (!gone)
+            SLEEP_MS(20);
+    }
+    CHECK(gone);
+    CHECK(process_kill_tree(id));
+    CHECK(!process_kill_tree(0));
+    remove(pid_file);
+}
 #endif
 
 /* An exit code of 259 is STILL_ACTIVE to GetExitCodeProcess: it must not read as a process that never ends. The
@@ -168,6 +210,7 @@ int main(void)
     test_kill();
 #if !defined(_WIN32)
     test_kill_stubborn();
+    test_kill_tree();
 #endif
     test_exit_code_259();
     test_failures();

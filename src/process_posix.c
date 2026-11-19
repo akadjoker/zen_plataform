@@ -216,3 +216,41 @@ bool process_kill(int64_t id)
         return error_set("cannot kill process %lld: %s", (long long)id, strerror(errno));
     return true;
 }
+
+bool process_kill_tree(int64_t id)
+{
+    if (id <= 0)
+        return error_set("invalid process id");
+    pthread_mutex_lock(&g_lock);
+    reap_children();
+    ProcessInfo *info = find_process((pid_t)id);
+    if (!info)
+    {
+        pthread_mutex_unlock(&g_lock);
+        return error_set("process %lld was not started by process_spawn", (long long)id);
+    }
+    /* The group id stays taken while any member lives, so it cannot be a stranger's; with no member left the call
+       fails with ESRCH, which is not an error here. */
+    int r = kill(-(pid_t)id, SIGKILL);
+    int err = errno;
+    if (info->running)
+    {
+        if (r != 0)
+            r = kill((pid_t)id, SIGKILL);
+        if (r == 0)
+        {
+            int status = 0;
+            wait_for_pid((pid_t)id, &status, 0, NULL);
+            info->running = false;
+            info->exit_code = status_to_code(status);
+        }
+        else
+            err = errno;
+    }
+    else if (r != 0 && err == ESRCH)
+        r = 0;
+    pthread_mutex_unlock(&g_lock);
+    if (r != 0)
+        return error_set("cannot kill process %lld: %s", (long long)id, strerror(err));
+    return true;
+}

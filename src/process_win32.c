@@ -11,6 +11,7 @@ typedef struct
 {
     DWORD pid;
     HANDLE process;
+    HANDLE job; /* NULL when the job could not be made or joined */
     bool running;
     int exit_code;
     unsigned long order; /* when it was started: the oldest finished record makes room first */
@@ -47,6 +48,8 @@ static ProcessInfo *free_slot(void)
     {
         if (oldest->process)
             CloseHandle(oldest->process);
+        if (oldest->job)
+            CloseHandle(oldest->job);
         memset(oldest, 0, sizeof *oldest);
     }
     return oldest;
@@ -178,7 +181,7 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
     ZeroMemory(&si, sizeof si);
     si.cb = sizeof si;
     ZeroMemory(&pi, sizeof pi);
-    DWORD flags = NORMAL_PRIORITY_CLASS | (open_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW);
+    DWORD flags = NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED | (open_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW);
 
     AcquireSRWLockExclusive(&g_lock);
     ProcessInfo *slot = free_slot();
@@ -199,7 +202,17 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
         free(command);
         return 0;
     }
+    /* Suspended until it is in the job, so nothing it starts can escape. Without a job (an outer job that forbids
+       nesting) the process still runs, and process_kill_tree ends only the process. */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (job && !AssignProcessToJobObject(job, pi.hProcess))
+    {
+        CloseHandle(job);
+        job = NULL;
+    }
+    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
+    slot->job = job;
     slot->pid = pi.dwProcessId;
     slot->process = pi.hProcess;
     slot->running = true;
@@ -265,6 +278,41 @@ bool process_kill(int64_t id)
            ending it would be ending a stranger. */
         ReleaseSRWLockExclusive(&g_lock);
         return error_set("process %lld was not started by process_spawn", (long long)id);
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!ok)
+        return win32_error("cannot kill process", NULL);
+    return true;
+}
+
+bool process_kill_tree(int64_t id)
+{
+    if (id <= 0)
+        return error_set("invalid process id");
+    bool ok = false;
+    AcquireSRWLockExclusive(&g_lock);
+    ProcessInfo *info = find_process((DWORD)id);
+    if (!info)
+    {
+        ReleaseSRWLockExclusive(&g_lock);
+        return error_set("process %lld was not started by process_spawn", (long long)id);
+    }
+    if (info->job)
+        ok = TerminateJobObject(info->job, 0) != 0;
+    if (refresh(info))
+    {
+        if (!ok)
+            ok = TerminateProcess(info->process, 0) != 0;
+        if (ok)
+        {
+            WaitForSingleObject(info->process, INFINITE);
+            info->running = false;
+            info->exit_code = 0;
+        }
+    }
+    else
+    {
+        ok = true;
     }
     ReleaseSRWLockExclusive(&g_lock);
     if (!ok)

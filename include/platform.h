@@ -610,6 +610,10 @@ extern "C"
        those the table has forgotten, is refused: the number may belong to some other process by now. A child that
        ended is waited for by the next call into these functions, so it does not stay a zombie. */
     PLATFORM_API bool process_kill(int64_t id);
+    /* Ends the process and everything it started that is still in its group (POSIX: the process group process_spawn
+       made; Windows: the job the process was assigned to), and reaps the process. The same rules for unknown ids
+       as process_kill. A process that already ended is known: its group is still signalled. */
+    PLATFORM_API bool process_kill_tree(int64_t id);
 
     /* ========================================================================== */
     /*  Crash report                                                              */
