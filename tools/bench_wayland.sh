@@ -130,10 +130,10 @@ fi
 
 if want mem; then
     header "Memory after init, a window and 1000 idle turns, gl" "metric"
-    table_row "RSS (kB)" "$B/bench_\$l mem gl | median rss_kb"
-    table_row "PSS (kB)" "$B/bench_\$l mem gl | median pss_kb"
-    table_row "PSS anonymous (kB)" "$B/bench_\$l mem gl | median pss_anon_kb"
-    table_row "shared libraries mapped" "$B/bench_\$l mem gl | median libs"
+    table_row "RSS (kB)" "$B/bench_\$l mem gl 2> /dev/null | median rss_kb"
+    table_row "PSS (kB)" "$B/bench_\$l mem gl 2> /dev/null | median pss_kb"
+    table_row "PSS anonymous (kB)" "$B/bench_\$l mem gl 2> /dev/null | median pss_anon_kb"
+    table_row "shared libraries mapped" "$B/bench_\$l mem gl 2> /dev/null | median libs"
     table_row "heap: malloc calls" "LD_PRELOAD=$B/libmcount.so $B/bench_\$l mem gl 2>&1 >/dev/null | grep -o 'allocs=[0-9]*' | cut -d= -f2"
     table_row "heap: peak live bytes (approximate)" "LD_PRELOAD=$B/libmcount.so $B/bench_\$l mem gl 2>&1 >/dev/null | grep -o 'peak_live=[0-9]*' | cut -d= -f2"
 fi
