@@ -16,6 +16,7 @@
 # Environment:
 #   ZP_FUZZ_SECONDS  time budget of each target (default 120)
 #   ZP_FUZZ_SEED     the seed (default 1)
+#   ZP_FUZZ_TIMEOUT  seconds one input may take before libFuzzer calls it a hang (default 20; a loaded machine wants more)
 #   ZP_FUZZ_DIR      build and work folder (default ${TMPDIR:-/tmp}/zp-fuzz-$USER); keep it small, delete it when done
 #   ZP_JOBS          compiler processes (default: half the processors)
 
@@ -24,6 +25,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DIR=${ZP_FUZZ_DIR:-${TMPDIR:-/tmp}/zp-fuzz-$(id -un)}
 SECS=${ZP_FUZZ_SECONDS:-120}
 SEED=${ZP_FUZZ_SEED:-1}
+TMO=${ZP_FUZZ_TIMEOUT:-20}
 JOBS=${ZP_JOBS:-$(($(nproc) / 2 > 0 ? $(nproc) / 2 : 1))}
 TARGETS=${*:-fuzz_images fuzz_paths fuzz_touch fuzz_x11_events fuzz_clipboard_x11 fuzz_wayland}
 command -v clang > /dev/null || { echo "fuzz.sh: clang not found" >&2; exit 2; }
@@ -56,7 +58,7 @@ for t in $TARGETS; do
                 cmake --build "$DIR/clang-wl" -j "$JOBS" --target fuzz_wayland >> "$DIR/clang-wl.log" 2>&1 || { echo "FAIL $t: did not build, see $DIR/clang-wl.log"; FAILED=1; continue; }
             work=$DIR/work_$t; mkdir -p "$work/corpus"
             echo "== $t: ${SECS}s, seed $SEED"
-            (cd "$work" && $run "$DIR/clang-wl/tests/fuzz_wayland" -seed="$SEED" -max_total_time="$SECS" -max_len=4096 -rss_limit_mb=1500 -timeout=20 \
+            (cd "$work" && $run "$DIR/clang-wl/tests/fuzz_wayland" -seed="$SEED" -max_total_time="$SECS" -max_len=4096 -rss_limit_mb=1500 -timeout=$TMO \
                 -artifact_prefix="$work/" "$work/corpus" "$ROOT/tests/fuzz/corpus/$corpus" > "$work/log" 2>&1)
             if grep -q "^SUMMARY: \|ERROR: " "$work/log"; then
                 echo "FAIL $t: $(grep -m1 'SUMMARY: ' "$work/log" | cut -c1-200)"; echo "     inputs in $work"; FAILED=1
@@ -72,7 +74,7 @@ for t in $TARGETS; do
     mkdir -p "$work/corpus" # what the fuzzer finds goes here (libFuzzer writes to the first corpus folder), not into the repository
     echo "== $t: ${SECS}s, seed $SEED"
     # shellcheck disable=SC2086
-    (cd "$work" && $run "$DIR/$t" -seed="$SEED" -max_total_time="$SECS" -max_len=65536 -rss_limit_mb=1500 -timeout=20 \
+    (cd "$work" && $run "$DIR/$t" -seed="$SEED" -max_total_time="$SECS" -max_len=65536 -rss_limit_mb=1500 -timeout=$TMO \
         -artifact_prefix="$work/" "$work/corpus" "$ROOT/tests/fuzz/corpus/$corpus" > "$work/log" 2>&1)
     if grep -q "^SUMMARY: \|ERROR: " "$work/log"; then
         echo "FAIL $t: $(grep -m1 'SUMMARY: ' "$work/log" | cut -c1-200)"; echo "     inputs in $work"; FAILED=1
