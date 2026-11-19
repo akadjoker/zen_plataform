@@ -13,6 +13,8 @@
 #   ZP_BENCH_DIR   build trees, scratch and results.md (default: ${TMPDIR:-/tmp}/zp-bench-$USER)
 #   ZP_BENCH_RUNS  runs per timing, the table shows the median (default 11; -n overrides)
 #   ZP_BENCH_LIBS the libraries to run, a subset of "zp glfw sdl2" (default: those that were built)
+#   ZP_BENCH_GL    gl or nogl (default nogl): the window of the idle and wait stages; tools/bench_wayland.sh has only GL windows,
+#                  so the X11 numbers that go next to its tables are taken with gl
 #   GLFW_ROOT      a prefix holding usr/include/GLFW and usr/lib/x86_64-linux-gnu/libglfw.so (an unpacked libglfw3 and
 #                  libglfw3-dev package, say); without it the system's GLFW is used if there is one
 #   VALGRIND       a valgrind binary (default: the one on the PATH); VALGRIND_LIB its libexec/valgrind. Without it the
@@ -30,6 +32,7 @@ if [ -z "${ZP_BENCH_INSIDE:-}" ]; then
 fi
 
 RUNS=${ZP_BENCH_RUNS:-11}
+GLM=${ZP_BENCH_GL:-nogl}
 if [ "${1:-}" = -n ]; then RUNS=$2; shift 2; fi
 STAGES=${*:-startup mem idle cycle events wait size}
 SRC=${ZP_BENCH_SRC:-$ROOT}
@@ -165,9 +168,9 @@ if want mem; then
 fi
 
 if want idle; then
-    header "Idle poll (an event loop turn with no event), no GL" "metric"
-    table_row "ns per turn, 1e6 turns (median)" "rep 5 $B/bench_\$l idle 1000000 nogl | median ns_per_poll"
-    table_row "instructions per turn" "diff_per \$(ir $B/bench_\$l idle 0 nogl) \$(ir $B/bench_\$l idle 20000 nogl) 20000"
+    header "Idle poll (an event loop turn with no event), $GLM" "metric"
+    table_row "ns per turn, 1e6 turns (median)" "rep 5 $B/bench_\$l idle 1000000 $GLM | median ns_per_poll"
+    table_row "instructions per turn" "diff_per \$(ir $B/bench_\$l idle 0 $GLM) \$(ir $B/bench_\$l idle 20000 $GLM) 20000"
 fi
 
 if want cycle; then
@@ -196,17 +199,17 @@ if want events; then
 fi
 
 if want wait; then
-    header "Sleeping between events: one wake + wait cycle on one thread, no GL" "metric"
-    table_row "ns per cycle, 200000 cycles (median of 5)" "rep 5 $B/bench_\$l wake 200000 nogl | median ns_per_cycle"
-    table_row "instructions per cycle" "diff_per \$(ir $B/bench_\$l wake 0 nogl) \$(ir $B/bench_\$l wake 20000 nogl) 20000"
-    header "Wake latency: another thread posts 2 ms after the main one went to sleep with no limit, 1000 times, no GL" "metric"
-    table_row "median (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 nogl | median median_us"
-    table_row "99th percentile (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 nogl | median p99_us"
-    table_row "worst of 1000 (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 nogl | median worst_us"
-    header "Idle: 10 s in the wait with nothing to wake it, no GL" "metric"
-    table_row "wall s" "$B/bench_\$l idlecpu 10 nogl | median wall_s"
-    table_row "CPU ms" "$B/bench_\$l idlecpu 10 nogl | median cpu_ms"
-    table_row "times the wait returned" "$B/bench_\$l idlecpu 10 nogl | median returns"
+    header "Sleeping between events: one wake + wait cycle on one thread, $GLM" "metric"
+    table_row "ns per cycle, 200000 cycles (median of 5)" "rep 5 $B/bench_\$l wake 200000 $GLM | median ns_per_cycle"
+    table_row "instructions per cycle" "diff_per \$(ir $B/bench_\$l wake 0 $GLM) \$(ir $B/bench_\$l wake 20000 $GLM) 20000"
+    header "Wake latency: another thread posts 2 ms after the main one went to sleep with no limit, 1000 times, $GLM" "metric"
+    table_row "median (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 $GLM | median median_us"
+    table_row "99th percentile (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 $GLM | median p99_us"
+    table_row "worst of 1000 (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 $GLM | median worst_us"
+    header "Idle: 10 s in the wait with nothing to wake it, $GLM" "metric"
+    table_row "wall s" "$B/bench_\$l idlecpu 10 $GLM | median wall_s"
+    table_row "CPU ms" "$B/bench_\$l idlecpu 10 $GLM | median cpu_ms"
+    table_row "times the wait returned" "$B/bench_\$l idlecpu 10 $GLM | median returns"
 fi
 
 if want size; then
