@@ -5,7 +5,7 @@
 # memory, an idle poll, a window create + destroy, events taken from the X connection, binary sizes. The numbers come
 # out as markdown tables on stdout and in $ZP_BENCH_DIR/results.md; docs/COMPARACAO_CORE.md says how to read them.
 #
-# Stages (default: all): startup mem idle cycle events size
+# Stages (default: all): startup mem idle cycle events wait size
 #
 # Environment:
 #   ZP_BENCH_SRC   source tree to build (default: this repository); point it at an older checkout (with bench/compare
@@ -31,7 +31,7 @@ fi
 
 RUNS=${ZP_BENCH_RUNS:-11}
 if [ "${1:-}" = -n ]; then RUNS=$2; shift 2; fi
-STAGES=${*:-startup mem idle cycle events size}
+STAGES=${*:-startup mem idle cycle events wait size}
 SRC=${ZP_BENCH_SRC:-$ROOT}
 DIR=${ZP_BENCH_DIR:-${TMPDIR:-/tmp}/zp-bench-$(id -un)}
 VG=${VALGRIND:-$(command -v valgrind || true)}
@@ -193,6 +193,20 @@ if want events; then
             table_row "instructions per injected event" "diff_per \$(ir_events $kind 0 $batch \$l) \$(ir_events $kind $ni $batch \$l) $ni"
         done
     done
+fi
+
+if want wait; then
+    header "Sleeping between events: one wake + wait cycle on one thread, no GL" "metric"
+    table_row "ns per cycle, 200000 cycles (median of 5)" "rep 5 $B/bench_\$l wake 200000 nogl | median ns_per_cycle"
+    table_row "instructions per cycle" "diff_per \$(ir $B/bench_\$l wake 0 nogl) \$(ir $B/bench_\$l wake 20000 nogl) 20000"
+    header "Wake latency: another thread posts 2 ms after the main one went to sleep with no limit, 1000 times, no GL" "metric"
+    table_row "median (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 nogl | median median_us"
+    table_row "99th percentile (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 nogl | median p99_us"
+    table_row "worst of 1000 (us, median of 5 runs)" "rep 5 $B/bench_\$l latency 1000 nogl | median worst_us"
+    header "Idle: 10 s in the wait with nothing to wake it, no GL" "metric"
+    table_row "wall s" "$B/bench_\$l idlecpu 10 nogl | median wall_s"
+    table_row "CPU ms" "$B/bench_\$l idlecpu 10 nogl | median cpu_ms"
+    table_row "times the wait returned" "$B/bench_\$l idlecpu 10 nogl | median returns"
 fi
 
 if want size; then

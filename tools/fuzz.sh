@@ -2,7 +2,7 @@
 # usage: tools/fuzz.sh [target...]
 #
 # Runs the libFuzzer targets of tests/fuzz with ASan + UBSan, from a fixed seed, for a time budget each:
-#   fuzz_images       png_decode (clipboard images) and framebuffer_load_bmp
+#   fuzz_images       png_decode (clipboard images), stbi_load_from_memory of zen_ui's stb_image, and framebuffer_load_bmp
 #   fuzz_paths        path_* and the fs_* / io_* calls on odd names (in a sandbox under /dev/shm)
 #   fuzz_x11_events   what another X client sends a window: ClientMessage, SelectionNotify, ConfigureNotify, XDND drops
 #   fuzz_clipboard_x11  the clipboard against a hostile owner of the selection (any property, INCR of any shape)
@@ -33,7 +33,7 @@ FAILED=0
 
 for t in $TARGETS; do
     case $t in
-        fuzz_images) corpus=images; srcs="$ROOT/src/png.c $ROOT/src/image.c $ROOT/src/draw2d.c $FS"; run= ;;
+        fuzz_images) corpus=images; srcs="$ROOT/src/png.c $ROOT/src/image.c $ROOT/src/draw2d.c $ROOT/src/ui/stb_impl.c $FS -lm"; run= ;;
         fuzz_paths) corpus=paths; srcs="$FS"; run= ;;
         fuzz_x11_events | fuzz_clipboard_x11)
             corpus=x11_events; [ $t = fuzz_clipboard_x11 ] && corpus=clipboard_x11; run=$ROOT/tools/xvfb_run.sh

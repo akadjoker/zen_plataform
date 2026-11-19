@@ -88,6 +88,36 @@ void lib_poll(void *p, Counts *c)
     }
 }
 
+static Uint32 g_wake_type;
+
+int lib_wait(void *p, double seconds, Counts *c)
+{
+    (void)p;
+    SDL_Event e;
+    int got = SDL_WaitEventTimeout(&e, (int)(seconds * 1000.0 + 0.5));
+    if (got)
+    {
+        if (e.type == g_wake_type)
+            c->other++;
+        else if (e.type == SDL_MOUSEMOTION)
+            c->motion++;
+        else
+            c->other++;
+        lib_poll(p, c);
+    }
+    return got;
+}
+
+void lib_wake(void)
+{
+    if (!g_wake_type)
+        g_wake_type = SDL_RegisterEvents(1);
+    SDL_Event e;
+    SDL_zero(e);
+    e.type = g_wake_type;
+    SDL_PushEvent(&e);
+}
+
 static int info(void *p, SDL_SysWMinfo *i)
 {
     Win *w = p;

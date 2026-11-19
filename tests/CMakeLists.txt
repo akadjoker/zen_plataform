@@ -111,7 +111,8 @@ function(add_fuzz_regression name corpus)
 endfunction()
 
 if(UNIX AND NOT APPLE)
-    add_fuzz_regression(fuzz_images images src/png.c src/image.c src/draw2d.c ${FS_SRC})
+    add_fuzz_regression(fuzz_images images src/png.c src/image.c src/draw2d.c src/ui/stb_impl.c ${FS_SRC})
+    target_link_libraries(fuzz_images PRIVATE m)
     add_fuzz_regression(fuzz_paths paths ${FS_SRC})
 endif()
 

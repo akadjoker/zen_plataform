@@ -6,6 +6,11 @@
      bench_<lib> idle N [gl]           ns per event loop turn with no event, N turns
      bench_<lib> cycle N [gl]          ns per window create + destroy, N cycles
      bench_<lib> mem [gl]              RSS and PSS after init, window, 1000 idle turns; shared libraries mapped
+     bench_<lib> wake N                ns per wake + wait cycle on one thread (the wake is posted, the wait returns at once and
+                                       handles it), N cycles; for the instruction count
+     bench_<lib> latency N             wake latency: another thread posts a wake 2 ms after the main one went to sleep with no
+                                       limit; median and worst of N, in microseconds
+     bench_<lib> idlecpu S             the process sleeps S seconds in the wait with nothing to wake it: wall and CPU time
      bench_<lib> events motion|key N batch [gl]   waits for bench_run to inject N events, then drains them (see bench_run.c);
                                        batch 0: all N are waiting when the first turn starts (a frame that took long);
                                        batch B: B events wait for each turn (a frame in which B events arrived) */
@@ -17,6 +22,7 @@
 #include <string.h>
 #include <time.h>
 #include <poll.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <X11/Xutil.h>
 
@@ -100,6 +106,39 @@ static void memory(long *rss, long *pss, long *pss_anon, long *pss_file, int *li
     *libs = n;
 }
 
+/* ---- the wait / wake modes ---- */
+
+static volatile int g_ready;      /* the main thread is about to sleep */
+static volatile int g_stop;
+static volatile long long g_stamp; /* when the waker posted */
+static pthread_mutex_t g_stamp_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void *waker_main(void *arg)
+{
+    (void)arg;
+    while (!g_stop)
+    {
+        if (!__atomic_load_n(&g_ready, __ATOMIC_ACQUIRE))
+        {
+            nap_ms(0);
+            continue;
+        }
+        nap_ms(2); /* the main thread is inside the wait by now */
+        pthread_mutex_lock(&g_stamp_mu);
+        g_stamp = now_ns();
+        pthread_mutex_unlock(&g_stamp_mu);
+        __atomic_store_n(&g_ready, 0, __ATOMIC_RELEASE);
+        lib_wake();
+    }
+    return NULL;
+}
+
+static int cmp_ll(const void *a, const void *b)
+{
+    long long x = *(const long long *)a, y = *(const long long *)b;
+    return x < y ? -1 : x > y;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
@@ -149,6 +188,72 @@ int main(int argc, char **argv)
         long long b = now_ns(), cb = cpu_ns();
         printf("lib=%s gl=%d idle_n=%lld ns_per_poll=%.2f cpu_ns_per_poll=%.2f\n", lib_name(), gl, n,
                (double)(b - a) / (double)(n ? n : 1), (double)(cb - ca) / (double)(n ? n : 1));
+        lib_window_free(win);
+        lib_exit();
+        return 0;
+    }
+    if (strcmp(mode, "wake") == 0 || strcmp(mode, "latency") == 0 || strcmp(mode, "idlecpu") == 0)
+    {
+        if (!lib_init())
+            return 1;
+        void *win = lib_window(gl, -1, -1, 640, 480);
+        if (!win || !wait_viewable(win, &c))
+            return 1;
+        for (int i = 0; i < 50; i++)
+            lib_poll(win, &c);
+        if (strcmp(mode, "wake") == 0)
+        {
+            lib_wake();
+            lib_wait(win, 1.0, &c); /* the first one fills what the library makes lazily */
+            long long a = now_ns(), ca = cpu_ns();
+            for (long long i = 0; i < n; i++)
+            {
+                lib_wake();
+                lib_wait(win, 1.0, &c);
+            }
+            long long b = now_ns(), cb = cpu_ns();
+            printf("lib=%s gl=%d wake_n=%lld ns_per_cycle=%.2f cpu_ns_per_cycle=%.2f\n", lib_name(), gl, n,
+                   (double)(b - a) / (double)(n ? n : 1), (double)(cb - ca) / (double)(n ? n : 1));
+        }
+        else if (strcmp(mode, "latency") == 0)
+        {
+            long long *lat = malloc((size_t)(n ? n : 1) * sizeof *lat);
+            pthread_t t;
+            pthread_create(&t, NULL, waker_main, NULL);
+            long long ca = cpu_ns(), wa = now_ns();
+            for (long long i = 0; i < n; i++)
+            {
+                __atomic_store_n(&g_ready, 1, __ATOMIC_RELEASE);
+                lib_wait(win, 5.0, &c);
+                long long back = now_ns();
+                pthread_mutex_lock(&g_stamp_mu);
+                lat[i] = back - g_stamp;
+                pthread_mutex_unlock(&g_stamp_mu);
+            }
+            long long cb = cpu_ns(), wb = now_ns();
+            g_stop = 1;
+            pthread_join(t, NULL);
+            qsort(lat, (size_t)n, sizeof *lat, cmp_ll);
+            printf("lib=%s gl=%d latency_n=%lld median_us=%.1f p99_us=%.1f worst_us=%.1f cpu_ms_per_cycle=%.4f\n", lib_name(), gl, n,
+                   (double)lat[n / 2] / 1e3, (double)lat[n * 99 / 100] / 1e3, (double)lat[n - 1] / 1e3,
+                   (double)(cb - ca) / 1e6 / (double)(n ? n : 1));
+            (void)wa, (void)wb;
+            free(lat);
+        }
+        else
+        {
+            double secs = n > 0 ? (double)n : 1.0;
+            long long a = now_ns(), ca = cpu_ns();
+            long long end = a + (long long)(secs * 1e9), returns = 0;
+            while (now_ns() < end)
+            {
+                lib_wait(win, (double)(end - now_ns()) / 1e9, &c);
+                returns++;
+            }
+            long long b = now_ns(), cb = cpu_ns();
+            printf("lib=%s gl=%d idle_wait_s=%.3f wall_s=%.3f cpu_ms=%.3f returns=%lld\n", lib_name(), gl, secs, (double)(b - a) / 1e9,
+                   (double)(cb - ca) / 1e6, returns);
+        }
         lib_window_free(win);
         lib_exit();
         return 0;

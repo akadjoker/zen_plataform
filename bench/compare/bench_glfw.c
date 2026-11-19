@@ -81,6 +81,19 @@ void lib_poll(void *win, Counts *c)
     glfwPollEvents();
 }
 
+int lib_wait(void *win, double seconds, Counts *c)
+{
+    (void)win;
+    g_c = c;
+    glfwWaitEventsTimeout(seconds); /* returns when an event was processed, a post came, or the time is up: it cannot say which */
+    return 1;
+}
+
+void lib_wake(void)
+{
+    glfwPostEmptyEvent();
+}
+
 Display *lib_display(void *win)
 {
     (void)win;

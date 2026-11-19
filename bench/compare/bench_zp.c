@@ -60,6 +60,18 @@ void lib_poll(void *win, Counts *c)
     }
 }
 
+int lib_wait(void *win, double seconds, Counts *c)
+{
+    int woke = platform_wait_events(seconds);
+    lib_poll(win, c);
+    return woke;
+}
+
+void lib_wake(void)
+{
+    platform_wake();
+}
+
 Display *lib_display(void *win)
 {
     return window_native_handle(win, NATIVE_DISPLAY);

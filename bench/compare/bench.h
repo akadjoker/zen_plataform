@@ -22,6 +22,12 @@ void lib_window_free(void *win);
 void lib_exit(void);
 /* one turn of the event loop: pump and drain, adding to c */
 void lib_poll(void *win, Counts *c);
+/* Sleep until an event, a lib_wake or the timeout (seconds), and handle what came the way lib_poll does: the same work a
+   program that sleeps between events does per wake-up (zen_platform: platform_wait_events and the begin_frame that follows;
+   GLFW: glfwWaitEventsTimeout; SDL: SDL_WaitEventTimeout and the events behind it). Returns 1 if it woke before the timeout. */
+int lib_wait(void *win, double seconds, Counts *c);
+/* Wake a lib_wait, from any thread (zen_platform: platform_wake, GLFW: glfwPostEmptyEvent, SDL: SDL_PushEvent of a user event) */
+void lib_wake(void);
 Display *lib_display(void *win);
 unsigned long lib_xwin(void *win);
 
