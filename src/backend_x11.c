@@ -967,7 +967,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->hit_cursor = -1;
 
     XSaveContext(g.dpy, b->win, g.ctx, (XPointer)b);
-    XSetWMProtocols(g.dpy, b->win, &g.WM_DELETE_WINDOW, 1);
+    /* What XSetWMProtocols does, with the atoms already in hand: it asks the server for WM_PROTOCOLS every time. */
+    XChangeProperty(g.dpy, b->win, g.WM_PROTOCOLS, XA_ATOM, 32, PropModeReplace, (unsigned char *)&g.WM_DELETE_WINDOW, 1);
     {
         long xdnd_version = XDND_VERSION;
         XChangeProperty(g.dpy, b->win, g.XdndAware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&xdnd_version, 1);
@@ -1057,7 +1058,9 @@ BackendWindow *backend_create(const WindowConfig *cfg)
        monitor < 0 means MONITOR_CURRENT – resolve to whichever monitor
        contains the window now (after XMapWindow placed it). */
     int target_monitor = cfg->monitor;
-    if (target_monitor < 0 && !wm_places)
+    /* Only centering and full screen need it, and finding it costs several round trips to the server. */
+    const bool centering = !wm_places && (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED);
+    if (target_monitor < 0 && !wm_places && (centering || cfg->mode != WINDOW_WINDOWED))
     {
         /* Find which monitor the window landed on. */
         int nmon = backend_monitor_count();
@@ -1078,7 +1081,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
             target_monitor = 0;
     }
 
-    if (!wm_places && (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED))
+    if (centering)
     {
         MonitorInfo m;
         if (backend_monitor_info(target_monitor, &m))
