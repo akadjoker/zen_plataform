@@ -236,6 +236,7 @@ static bool png_plausible(const uint8_t *d, size_t n, size_t *cap)
         return false;
     size_t pos = 8;
     bool header = false, data = false;
+    uint64_t idat_total = 0, raw_least = 0;
     while (pos + 12 <= n)
     {
         uint32_t len = be32(d + pos);
@@ -256,6 +257,7 @@ static bool png_plausible(const uint8_t *d, size_t n, size_t *cap)
                 return false;
             uint64_t bpl = ((uint64_t)w * depth + 7) / 8;
             *cap = (size_t)(2 * (bpl * h * comps[ctype] + h) + 262144);
+            raw_least = (uint64_t)w * h * depth * comps[ctype] / 8; /* the least the inflated data can be (Adam7 adds filter bytes) */
             header = true;
         }
         if (memcmp(d + pos + 4, "IDAT", 4) == 0)
@@ -265,11 +267,17 @@ static bool png_plausible(const uint8_t *d, size_t n, size_t *cap)
             if (!data && len == 0)
                 return false;
             data = true;
+            idat_total += len;
         }
         if (memcmp(d + pos + 4, "IEND", 4) == 0)
             break;
         pos += 12 + (size_t)len;
     }
+    /* Deflate cannot expand more than 1032 to 1, so an image whose compressed data is that much smaller than the pixels
+       it declares is not one: stb would feed its zlib reader zeros past the end of the input until the buffer the header
+       allows is full (a 68-byte file declaring 12799 x 2305 took 20 s under ASan to fill it). */
+    if (header && idat_total * 1032 + 4096 < raw_least)
+        return false;
     return header;
 }
 

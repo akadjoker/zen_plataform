@@ -4,6 +4,7 @@
 # Runs the libFuzzer targets of tests/fuzz with ASan + UBSan, from a fixed seed, for a time budget each:
 #   fuzz_images       png_decode (clipboard images), stbi_load_from_memory of zen_ui's stb_image, and framebuffer_load_bmp
 #   fuzz_paths        path_* and the fs_* / io_* calls on odd names (in a sandbox under /dev/shm)
+#   fuzz_touch        the touch path that XInput 2, WM_TOUCH and the touch backends feed (finger ids and coordinates of any value, NaN too)
 #   fuzz_x11_events   what another X client sends a window: ClientMessage, SelectionNotify, ConfigureNotify, XDND drops
 #   fuzz_clipboard_x11  the clipboard against a hostile owner of the selection (any property, INCR of any shape)
 # Needs clang with libFuzzer (compiler-rt) and, for fuzz_x11_events, xvfb-run (started through tools/xvfb_run.sh).
@@ -23,7 +24,7 @@ DIR=${ZP_FUZZ_DIR:-${TMPDIR:-/tmp}/zp-fuzz-$(id -un)}
 SECS=${ZP_FUZZ_SECONDS:-120}
 SEED=${ZP_FUZZ_SEED:-1}
 JOBS=${ZP_JOBS:-$(($(nproc) / 2 > 0 ? $(nproc) / 2 : 1))}
-TARGETS=${*:-fuzz_images fuzz_paths fuzz_x11_events fuzz_clipboard_x11}
+TARGETS=${*:-fuzz_images fuzz_paths fuzz_touch fuzz_x11_events fuzz_clipboard_x11}
 command -v clang > /dev/null || { echo "fuzz.sh: clang not found" >&2; exit 2; }
 SAN="-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined"
 CFLAGS="-g -O1 -fno-omit-frame-pointer -DPLATFORM_STATIC -I$ROOT/include -I$ROOT/src"
@@ -35,6 +36,7 @@ for t in $TARGETS; do
     case $t in
         fuzz_images) corpus=images; srcs="$ROOT/src/png.c $ROOT/src/image.c $ROOT/src/draw2d.c $ROOT/src/ui/stb_impl.c $FS -lm"; run= ;;
         fuzz_paths) corpus=paths; srcs="$FS"; run= ;;
+        fuzz_touch) corpus=touch; srcs="$ROOT/src/core.c $ROOT/src/gesture.c $ROOT/src/error.c $ROOT/src/log.c $ROOT/src/gamepad.c $ROOT/src/gamepad_stub.c $ROOT/src/backend_fake.c -lpthread"; run= ;;
         fuzz_x11_events | fuzz_clipboard_x11)
             corpus=x11_events; [ $t = fuzz_clipboard_x11 ] && corpus=clipboard_x11; run=$ROOT/tools/xvfb_run.sh
             # the library itself, with the sanitizers: the harness drives its public API
@@ -49,11 +51,11 @@ for t in $TARGETS; do
     # shellcheck disable=SC2086
     clang $CFLAGS $SAN "$ROOT/tests/fuzz/$t.c" $srcs -o "$DIR/$t" > "$DIR/$t.build.log" 2>&1 || { echo "FAIL $t: did not build, see $DIR/$t.build.log"; FAILED=1; continue; }
     work=$DIR/work_$t
-    mkdir -p "$work"
+    mkdir -p "$work/corpus" # what the fuzzer finds goes here (libFuzzer writes to the first corpus folder), not into the repository
     echo "== $t: ${SECS}s, seed $SEED"
     # shellcheck disable=SC2086
     (cd "$work" && $run "$DIR/$t" -seed="$SEED" -max_total_time="$SECS" -max_len=65536 -rss_limit_mb=1500 -timeout=20 \
-        -artifact_prefix="$work/" "$ROOT/tests/fuzz/corpus/$corpus" > "$work/log" 2>&1)
+        -artifact_prefix="$work/" "$work/corpus" "$ROOT/tests/fuzz/corpus/$corpus" > "$work/log" 2>&1)
     if grep -q "^SUMMARY: \|ERROR: " "$work/log"; then
         echo "FAIL $t: $(grep -m1 'SUMMARY: ' "$work/log" | cut -c1-200)"; echo "     inputs in $work"; FAILED=1
     else

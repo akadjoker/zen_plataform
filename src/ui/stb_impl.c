@@ -73,6 +73,7 @@ static bool zen_png_check(const uint8_t *d, size_t n, size_t *cap)
         return false;
     size_t pos = 8;
     bool header = false, data = false;
+    uint64_t idat_total = 0, raw_least = 0;
     while (pos + 12 <= n)
     {
         uint32_t len = zen_be32(d + pos);
@@ -91,6 +92,7 @@ static bool zen_png_check(const uint8_t *d, size_t n, size_t *cap)
                 return false;
             uint64_t bpl = ((uint64_t)w * depth + 7) / 8;
             uint64_t need = 2 * (bpl * h * comps[ctype] + h) + 262144;
+            raw_least = (uint64_t)w * h * depth * comps[ctype] / 8;
             /* the image that comes back: 8 or 16 bits, or floats (stbi_loadf), with up to four components */
             uint64_t out = (uint64_t)w * h * 16 + 262144;
             *cap = (size_t)(need > out ? need : out);
@@ -101,11 +103,16 @@ static bool zen_png_check(const uint8_t *d, size_t n, size_t *cap)
             if (!data && len == 0)
                 return false; /* stb would add zero to a null pointer */
             data = true;
+            idat_total += len;
         }
         if (memcmp(d + pos + 4, "IEND", 4) == 0)
             break;
         pos += 12 + (size_t)len;
     }
+    /* deflate cannot expand more than 1032 to 1: compressed data far smaller than the declared pixels is not an image (stb
+       would feed zeros to its zlib reader until the buffer the header allows is full) */
+    if (header && idat_total * 1032 + 4096 < raw_least)
+        return false;
     return header;
 }
 

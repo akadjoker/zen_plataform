@@ -11,12 +11,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* The copy of stb_image that zen_ui instantiates (src/ui/stb_impl.c): a public entry point of the library, linked into this
    target, fed the same bytes as png_decode. */
 unsigned char *stbi_load_from_memory(const unsigned char *buffer, int len, int *x, int *y, int *comp, int req_comp);
 void stbi_image_free(void *p);
+
+static double now_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -27,6 +35,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if ((data[0] & 1) == 0)
     {
         bool stb_ok = false;
+        const double t0 = now_s();
         if (n <= 0x7FFFFFFF)
         {
             int w, h, comp;
@@ -43,7 +52,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         Framebuffer fb;
         memset(&fb, 0, sizeof fb);
-        if (png_decode(body, n, &fb))
+        bool png_ok = png_decode(body, n, &fb);
+        if (now_s() - t0 > 5.0)
+            __builtin_trap(); /* a few hundred bytes must not take seconds to refuse or decode (a sanitizer makes it slower, not this slow) */
+        if (png_ok)
         {
             if (!stb_ok)
                 __builtin_trap(); /* the two checks are the same: what the clipboard decodes, zen_ui's copy decodes */

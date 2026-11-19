@@ -116,6 +116,13 @@ if(UNIX AND NOT APPLE)
     add_fuzz_regression(fuzz_paths paths ${FS_SRC})
 endif()
 
+# The touch path over the fake backend: core.c and the fake backend compiled in, as the fake tests do
+if(UNIX AND NOT APPLE)
+    add_fuzz_regression(fuzz_touch touch src/core.c src/gesture.c src/error.c src/log.c src/gamepad.c src/gamepad_stub.c
+        src/backend_fake.c)
+    target_link_libraries(fuzz_touch PRIVATE Threads::Threads)
+endif()
+
 if(UNIX AND NOT APPLE)
     add_unit_test(test_gamepad src/gamepad.c ${FS_SRC})
 endif()
