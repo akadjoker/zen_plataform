@@ -1384,9 +1384,15 @@ static void handle_key(BackendWindow *b, XEvent *ev, bool down)
         key_text(b, ev);
 }
 
-/* text: feed the IM and decode UTF-8 into codepoints */
+/* text: feed the IM and decode UTF-8 into codepoints. A key pressed with Ctrl or Super (Mod4) held is a shortcut and types
+   nothing (the rule in platform.h): Xlib maps Ctrl+letter to a control character, which is dropped below, but it answers
+   Ctrl+1, Ctrl+minus, Ctrl+comma with the plain character and Ctrl+space with a space. AltGr is Mod5, so what a layout
+   puts on it is still text, and keycode 0 is the input method putting back what it composed or committed, which is text
+   whatever the modifiers of the key that finished it. */
 static void key_text(BackendWindow *b, XEvent *ev)
 {
+    if (ev->xkey.keycode != 0 && (ev->xkey.state & (ControlMask | Mod4Mask)))
+        return;
     if (b->xic)
     {
         char buf[64];
