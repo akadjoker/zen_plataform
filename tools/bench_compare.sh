@@ -66,12 +66,6 @@ LIBS=zp
 [ -n "${ZP_BENCH_LIBS:-}" ] && LIBS=$ZP_BENCH_LIBS
 RUN=$B/bench_run
 
-# The first GL context of a fresh $HOME fills the driver's caches (some 45 M instructions more than every later one):
-# one throw-away run of each program, with and without GL, so the first library measured is not the one that pays.
-for l in $LIBS; do
-    "$B/bench_$l" startup nogl > /dev/null 2>&1
-    "$B/bench_$l" startup gl > /dev/null 2>&1
-done
 
 say() { printf '%s\n' "$*" | tee -a "$OUT"; }
 
@@ -110,12 +104,21 @@ table_row() { # table_row <label> <command-producing-a-cell using \$l>   (cmd is
 }
 want() { case " $STAGES " in *" $1 "*) return 0 ;; esac; return 1; }
 
+# The first GL context of a fresh $HOME, and the first one under valgrind, fill the driver's caches (some 45 M
+# instructions more than every later one): one throw-away run of each program, with and without GL, natively and
+# counted, so the first library measured is not the one that pays.
+for l in $LIBS; do
+    "$B/bench_$l" startup nogl > /dev/null 2>&1
+    "$B/bench_$l" startup gl > /dev/null 2>&1
+    ir "$B/bench_$l" startup gl > /dev/null
+done
+
 say "## Machine"
 say ""
 say "- $(uname -srm), $(nproc) logical CPUs, load average $(cut -d' ' -f1-3 /proc/loadavg) at the start"
 say "- $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ //')"
 say "- $(gcc --version | head -n1), flags -O2 -DNDEBUG for the library and the programs; GLFW and SDL2 are the distribution's binaries"
-say "- Xvfb $(Xvfb -version 2>&1 | head -n1 | sed 's/^.*version //'), screen 1280x800x24, -noreset; locale of the process: ${LANG:-C}"
+say "- Xvfb $(dpkg-query -W -f='${Version}' xvfb 2> /dev/null || echo '?'), screen 1280x800x24, -noreset; locale of the process: ${LANG:-C}"
 for l in $LIBS; do
     case $l in
         glfw) v=$(strings -a "$(ldd "$B/bench_glfw" | awk '/libglfw/{print $3}')" 2> /dev/null | grep -m1 -E '^3\.[0-9]+\.[0-9]+ X11') ; say "- glfw: ${v:-3.x}" ;;
