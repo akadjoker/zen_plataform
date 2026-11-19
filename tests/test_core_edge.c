@@ -181,10 +181,50 @@ static void test_movers_in_full_list(PlatformWindow *w)
     CHECK(!key_down(w, KEY_C));
 }
 
+/* A backend whose frames the system calls (the browser: emscripten_set_main_loop never returns to app_run) puts each frame in
+   a scope of its own, core_scope_enter / core_scope_leave, instead of the one app_run holds around a loop: what the frame
+   destroys is freed when the frame's scope ends, not before (the frame goes on using the window) and not never (app_run never
+   comes back to free it). The sequence of backend_web.c's main_tick, on the fake backend. */
+static void test_frame_scopes_defer_destroy(void)
+{
+    int before = core_window_count();
+    for (int tick = 0; tick < 3; tick++)
+    {
+        PlatformWindow *w = make();
+        CHECK(w != NULL);
+        if (!w)
+            return;
+        CHECK(core_window_count() == before + 1);
+        core_scope_enter();
+        window_begin_frame(w);
+        window_destroy(w); /* in the frame callback */
+        CHECK(window_should_close(w));           /* closed from now on... */
+        CHECK(core_window_count() == before + 1); /* ...and still there for the rest of the tick (window_swap) */
+        window_swap(w);
+        bool done = window_should_close(w);
+        core_scope_leave();
+        CHECK(done);
+        CHECK(core_window_count() == before); /* freed when the tick left its scope */
+    }
+    /* scopes nest: the outermost frees */
+    PlatformWindow *w = make();
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    core_scope_enter();
+    core_scope_enter();
+    window_destroy(w);
+    core_scope_leave();
+    CHECK(core_window_count() == before + 1);
+    core_scope_leave();
+    CHECK(core_window_count() == before);
+}
+
 int main(void)
 {
     if (!platform_init())
         return 1;
+    test_frame_scopes_defer_destroy();
     PlatformWindow *w = make();
     CHECK(w != NULL);
     if (!w)

@@ -84,6 +84,24 @@ static void scope_leave(void)
         reap();
 }
 
+void core_scope_enter(void)
+{
+    g_depth++;
+}
+
+void core_scope_leave(void)
+{
+    scope_leave();
+}
+
+int core_window_count(void)
+{
+    int n = 0;
+    for (const PlatformWindow *w = g_windows; w; w = w->next)
+        n++;
+    return n;
+}
+
 /* ---- ring buffers ---- */
 
 static void keycode_push(InputState *s, int key)
@@ -788,9 +806,14 @@ void app_run(PlatformWindow *w, FrameCallback frame, void *user)
 {
     if (!w || !frame)
         return;
+#if defined(__EMSCRIPTEN__)
+    /* the loop is the browser's and never comes back here: each frame is its own scope (backend_web.c main_tick) */
+    backend_run(w->b, w, frame, user);
+#else
     g_depth++; /* the loop and the frame callbacks: the window outlives a window_destroy made in them until this returns */
     backend_run(w->b, w, frame, user);
     scope_leave();
+#endif
 }
 
 /* ---- waiting for events ---- */
@@ -1028,10 +1051,10 @@ void app_run_events(PlatformWindow *w, FrameCallback frame, void *user)
 {
     if (!w || !frame)
         return;
-    g_depth++;
 #if defined(__EMSCRIPTEN__)
     backend_run(w->b, w, frame, user); /* the browser decides when a frame is due; there is nothing to sleep on */
 #else
+    g_depth++;
     g_frame_wanted = true; /* the first frame draws what is there */
     while (!window_should_close(w))
     {
@@ -1054,8 +1077,8 @@ void app_run_events(PlatformWindow *w, FrameCallback frame, void *user)
         frame(w, user);
         window_swap(w);
     }
-#endif
     scope_leave();
+#endif
 }
 
 bool poll_event(PlatformWindow *w, Event *out)

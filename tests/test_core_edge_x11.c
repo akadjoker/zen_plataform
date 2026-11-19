@@ -5,6 +5,7 @@
  * its extremes and the clocks. Every section runs in a child of its own (a fatal X error ends a process, and the
  * section that does it must be named, not take the others down with it). Skips (77) without a display.
  */
+#define _GNU_SOURCE /* RTLD_NEXT */
 #include "platform.h"
 
 #include <X11/Xlib.h>
@@ -16,6 +17,7 @@
 #endif
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <locale.h>
 #include <sys/inotify.h>
 #include <sys/prctl.h>
@@ -38,6 +40,27 @@
 #endif
 
 static int g_pass, g_fail;
+
+/* The library's own call of Xutf8LookupString lands here (the executable's definition wins over libX11's): it counts the
+   KeyPress events of keycode 0 that another client sent (send_event), which the library must not read a composed string
+   for (Xlib trusts them to be the input method's own and reads one that is not there: a SEGV in strlen, which only shows
+   under a sanitizer, where the stray pointer is not zero), and answers those with "nothing" rather than let the crash decide. */
+static int g_lookup_synthetic0;
+
+int Xutf8LookupString(XIC ic, XKeyPressedEvent *ev, char *buf, int n, KeySym *ks, Status *st)
+{
+    static int (*real)(XIC, XKeyPressedEvent *, char *, int, KeySym *, Status *);
+    if (ev->keycode == 0 && ev->send_event)
+    {
+        g_lookup_synthetic0++;
+        if (st)
+            *st = XLookupNone;
+        return 0;
+    }
+    if (!real)
+        *(void **)&real = dlsym(RTLD_NEXT, "Xutf8LookupString");
+    return real(ic, ev, buf, n, ks, st);
+}
 
 #define CHECK(cond)                                                \
     do                                                             \
@@ -758,6 +781,7 @@ static void pre_no_modifiers(void)
    XMODIFIERS empty Xlib does not use the server, whatever is running (measured: base and this code compose omega with ibus
    up), so the built-in method is what the first key opens, as without a server. */
 static pid_t g_ibus;
+static bool g_ibus_failed;
 
 static bool ibus_registered(void)
 {
@@ -793,6 +817,7 @@ static void start_ibus(void)
     if (pid == 0)
     {
         prctl(PR_SET_PDEATHSIG, SIGKILL);
+        setsid(); /* a group of its own: the session bus, ibus and the services the bus starts are taken down together */
         char home[64];
         snprintf(home, sizeof home, "/tmp/zp-ibus-%d", (int)getpid());
         char run[96];
@@ -822,7 +847,31 @@ static void start_ibus(void)
         time_sleep(250);
     }
     if (pid > 0)
-        kill(pid, SIGKILL);
+    {
+        g_ibus = pid; /* not up, but post_ibus takes down what it did start */
+        g_ibus_failed = true;
+    }
+}
+
+/* Everything the section started: the whole group (dbus-daemon, ibus, the portals and file systems the bus activated), and
+   its throw-away HOME. The document portal's FUSE mount goes with its process (auto_unmount). */
+static void post_ibus(void)
+{
+    if (g_ibus <= 0)
+        return;
+    kill(-g_ibus, SIGTERM);
+    for (int i = 0; i < 20; i++)
+    {
+        if (kill(-g_ibus, 0) != 0)
+            break;
+        time_sleep(50);
+    }
+    kill(-g_ibus, SIGKILL);
+    waitpid(g_ibus, NULL, 0);
+    char dir[96];
+    snprintf(dir, sizeof dir, "rm -rf /tmp/zp-ibus-%d 2> /dev/null", (int)g_ibus);
+    if (system(dir) != 0)
+        printf("  could not remove the HOME of ibus\n");
 }
 
 static void pre_ibus_named(void)
@@ -839,7 +888,7 @@ static void pre_ibus_unnamed(void)
 
 static void test_dead_key_real_server(bool named)
 {
-    if (g_ibus <= 0)
+    if (g_ibus <= 0 || g_ibus_failed)
     {
         printf("  skipped: no ibus-daemon with dbus-run-session, or it did not start\n");
         return;
@@ -1320,6 +1369,7 @@ static void test_hostile_client(void)
     PlatformWindow *ws[1] = {w};
     drain_chars(ws, 1, chars, &n, 8);
     CHECK(n == 0);
+    CHECK(g_lookup_synthetic0 == 0); /* none of them reached Xutf8LookupString: deterministic, with or without a sanitizer */
 
     /* an XDND drop whose source answers with a SelectionNotify naming another property of the window: nothing is read
        from it and it is not deleted (the title is still there) */
@@ -1645,7 +1695,8 @@ typedef struct
 {
     const char *name;
     void (*fn)(void);
-    void (*pre)(void); /* runs in the child before platform_init: the environment the section needs */
+    void (*pre)(void);  /* runs in the child before platform_init: the environment the section needs */
+    void (*post)(void); /* runs in the child after the section, whatever it did: what it started is taken down */
 } Section;
 
 int main(void)
@@ -1670,16 +1721,22 @@ int main(void)
         {"the server goes away", test_server_goes_away, pre_own_server},
         {"first dead key, input method opened late", test_first_dead_key_late_method, pre_dead_server},
         {"first dead key, no XMODIFIERS", test_first_dead_key_late_method, pre_no_modifiers},
-        {"first dead key, a real input method server, named", test_dead_key_ibus_named, pre_ibus_named},
-        {"first dead key, a real input method server, XMODIFIERS empty", test_dead_key_ibus_unnamed, pre_ibus_unnamed},
+        {"first dead key, a real input method server, named", test_dead_key_ibus_named, pre_ibus_named, post_ibus},
+        {"first dead key, a real input method server, XMODIFIERS empty", test_dead_key_ibus_unnamed, pre_ibus_unnamed, post_ibus},
 #endif
         {"cursors and grabs", test_cursors_and_grabs},
         {"clipboard extremes", test_clipboard_extremes},
         {"clocks", test_clocks},
     };
     int failed = 0, skipped = 0;
+    const char *only = getenv("ZP_SECTION"); /* a substring of a section's name: run those only (to look at one) */
     for (unsigned i = 0; i < sizeof sections / sizeof sections[0]; i++)
     {
+        if (only && !strstr(sections[i].name, only))
+        {
+            skipped++;
+            continue;
+        }
         fflush(stdout);
         pid_t pid = fork();
         if (pid == 0)
@@ -1691,6 +1748,8 @@ int main(void)
                 _exit(77);
             sections[i].fn();
             platform_shutdown();
+            if (sections[i].post)
+                sections[i].post();
             printf("%s: %d passed, %d failed\n", sections[i].name, g_pass, g_fail);
             fflush(stdout);
             _exit(g_fail ? 1 : 0);

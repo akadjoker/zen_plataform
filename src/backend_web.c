@@ -581,12 +581,18 @@ typedef struct
 
 static LoopCtx g_loop;
 
+/* Each tick is a scope of its own (core_scope_enter): app_run does not come back from the browser's loop, so the scope it
+   holds on the desktop would never end here and a window the frame destroyed would never be freed. The window is freed when
+   the tick leaves the scope; it is not touched after that, and the loop ends if it asked to close. */
 static void main_tick(void)
 {
+    core_scope_enter();
     window_begin_frame(g_loop.w);
     g_loop.frame(g_loop.w, g_loop.user);
     window_swap(g_loop.w);
-    if (window_should_close(g_loop.w))
+    bool done = window_should_close(g_loop.w);
+    core_scope_leave();
+    if (done)
         emscripten_cancel_main_loop();
 }
 

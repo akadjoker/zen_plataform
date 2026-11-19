@@ -102,6 +102,13 @@ struct PlatformWindow
 /* Whether platform_init has succeeded and platform_shutdown has not run since. */
 bool core_platform_ready(void);
 
+/* The scope that defers window_destroy (core.c, g_depth): a backend whose frames are called by the system and not by a loop
+   inside app_run (the browser: the loop never returns to app_run) wraps each frame in these, and a window the application
+   destroyed in it is freed at core_scope_leave. core_window_count is for tests: the windows still allocated. */
+void core_scope_enter(void);
+void core_scope_leave(void);
+int core_window_count(void);
+
 /* Backend -> core. core_push_event fills the state arrays and the per-frame
    event list in one call; core_push_char only touches the text queue. */
 void core_push_event(Core *core, const Event *ev);
