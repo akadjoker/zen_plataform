@@ -711,14 +711,25 @@ bool backend_init(void)
        can only give the plain built-in one. Only LC_CTYPE is changed: number
        formatting stays as the application had it. */
     setlocale(LC_CTYPE, "");
-    if (XSupportsLocale())
-        XSetLocaleModifiers("");
+    const bool locale_ok = XSupportsLocale();
+    const char *modifiers = locale_ok ? XSetLocaleModifiers("") : NULL;
+    if (modifiers && !strstr(modifiers, "@im="))
+    {
+        /* XMODIFIERS names no input method: XOpenIM can only open the built-in method of Xlib, whatever servers are
+           running (Xlib looks for a server, in the XIM_SERVERS property, only for a name given with "@im="; measured with
+           a real ibus-daemon -x up, which a program started without XMODIFIERS did not use). Opening it reads the locale's
+           compose table, some 47 million instructions (10 to 30 ms) that a program that never gets a key would pay for
+           nothing. It is opened by the first key instead, before that key is filtered, so the first dead key still
+           composes (the same as below, for a server that is down). */
+        g.im_lazy = true;
+        return true;
+    }
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
     /* The configured method is not there (XMODIFIERS names a server that is not running). The built-in method of Xlib
        is the fallback, with dead keys and compose, but opening it reads the locale's compose table: some 40 million
        instructions (10 to 30 ms), which a program that never gets a key would pay for nothing. It is opened by the
        first key press instead, before that key is filtered, so the first dead key still works. */
-    if (!g.xim && XSupportsLocale())
+    if (!g.xim && locale_ok)
         g.im_lazy = true;
     return true;
 }

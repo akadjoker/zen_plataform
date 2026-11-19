@@ -19,6 +19,7 @@
 #include <locale.h>
 #include <sys/inotify.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdint.h>
@@ -707,18 +708,24 @@ static void test_keymap_follows(void)
    test (XCOMPOSEFILE), watched with inotify: it must not be opened by platform_init and window_create, and must be
    by the first key. */
 static char g_compose_path[256];
+static int g_compose_watch = -1; /* inotify on the compose file, made before platform_init so that init is watched too */
 
-static void pre_dead_server(void)
+/* The environment of the section: a compose table of one line (dead acute, a -> omega) as XCOMPOSEFILE, watched; the
+   modifiers XMODIFIERS gets (NULL: the variable is not there at all, the common desktop without an input method server). */
+static void compose_env(const char *modifiers)
 {
     snprintf(g_compose_path, sizeof g_compose_path, "/tmp/zp-compose-%d", (int)getpid());
     FILE *f = fopen(g_compose_path, "w");
     if (f)
     {
-        fputs("<dead_acute> <a> : \"\xce\xa9\" Greek_OMEGA\n", f); /* a table of one line: dead acute, a -> omega */
+        fputs("<dead_acute> <a> : \"\xce\xa9\" Greek_OMEGA\n", f);
         fclose(f);
     }
     setenv("XCOMPOSEFILE", g_compose_path, 1);
-    setenv("XMODIFIERS", "@im=ibus", 1);
+    if (modifiers)
+        setenv("XMODIFIERS", modifiers, 1);
+    else
+        unsetenv("XMODIFIERS");
     static const char *const locales[] = {"pt_PT.UTF-8", "en_US.UTF-8", "C.UTF-8"};
     for (unsigned i = 0; i < sizeof locales / sizeof locales[0]; i++)
         if (setlocale(LC_CTYPE, locales[i]))
@@ -726,6 +733,193 @@ static void pre_dead_server(void)
             setenv("LC_ALL", locales[i], 1);
             break;
         }
+    g_compose_watch = inotify_init1(IN_NONBLOCK);
+    if (g_compose_watch >= 0)
+        inotify_add_watch(g_compose_watch, g_compose_path, IN_OPEN | IN_ACCESS);
+}
+
+static void pre_dead_server(void)
+{
+    compose_env("@im=ibus");
+}
+
+/* No XMODIFIERS and no input method server registered on the display: Xlib's XOpenIM would open its built-in method at
+   once (the 47 million instructions of parsing the compose table, which platform_init used to pay in the common desktop
+   case). Now it is the first key that does, the same way. */
+static void pre_no_modifiers(void)
+{
+    compose_env(NULL);
+}
+
+/* A real input method server: ibus-daemon -x (its XIM server) on a session bus of its own, in a throw-away HOME, started by
+   the section before platform_init. Skipped (the section prints why) when ibus or dbus-run-session is not installed or the
+   server does not come up. XMODIFIERS=@im=ibus must reach it: the dead key is composed by ibus ("a with an acute"), not by
+   the library's own compose table (the test's file, which would say omega) and that file is not read at all. With
+   XMODIFIERS empty Xlib does not use the server, whatever is running (measured: base and this code compose omega with ibus
+   up), so the built-in method is what the first key opens, as without a server. */
+static pid_t g_ibus;
+
+static bool ibus_registered(void)
+{
+    Display *d = XOpenDisplay(NULL);
+    if (!d)
+        return false;
+    bool up = false;
+    Atom servers = XInternAtom(d, "XIM_SERVERS", True);
+    if (servers != None)
+    {
+        Atom type;
+        int format;
+        unsigned long n, after;
+        unsigned char *data = NULL;
+        if (XGetWindowProperty(d, DefaultRootWindow(d), servers, 0, 64, False, XA_ATOM, &type, &format, &n, &after, &data) ==
+                Success &&
+            data)
+        {
+            for (unsigned long i = 0; i < n && !up; i++)
+                up = XGetSelectionOwner(d, ((const unsigned long *)data)[i]) != None;
+            XFree(data);
+        }
+    }
+    XCloseDisplay(d);
+    return up;
+}
+
+static void start_ibus(void)
+{
+    if (system("command -v ibus-daemon > /dev/null 2>&1 && command -v dbus-run-session > /dev/null 2>&1") != 0)
+        return;
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        char home[64];
+        snprintf(home, sizeof home, "/tmp/zp-ibus-%d", (int)getpid());
+        char run[96];
+        snprintf(run, sizeof run, "%s/run", home);
+        if (mkdir(home, 0700) != 0 || mkdir(run, 0700) != 0)
+            _exit(127);
+        setenv("HOME", home, 1);
+        setenv("XDG_CACHE_HOME", home, 1);
+        setenv("XDG_CONFIG_HOME", home, 1);
+        setenv("XDG_RUNTIME_DIR", run, 1);
+        unsetenv("XCOMPOSEFILE"); /* the table of the test is for the library, not for ibus */
+        unsetenv("XMODIFIERS");
+        FILE *null = freopen("/dev/null", "w", stdout);
+        null = freopen("/dev/null", "w", stderr);
+        (void)null;
+        execlp("dbus-run-session", "dbus-run-session", "--", "ibus-daemon", "-x", "--cache=none", (char *)NULL);
+        _exit(127);
+    }
+    for (int i = 0; i < 40 && pid > 0; i++)
+    {
+        if (ibus_registered())
+        {
+            time_sleep(1500); /* registered is not ready: the engine and its context handling start a moment later */
+            g_ibus = pid;
+            return;
+        }
+        time_sleep(250);
+    }
+    if (pid > 0)
+        kill(pid, SIGKILL);
+}
+
+static void pre_ibus_named(void)
+{
+    compose_env("@im=ibus");
+    start_ibus();
+}
+
+static void pre_ibus_unnamed(void)
+{
+    compose_env(NULL);
+    start_ibus();
+}
+
+static void test_dead_key_real_server(bool named)
+{
+    if (g_ibus <= 0)
+    {
+        printf("  skipped: no ibus-daemon with dbus-run-session, or it did not start\n");
+        return;
+    }
+    char ev[512];
+    PlatformWindow *w = make(RENDER_PIXELS, 300, 200);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    int rx = 0, ry = 0;
+    window_get_position(w, &rx, &ry);
+    settle(w);
+    XTestFakeMotionEvent(d, -1, rx + 100, ry + 100, 0);
+    XSetInputFocus(d, xwin(w), RevertToParent, CurrentTime);
+    KeyCode dead = XKeysymToKeycode(d, 'q'), a = XKeysymToKeycode(d, 'a');
+    int per = 0;
+    KeySym *orig = XGetKeyboardMapping(d, dead, 1, &per);
+    KeySym *mine = calloc((size_t)per, sizeof *mine);
+    mine[0] = XK_dead_acute;
+    XChangeKeyboardMapping(d, dead, per, mine, 1);
+    XSync(d, False);
+    for (int i = 0; i < 20; i++)
+    {
+        window_begin_frame(w);
+        time_sleep(10);
+    }
+    window_text_input_start(w);
+    uint32_t got = 0;
+    for (int attempt = 0; attempt < 4 && !got; attempt++)
+    {
+        XTestFakeKeyEvent(d, dead, True, 0);
+        XTestFakeKeyEvent(d, dead, False, 0);
+        XTestFakeKeyEvent(d, a, True, 0);
+        XTestFakeKeyEvent(d, a, False, 0);
+        XSync(d, False);
+        for (int i = 0; i < 80 && !got; i++) /* the commit comes back through the server: asynchronous */
+        {
+            window_begin_frame(w);
+            Event e;
+            while (poll_event(w, &e))
+                if (e.type == EVENT_CHAR && !got)
+                    got = e.data.codepoint;
+            time_sleep(5);
+        }
+    }
+    if (!got)
+        printf("  ibus did not commit anything in 4 tries: not judged\n");
+    else if (named)
+        CHECK(got == 0xE1); /* a with acute, from ibus */
+    else
+        CHECK(got == 0x3A9); /* omega, from the test's table: the built-in method, as with no server */
+    if (named)
+        CHECK(read(g_compose_watch, ev, sizeof ev) < 0); /* the library's own compose table was not read at all */
+    XChangeKeyboardMapping(d, dead, per, orig, 1);
+    XSync(d, False);
+    free(mine);
+    XFree(orig);
+    window_destroy(w);
+    unlink(g_compose_path);
+}
+
+static void test_dead_key_ibus_named(void)
+{
+    if (!getenv("ZP_PRIVATE_X"))
+    {
+        printf("  skipped: changes the keyboard mapping of the server, which is not a private one\n");
+        return;
+    }
+    test_dead_key_real_server(true);
+}
+
+static void test_dead_key_ibus_unnamed(void)
+{
+    if (!getenv("ZP_PRIVATE_X"))
+    {
+        printf("  skipped: changes the keyboard mapping of the server, which is not a private one\n");
+        return;
+    }
+    test_dead_key_real_server(false);
 }
 
 /* The key goes to the window under the pointer, which is whichever of the windows is on top: every window of the
@@ -753,12 +947,10 @@ static void test_first_dead_key_late_method(void)
         printf("  skipped: changes the keyboard mapping of the server, which is not a private one\n");
         return;
     }
-    int ino = inotify_init1(IN_NONBLOCK);
+    int ino = g_compose_watch; /* made before platform_init: it saw that too */
     CHECK(ino >= 0);
     if (ino < 0)
         return;
-    /* the watch comes after platform_init (main ran it), so what it sees is what came after: nothing yet */
-    CHECK(inotify_add_watch(ino, g_compose_path, IN_OPEN | IN_ACCESS) >= 0);
     PlatformWindow *w = make(RENDER_PIXELS, 300, 200);
     CHECK(w != NULL);
     if (!w)
@@ -770,7 +962,7 @@ static void test_first_dead_key_late_method(void)
     window_get_position(w, &rx, &ry);
     settle(w);
     char ev[512];
-    CHECK(read(ino, ev, sizeof ev) < 0); /* nothing opened the compose table: no key yet */
+    CHECK(read(ino, ev, sizeof ev) < 0); /* nothing opened the compose table: not platform_init, not the windows, no key yet */
 
     KeyCode dead = XKeysymToKeycode(d, 'q'), a = XKeysymToKeycode(d, 'a');
     int per = 0;
@@ -1477,6 +1669,9 @@ int main(void)
         {"shutdown inside a hook", test_shutdown_in_hook},
         {"the server goes away", test_server_goes_away, pre_own_server},
         {"first dead key, input method opened late", test_first_dead_key_late_method, pre_dead_server},
+        {"first dead key, no XMODIFIERS", test_first_dead_key_late_method, pre_no_modifiers},
+        {"first dead key, a real input method server, named", test_dead_key_ibus_named, pre_ibus_named},
+        {"first dead key, a real input method server, XMODIFIERS empty", test_dead_key_ibus_unnamed, pre_ibus_unnamed},
 #endif
         {"cursors and grabs", test_cursors_and_grabs},
         {"clipboard extremes", test_clipboard_extremes},

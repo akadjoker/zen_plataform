@@ -26,7 +26,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${ZP_BUILD_DIR:-${TMPDIR:-/tmp}/zp-check-$(id -un)}
 JOBS=${ZP_JOBS:-$(($(nproc) / 2 > 0 ? $(nproc) / 2 : 1))}
-TSAN_TESTS=${TSAN_TESTS:-'test_thread|test_io|test_crash|test_process|test_gl_worker_x11|test_x11_lifecycle|test_multiwindow_x11'}
+TSAN_TESTS=${TSAN_TESTS:-'test_thread|test_io|test_crash|test_process|test_gl_worker_x11|test_x11_lifecycle|test_multiwindow_x11|test_wait_fake|test_wait_x11'}
 RUN=$ROOT/tools/xvfb_run.sh
 
 STAGES=${*:-release asan tsan mingw}
