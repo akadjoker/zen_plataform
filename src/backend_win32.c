@@ -1144,6 +1144,12 @@ static void handle_char(BackendWindow *b, WPARAM wparam)
         cp = 0x10000 + (((uint32_t)b->high_surrogate - 0xD800) << 10) + (cp - 0xDC00);
     }
     b->high_surrogate = 0;
+    /* A key pressed with Ctrl or the Windows key held is a shortcut and types nothing (the rule in platform.h): TranslateMessage
+       makes control characters of Ctrl+letter, dropped below, but Ctrl+space comes as a space. AltGr is reported as Ctrl and
+       Alt together, and the character a layout puts on it is text: a Ctrl without the Alt is the shortcut. */
+    const int mods = current_mods();
+    if ((mods & KEYMOD_SUPER) || ((mods & KEYMOD_CTRL) && !(mods & KEYMOD_ALT)))
+        return;
     if (cp >= 0x20 && cp != 0x7F)
         push_char(b, cp);
 }

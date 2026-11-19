@@ -840,7 +840,19 @@ static void key_event(BackendWindow *b, xkb_keycode_t kc, bool down, bool repeat
     push(b, &e);
 
     if (down)
-        key_text(b, kc);
+    {
+        /* A key pressed with Ctrl or Super held is a shortcut and types nothing (the rule in platform.h): xkbcommon turns
+           Ctrl+letter into a control character, dropped by push_text, but gives Ctrl+1, Ctrl+minus, Ctrl+comma as the plain
+           character and Ctrl+space as a space. A Compose sequence waiting is cancelled, not finished by the shortcut.
+           AltGr is a level of the key, not Ctrl, so what a layout puts on it is text. */
+        if (e.data.key.mods & (KEYMOD_CTRL | KEYMOD_SUPER))
+        {
+            if (g.compose)
+                xkb_compose_state_reset(g.compose);
+        }
+        else
+            key_text(b, kc);
+    }
 }
 
 /* A held key repeats while its window has the focus, and the pump is what drives

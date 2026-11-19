@@ -447,6 +447,90 @@ static void test_text_event(PlatformWindow *w)
     CHECK(char_get_pressed(w) == 0);
 }
 
+/* The text rule: a key pressed while Ctrl or Super is held is a shortcut and types nothing; Shift and AltGr (Ctrl and Alt
+   together on Windows and the web) still type; the clipboard shortcuts of old arrive as the key and its modifier. */
+static void drain_events(PlatformWindow *w, int *chars, uint32_t *first, int *key_mods)
+{
+    Event e;
+    *chars = 0;
+    *key_mods = -1;
+    window_begin_frame(w);
+    while (poll_event(w, &e))
+    {
+        if (e.type == EVENT_CHAR && (*chars)++ == 0)
+            *first = e.data.codepoint;
+        else if (e.type == EVENT_KEY && e.data.key.down && e.data.key.key != KEY_LEFT_CONTROL &&
+                 e.data.key.key != KEY_LEFT_SHIFT && e.data.key.key != KEY_LEFT_ALT && e.data.key.key != KEY_LEFT_SUPER)
+            *key_mods = e.data.key.mods;
+    }
+}
+
+static void test_text_rule(PlatformWindow *w)
+{
+    static const struct
+    {
+        const char *name;
+        int held[2];
+        int key;
+        uint32_t cp;
+        int want_chars, want_mods;
+    } cases[] = {
+        {"a", {0, 0}, KEY_A, 'a', 1, 0},
+        {"Shift+a", {KEY_LEFT_SHIFT, 0}, KEY_A, 'A', 1, KEYMOD_SHIFT},
+        {"Ctrl+a", {KEY_LEFT_CONTROL, 0}, KEY_A, 'a', 0, KEYMOD_CTRL},
+        {"Ctrl+1", {KEY_LEFT_CONTROL, 0}, KEY_ZERO + 1, '1', 0, KEYMOD_CTRL},
+        {"Ctrl+space", {KEY_LEFT_CONTROL, 0}, KEY_SPACE, ' ', 0, KEYMOD_CTRL},
+        {"Ctrl+Shift+v", {KEY_LEFT_CONTROL, KEY_LEFT_SHIFT}, KEY_V, 'V', 0, KEYMOD_CTRL | KEYMOD_SHIFT},
+        {"Super+a", {KEY_LEFT_SUPER, 0}, KEY_A, 'a', 0, KEYMOD_SUPER},
+        {"Alt+a", {KEY_LEFT_ALT, 0}, KEY_A, 'a', 1, KEYMOD_ALT},
+        {"AltGr+q (Ctrl+Alt)", {KEY_LEFT_CONTROL, KEY_LEFT_ALT}, KEY_Q, '@', 1, KEYMOD_CTRL | KEYMOD_ALT},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+    {
+        window_begin_frame(w);
+        for (int h = 0; h < 2; h++)
+            if (cases[i].held[h])
+                fake_key(w, cases[i].held[h], true, false);
+        fake_key_text(w, cases[i].key, cases[i].cp);
+        int chars, mods;
+        uint32_t first = 0;
+        drain_events(w, &chars, &first, &mods);
+        if (chars != cases[i].want_chars)
+            printf("  %s typed %d characters, wanted %d\n", cases[i].name, chars, cases[i].want_chars);
+        CHECK(chars == cases[i].want_chars);
+        CHECK(chars == 0 || first == cases[i].cp);
+        CHECK(mods == cases[i].want_mods);
+        fake_key(w, cases[i].key, false, false);
+        for (int h = 1; h >= 0; h--)
+            if (cases[i].held[h])
+                fake_key(w, cases[i].held[h], false, false);
+        drain_events(w, &chars, &first, &mods);
+    }
+}
+
+static void test_clipboard_shortcut_keys(PlatformWindow *w)
+{
+    static const struct
+    {
+        int held, key, mods;
+    } k[] = {{KEY_LEFT_SHIFT, KEY_INSERT, KEYMOD_SHIFT}, {KEY_LEFT_CONTROL, KEY_INSERT, KEYMOD_CTRL},
+             {KEY_LEFT_SHIFT, KEY_DELETE, KEYMOD_SHIFT}};
+    for (size_t i = 0; i < 3; i++)
+    {
+        window_begin_frame(w);
+        fake_key(w, k[i].held, true, false);
+        fake_key(w, k[i].key, true, false);
+        int chars, mods;
+        uint32_t first;
+        drain_events(w, &chars, &first, &mods);
+        CHECK(mods == k[i].mods);
+        CHECK(chars == 0);
+        fake_key(w, k[i].key, false, false);
+        fake_key(w, k[i].held, false, false);
+        drain_events(w, &chars, &first, &mods);
+    }
+}
+
 static void test_lock_mods(PlatformWindow *w)
 {
     window_begin_frame(w);
@@ -890,6 +974,8 @@ int main(void)
     test_focus_loss_releases(w);
     test_click_in_one_frame(w);
     test_text_event(w);
+    test_text_rule(w);
+    test_clipboard_shortcut_keys(w);
     test_lock_mods(w);
     test_capture(w);
     test_device_events(w);

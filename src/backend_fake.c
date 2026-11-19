@@ -32,6 +32,7 @@ typedef struct
 {
     bool is_char;
     bool real_touch; /* goes through core_push_touch, like a desktop touch screen */
+    bool key_text;   /* a key press that types cp (fake_key_text): the text follows the key unless the rule says no */
     unsigned char fill;
     Event ev;
     uint32_t cp;
@@ -134,6 +135,15 @@ static int held_mods(const Core *core)
     return mods;
 }
 
+/* The rule of platform.h: a key pressed while Ctrl or Super is held types nothing. Ctrl and Alt together are AltGr (Windows
+   and the web report it that way): what a layout puts on AltGr is text. */
+static bool fake_types_text(int mods)
+{
+    if (mods & KEYMOD_SUPER)
+        return false;
+    return !(mods & KEYMOD_CTRL) || (mods & KEYMOD_ALT);
+}
+
 /* A pointer move to x, y: captured, the X11 backend says by how much the pointer moved (a free pointer's events carry no step) */
 static Event move_event(const BackendWindow *b, const Core *core, int x, int y)
 {
@@ -189,6 +199,8 @@ void backend_pump_events(BackendWindow *b, Core *core)
                 b->fb_h = ev.data.resize.h;
             }
             core_push_event(core, &ev);
+            if (it->key_text && fake_types_text(ev.data.key.mods))
+                core_push_char(core, it->cp);
         }
     }
     g_pending_total -= b->pending_count;
@@ -600,6 +612,16 @@ void fake_key(PlatformWindow *w, int key, bool down, bool repeat)
     e.data.key.down = down;
     e.data.key.repeat = repeat;
     FakeItem it = {.fill = FILL_KEY, .ev = e};
+    enqueue(w->b, &it);
+}
+
+void fake_key_text(PlatformWindow *w, int key, uint32_t codepoint)
+{
+    Event e = {.type = EVENT_KEY};
+    e.data.key.key = key;
+    e.data.key.scancode = key;
+    e.data.key.down = true;
+    FakeItem it = {.fill = FILL_KEY, .ev = e, .key_text = true, .cp = codepoint};
     enqueue(w->b, &it);
 }
 

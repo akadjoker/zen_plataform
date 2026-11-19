@@ -356,6 +356,54 @@ static void test_altgr(PlatformWindow *w)
     frames(w, 5);
 }
 
+/* The text rule (platform.h): a key pressed with Ctrl held is a shortcut and types nothing. Ctrl+space is the case Windows
+   gets wrong for us: TranslateMessage gives it as a plain space (Ctrl+letter is a control character, dropped anyway). The
+   same keys without Ctrl type. And Shift+Insert, Ctrl+Insert and Shift+Delete arrive as the key with its modifier.
+   Written without a Windows machine to run it on: compiled only. */
+static int typed_after(PlatformWindow *w, WORD hold, WORD vk, int *mods_seen)
+{
+    Event ev;
+    int chars = 0;
+    *mods_seen = -1;
+    if (hold)
+        key(hold, true);
+    key(vk, true);
+    key(vk, false);
+    if (hold)
+        key(hold, false);
+    for (int i = 0; i < 20; i++)
+    {
+        Sleep(5);
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+        {
+            if (ev.type == EVENT_CHAR)
+                chars++;
+            else if (ev.type == EVENT_KEY && ev.data.key.down && ev.data.key.key != KEY_LEFT_CONTROL &&
+                     ev.data.key.key != KEY_LEFT_SHIFT)
+                *mods_seen = ev.data.key.mods;
+        }
+    }
+    return chars;
+}
+
+static void test_chord_text(PlatformWindow *w)
+{
+    int mods;
+    CHECK(typed_after(w, VK_CONTROL, VK_SPACE, &mods) == 0);
+    CHECK(mods == KEYMOD_CTRL);
+    CHECK(typed_after(w, VK_CONTROL, '1', &mods) == 0);
+    CHECK(typed_after(w, VK_CONTROL, 'A', &mods) == 0);
+    CHECK(typed_after(w, 0, VK_SPACE, &mods) == 1);
+    CHECK(typed_after(w, 0, '1', &mods) == 1);
+    CHECK(typed_after(w, VK_SHIFT, VK_INSERT, &mods) == 0);
+    CHECK(mods == KEYMOD_SHIFT);
+    CHECK(typed_after(w, VK_CONTROL, VK_INSERT, &mods) == 0);
+    CHECK(mods == KEYMOD_CTRL);
+    CHECK(typed_after(w, VK_SHIFT, VK_DELETE, &mods) == 0);
+    CHECK(mods == KEYMOD_SHIFT);
+}
+
 static void test_long_hold(PlatformWindow *w)
 {
     frames(w, 5);
@@ -698,6 +746,7 @@ int main(void)
         test_mouse_drag,
         test_mouse_captured,
         test_altgr,
+        test_chord_text,
         test_print_screen,
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++)

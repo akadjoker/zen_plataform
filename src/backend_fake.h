@@ -14,6 +14,10 @@ void fake_inject_char(PlatformWindow *w, uint32_t codepoint);
 
 /* Convenience builders for the common cases. */
 void fake_key(PlatformWindow *w, int key, bool down, bool repeat);
+/* A key press that types codepoint, as a keyboard does: the EVENT_KEY down for key, with the modifiers held before it, and
+   then the EVENT_CHAR, unless the rule of platform.h says the key types nothing (Ctrl or Super held; Ctrl and Alt together
+   are AltGr and do type). The release is a fake_key. */
+void fake_key_text(PlatformWindow *w, int key, uint32_t codepoint);
 void fake_mouse_move(PlatformWindow *w, int x, int y);
 void fake_mouse_button(PlatformWindow *w, int button, bool down);
 /* A button at x, y: the pointer goes there first (an EVENT_MOUSE_MOVE, unless it is there already), as a real pointer must,

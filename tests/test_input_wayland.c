@@ -849,7 +849,8 @@ static int count_char(uint32_t cp)
 enum
 {
     EV_ESC = 1, EV_1 = 2, EV_APOSTROPHE = 40, EV_A = 30, EV_Q = 16, EV_LCTRL = 29, EV_LSHIFT = 42,
-    EV_CAPS = 58, EV_F1 = 59, EV_LEFT = 105, EV_KP5 = 76, EV_NUMLOCK = 69
+    EV_CAPS = 58, EV_F1 = 59, EV_LEFT = 105, EV_KP5 = 76, EV_NUMLOCK = 69, EV_MINUS = 12, EV_COMMA = 51, EV_SPACE = 57,
+    EV_5 = 6, EV_RALT = 100, EV_LSUPER = 125, EV_INSERT = 110, EV_DELETE = 111
 };
 
 static void tap(int code)
@@ -930,6 +931,93 @@ static void test_keys(PlatformWindow *w)
     cmd(CMD_KEY, EV_A, 0, 0, 0);
     CHECK(settle(w));
     CHECK(!key_down(w, KEY_A));
+}
+
+/* The rule (platform.h): a key pressed while Ctrl or Super is held is a shortcut and types nothing. xkbcommon turns
+   Ctrl+letter into a control character, which is dropped, but gives Ctrl+1, Ctrl+minus and Ctrl+comma as the plain
+   character and Ctrl+space as a space. */
+static void test_chord_text(PlatformWindow *w)
+{
+    static const struct
+    {
+        int hold, key;
+        int mod;
+    } chords[] = {{EV_LCTRL, EV_A, KEYMOD_CTRL},     {EV_LCTRL, EV_1, KEYMOD_CTRL},     {EV_LCTRL, EV_MINUS, KEYMOD_CTRL},
+                  {EV_LCTRL, EV_COMMA, KEYMOD_CTRL}, {EV_LCTRL, EV_SPACE, KEYMOD_CTRL}, {EV_LSUPER, EV_A, KEYMOD_SUPER},
+                  {EV_LSUPER, EV_1, KEYMOD_SUPER}};
+    cmd(CMD_LAYOUT, 0, 0, 0, 0);
+    cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+    CHECK(settle(w));
+    for (size_t i = 0; i < sizeof chords / sizeof chords[0]; i++)
+    {
+        reset();
+        cmd(CMD_KEY, chords[i].hold, 1, 0, 0);
+        tap(chords[i].key);
+        cmd(CMD_KEY, chords[i].hold, 0, 0, 0);
+        CHECK(settle(w));
+        if (count(EVENT_CHAR))
+            printf("  chord %zu typed U+%04X\n", i, (unsigned)nth(EVENT_CHAR, 0)->cp);
+        CHECK(count(EVENT_CHAR) == 0);
+        const Rec *pressed = NULL;
+        for (int j = 0; j < nrec; j++)
+            if (rec[j].type == EVENT_KEY && rec[j].down && rec[j].scancode == chords[i].key + 8)
+                pressed = &rec[j];
+        CHECK(pressed && (pressed->mods & chords[i].mod));
+    }
+    /* a dead key pending is not finished by a shortcut: Ctrl+a does not become an a-acute, and the a after it is a plain a */
+    if (access("/usr/share/X11/locale/en_US.UTF-8/Compose", R_OK) == 0)
+    {
+        cmd(CMD_LAYOUT, 2, 0, 0, 0);
+        cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+        reset();
+        tap(EV_APOSTROPHE);
+        cmd(CMD_KEY, EV_LCTRL, 1, 0, 0);
+        tap(EV_A);
+        cmd(CMD_KEY, EV_LCTRL, 0, 0, 0);
+        tap(EV_A);
+        CHECK(settle(w));
+        CHECK(count_char(0xE1) == 0);
+        CHECK(count_char('a') == 1);
+        /* AltGr is a level of the key: what the layout puts on it is text (AltGr+5 is the euro sign), with no Ctrl */
+        reset();
+        cmd(CMD_KEY, EV_RALT, 1, 0, 0);
+        tap(EV_5);
+        cmd(CMD_KEY, EV_RALT, 0, 0, 0);
+        CHECK(settle(w));
+        CHECK(count_char(0x20AC) == 1);
+        CHECK(count(EVENT_CHAR) == 1);
+        for (int j = 0; j < nrec; j++)
+            if (rec[j].type == EVENT_KEY)
+                CHECK(!(rec[j].mods & KEYMOD_CTRL));
+    }
+    cmd(CMD_LAYOUT, 0, 0, 0, 0);
+    cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+    CHECK(settle(w));
+}
+
+/* Shift+Insert, Ctrl+Insert and Shift+Delete, the clipboard shortcuts of old: the key and its modifier, no text. */
+static void test_clipboard_shortcuts(PlatformWindow *w)
+{
+    static const struct
+    {
+        int hold, key, want_key, mod;
+    } k[] = {{EV_LSHIFT, EV_INSERT, KEY_INSERT, KEYMOD_SHIFT},
+             {EV_LCTRL, EV_INSERT, KEY_INSERT, KEYMOD_CTRL},
+             {EV_LSHIFT, EV_DELETE, KEY_DELETE, KEYMOD_SHIFT}};
+    for (size_t i = 0; i < 3; i++)
+    {
+        reset();
+        cmd(CMD_KEY, k[i].hold, 1, 0, 0);
+        tap(k[i].key);
+        cmd(CMD_KEY, k[i].hold, 0, 0, 0);
+        CHECK(settle(w));
+        const Rec *pressed = NULL;
+        for (int j = 0; j < nrec; j++)
+            if (rec[j].type == EVENT_KEY && rec[j].down && rec[j].key == k[i].want_key)
+                pressed = &rec[j];
+        CHECK(pressed && pressed->mods == k[i].mod);
+        CHECK(count(EVENT_CHAR) == 0);
+    }
 }
 
 static void test_layout(PlatformWindow *w)
@@ -1358,6 +1446,8 @@ int main(void)
     }
 
     test_keys(w);
+    test_chord_text(w);
+    test_clipboard_shortcuts(w);
     test_layout(w);
     test_repeat(w);
     test_compose(w);
