@@ -10,6 +10,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
+#include <X11/XKBlib.h>
 #ifdef HAVE_XTEST
 #include <X11/extensions/XTest.h>
 #endif
@@ -17,6 +18,7 @@
 #include <dirent.h>
 #include <locale.h>
 #include <sys/inotify.h>
+#include <sys/prctl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdint.h>
@@ -1194,6 +1196,7 @@ static void pre_own_server(void)
     pid_t pid = fork();
     if (pid == 0)
     {
+        prctl(PR_SET_PDEATHSIG, SIGKILL); /* the server goes with the section, whatever happens to it */
         close(fds[0]);
         char fd[16];
         snprintf(fd, sizeof fd, "%d", fds[1]);
@@ -1272,6 +1275,146 @@ static void test_server_goes_away(void)
     CHECK(true); /* got here: Xlib did not end the process */
 }
 
+/* A button held while the pointer leaves the window (the server keeps sending the motion to the window that has the grab):
+   the coordinates are the real ones, negative and far outside included, the button is still down, and the release
+   outside ends it. */
+static void test_drag_outside(void)
+{
+    PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    int rx = 0, ry = 0;
+    window_get_position(w, &rx, &ry);
+    settle(w);
+    XTestFakeMotionEvent(d, -1, rx + 100, ry + 75, 0);
+    XTestFakeButtonEvent(d, 1, True, 0);
+    XSync(d, False);
+    time_sleep(30);
+    window_begin_frame(w);
+    CHECK(mouse_button_down(w, MOUSE_LEFT));
+    static const int offs[][2] = {{-50, -40}, {-3000, -3000}, {5000, 100}, {100, 4000}, {-1, 76}, {250, 160}, {100, 75}};
+    for (unsigned i = 0; i < sizeof offs / sizeof offs[0]; i++)
+    {
+        int tx = rx + offs[i][0], ty = ry + offs[i][1];
+        if (tx < 0)
+            tx = 0; /* the screen has no negative coordinates: the pointer stops at its edge */
+        if (ty < 0)
+            ty = 0;
+        XTestFakeMotionEvent(d, -1, tx, ty, 0);
+        XSync(d, False);
+        time_sleep(20);
+        window_begin_frame(w);
+        int want_x = (tx >= 1280 ? 1279 : tx) - rx, want_y = (ty >= 800 ? 799 : ty) - ry;
+        CHECK(mouse_x(w) == want_x && mouse_y(w) == want_y);
+        CHECK(mouse_button_down(w, MOUSE_LEFT));
+    }
+    XTestFakeMotionEvent(d, -1, 1200, 700, 0); /* released far outside */
+    XTestFakeButtonEvent(d, 1, False, 0);
+    XSync(d, False);
+    time_sleep(30);
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    window_begin_frame(w);
+    CHECK(!mouse_button_down(w, MOUSE_LEFT));
+    window_destroy(w);
+}
+
+/* The server acts on some of the keysyms and keys itself (Caps and Num Lock, the group switches, the keysyms that move and
+   click the pointer for the mouse keys, those that enable the accessibility features), and nothing puts that back: the
+   section runs on an Xvfb of its own, started by pre_own_server and gone with the section.
+   Every keycode the protocol has, pressed and released with XTest: each press is one KEY event with that scancode, a key
+   in the table's range, and the release comes back with the same key. Then every keysym from 0x20 up (the function and
+   keypad range in full, the rest every 7th), one after the other on one keycode: the translation never gives a key
+   outside the range, and a press and its release agree. */
+static void test_key_sweeps(void)
+{
+    if (g_own_xvfb <= 0)
+    {
+        printf("  skipped: could not start an Xvfb of its own\n");
+        return;
+    }
+    PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    int rx = 0, ry = 0;
+    window_get_position(w, &rx, &ry);
+    settle(w);
+    XTestFakeMotionEvent(d, -1, rx + 100, ry + 75, 0);
+    XSync(d, False);
+    int bad_range = 0, bad_pair = 0, bad_scancode = 0, seen = 0;
+    for (int kc = 8; kc < 256; kc++)
+    {
+        XTestFakeKeyEvent(d, (unsigned)kc, True, 0);
+        XTestFakeKeyEvent(d, (unsigned)kc, False, 0);
+        XSync(d, False);
+        time_sleep(2);
+        int down_key = -1, up_key = -2;
+        window_begin_frame(w);
+        Event e;
+        while (poll_event(w, &e))
+            if (e.type == EVENT_KEY)
+            {
+                if (e.data.key.key < 0 || e.data.key.key >= KEY_MAX)
+                    bad_range++;
+                if (e.data.key.scancode != kc)
+                    bad_scancode++;
+                if (e.data.key.down)
+                    down_key = e.data.key.key, seen++;
+                else
+                    up_key = e.data.key.key;
+            }
+        bad_pair += down_key != up_key && down_key != -1;
+    }
+    CHECK(bad_range == 0 && bad_scancode == 0 && bad_pair == 0);
+    CHECK(seen > 100); /* most of the 248 keycodes reach the window */
+
+    KeyCode kc = XKeysymToKeycode(d, 'a');
+    int per = 0;
+    KeySym *orig = XGetKeyboardMapping(d, kc, 1, &per);
+    KeySym *mine = calloc((size_t)per, sizeof *mine);
+    int swept = 0, bad = 0;
+    for (unsigned long ks = 0x20; ks < 0x1000000; ks += (ks >= 0xFE00 && ks < 0x10000) ? 1 : 7)
+    {
+        if (ks > 0x20000 && ks < 0x1000000 - 0x2000)
+            ks = 0x1000000 - 0x2000 + (ks % 7); /* the Unicode keysyms: only a stretch at the top, and the ones below */
+        mine[0] = ks;
+        XChangeKeyboardMapping(d, kc, per, mine, 1);
+        XTestFakeKeyEvent(d, kc, True, 0);
+        XTestFakeKeyEvent(d, kc, False, 0);
+        XSync(d, False);
+        window_begin_frame(w);
+        int down_key = -1, up_key = -2;
+        Event e;
+        while (poll_event(w, &e))
+            if (e.type == EVENT_KEY)
+            {
+                bad += e.data.key.key < 0 || e.data.key.key >= KEY_MAX;
+                if (e.data.key.down)
+                    down_key = e.data.key.key;
+                else
+                    up_key = e.data.key.key;
+            }
+        if (down_key != -1 && down_key != up_key)
+            bad++;
+        swept++;
+        if (swept % 64 == 0)
+            time_sleep(1);
+        if (ks >= 0x1000000 - 0x2000 && ks + 7 >= 0x1000000)
+            break;
+    }
+    XChangeKeyboardMapping(d, kc, per, orig, 1);
+    XSync(d, False);
+    printf("  %d keysyms swept\n", swept);
+    CHECK(swept > 1000 && bad == 0);
+    free(mine);
+    XFree(orig);
+    window_destroy(w);
+}
+
 static void test_clocks(void)
 {
     uint64_t prev = time_nanos();
@@ -1327,6 +1470,8 @@ int main(void)
         {"held across destroy", test_held_across_destroy},
         {"wheel burst", test_wheel_burst},
         {"keymap follows", test_keymap_follows},
+        {"a drag that leaves the window", test_drag_outside},
+        {"every keycode and keysym", test_key_sweeps, pre_own_server},
         {"destroy inside callbacks", test_destroy_in_callbacks},
         {"events from a hostile client", test_hostile_client},
         {"shutdown inside a hook", test_shutdown_in_hook},
