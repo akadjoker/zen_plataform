@@ -23,6 +23,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if defined(__SANITIZE_ADDRESS__)
+#define EDGE_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define EDGE_ASAN 1
+#endif
+#endif
+
 static int g_pass, g_fail;
 
 #define CHECK(cond)                                                \
@@ -152,7 +160,9 @@ static void test_thousand_windows(void)
     CHECK(made == 1000);
     CHECK(open_fds() == fds);
     printf("  1000 windows: rss %ld kB -> %ld kB\n", rss, rss_kb());
+#ifndef EDGE_ASAN /* ASan keeps what is freed in a quarantine of its own, which grows the RSS by design */
     CHECK(rss_kb() - rss < 2048);
+#endif
     XSync(probe, False);
     kids = NULL;
     XQueryTree(probe, root, &r, &parent, &kids, &nafter);
