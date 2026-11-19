@@ -799,7 +799,11 @@ void window_swap(PlatformWindow *w)
 {
     if (!w)
         return;
+    /* Wayland dispatches the compositor's events while it waits for the frame callback, and some of them run the application's
+       hit test: a window destroyed there waits until the swap is done with it. */
+    g_depth++;
     backend_swap(w->b);
+    scope_leave();
 }
 
 void app_run(PlatformWindow *w, FrameCallback frame, void *user)

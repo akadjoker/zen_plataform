@@ -2528,7 +2528,7 @@ static bool events_queued(void)
    are still the pump's to hand to the core, and the wait also answers a ping of the compositor while it sleeps. The queues are
    looked at after every dispatch: an event that arrives together with the one that ends a frame callback is already in
    libwayland's buffer and the socket is quiet, so poll alone would sleep through it. */
-bool backend_wait_events(int64_t timeout_ns)
+static bool wait_events(int64_t timeout_ns)
 {
     int64_t limit = timeout_ns;
     if (g.repeat_key && g.keyboard_focus && g.repeat_rate > 0)
@@ -2604,6 +2604,16 @@ bool backend_wait_events(int64_t timeout_ns)
         if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
             return false;
     }
+}
+
+/* The listeners the dispatch runs call the application's code (the hit test of a window with its own title bar): a program
+   that destroys the window there must wait until the dispatch is over, here as in the pump (see platform.h). */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    core_scope_enter();
+    bool r = wait_events(timeout_ns);
+    core_scope_leave();
+    return r;
 }
 
 void backend_wake(void)
