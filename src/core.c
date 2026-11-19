@@ -22,6 +22,58 @@
 #include <windows.h>
 #endif
 
+/* ---- windows alive, and destruction that waits for the application's code to return ---- */
+
+/* Every window made and not yet destroyed, newest first. window_destroy ignores a pointer that is not in the list
+   (a second destroy of the same window, a destroy after platform_shutdown, which destroys what is left). */
+static PlatformWindow *g_windows;
+/* Above zero while the platform is running application code (an event hook) or a loop that calls it (window_begin_frame,
+   app_run): the backend is in the middle of the window's events and still uses its data when the application returns. A
+   window_destroy made then only marks the window; it goes when the outermost of those returns. Main thread only. */
+static int g_depth;
+static bool g_shutdown_wanted; /* platform_shutdown was called from application code, it runs when that returns */
+static bool g_reap_due;        /* a window is marked dead or a shutdown waits: scope_leave has work to do */
+static void platform_shutdown_now(void);
+
+static void window_free(PlatformWindow *w)
+{
+    for (PlatformWindow **pp = &g_windows; *pp; pp = &(*pp)->next)
+        if (*pp == w)
+        {
+            *pp = w->next;
+            break;
+        }
+    backend_destroy(w->b);
+    free(w);
+}
+
+/* The windows marked by window_destroy while the application's code ran, and a platform_shutdown asked for then. */
+static void reap(void)
+{
+    if (g_depth > 0 || !g_reap_due)
+        return;
+    g_reap_due = false;
+    for (PlatformWindow *w = g_windows; w;)
+        if (w->dead)
+        {
+            window_free(w);
+            w = g_windows; /* the list changed: look again from the start */
+        }
+        else
+            w = w->next;
+    if (g_shutdown_wanted)
+    {
+        g_shutdown_wanted = false;
+        platform_shutdown_now();
+    }
+}
+
+static void scope_leave(void)
+{
+    if (--g_depth == 0 && g_reap_due)
+        reap();
+}
+
 /* ---- ring buffers ---- */
 
 static void keycode_push(InputState *s, int key)
@@ -284,7 +336,13 @@ void core_push_event(Core *core, const Event *ev)
     }
 
     if (core->hook)
+    {
+        /* Application code: a window_destroy in it waits (see window_destroy), the backend is still in the middle of
+           this event. */
+        g_depth++;
         core->hook(core->owner, ev, core->hook_user);
+        g_depth--;
+    }
 
     frame_event_add(s, ev);
 
@@ -501,19 +559,40 @@ bool platform_init(void)
     return true;
 }
 
-void platform_shutdown(void)
+static void platform_shutdown_now(void)
 {
     if (!g_ready)
         return; /* never up, failed to come up, or already down: there is nothing to take down */
     g_ready = false;
+    /* A window the program still holds goes with the connection it lives on (it would be a leak and, for the backend,
+       a handle to a display that is gone). The program's pointer is then stale, as after window_destroy. */
+    while (g_windows)
+        window_free(g_windows);
     gamepad_shutdown();
     backend_shutdown();
+}
+
+void platform_shutdown(void)
+{
+    if (g_depth > 0)
+    {
+        g_shutdown_wanted = true; /* from inside a hook or a frame: when that returns */
+        g_reap_due = true;
+    }
+    else
+        platform_shutdown_now();
+}
+
+bool core_platform_ready(void)
+{
+    return g_ready;
 }
 
 PlatformWindow *window_create(const WindowConfig *cfg)
 {
     if (!cfg)
         return NULL;
+    reap(); /* windows a hook asked to destroy, if no application code runs now */
     if (!g_ready)
     {
         /* the backends use their connection to the system, which is not there before platform_init succeeds */
@@ -552,6 +631,8 @@ PlatformWindow *window_create(const WindowConfig *cfg)
         free(w);
         return NULL;
     }
+    w->next = g_windows;
+    g_windows = w;
     return w;
 }
 
@@ -559,25 +640,46 @@ void window_destroy(PlatformWindow *w)
 {
     if (!w)
         return;
-    backend_destroy(w->b);
-    free(w);
+    PlatformWindow *known = g_windows;
+    while (known && known != w)
+        known = known->next;
+    if (!known || w->dead)
+        return; /* not a window of this process (already destroyed, or the platform shut down) */
+    if (g_depth > 0)
+    {
+        /* Called from a hook or a frame callback of this window or another: the backend is still using the window's
+           data. It closes from now on (a loop on window_should_close ends) and goes when the code that called returns. */
+        w->dead = true;
+        w->should_close = true;
+        g_reap_due = true;
+        return;
+    }
+    window_free(w);
 }
 
 bool window_should_close(PlatformWindow *w)
 {
+    if (!w)
+        return true;
     return w->should_close;
 }
 void window_set_should_close(PlatformWindow *w, bool v)
 {
+    if (!w)
+        return;
     w->should_close = v;
 }
 
 void window_set_user_ptr(PlatformWindow *w, void *ptr)
 {
+    if (!w)
+        return;
     w->user = ptr;
 }
 void *window_get_user_ptr(PlatformWindow *w)
 {
+    if (!w)
+        return NULL;
     return w->user;
 }
 
@@ -586,6 +688,10 @@ void *window_get_user_ptr(PlatformWindow *w)
 static void device_events(Core *core)
 {
     InputState *s = &core->in;
+    unsigned epoch = gamepad_internal_epoch();
+    if (epoch == s->dev_epoch)
+        return; /* no device came or went since this window looked: the common frame */
+    s->dev_epoch = epoch;
     for (int i = 0; i < GAMEPAD_MAX; i++)
     {
         unsigned now = gamepad_connected(i) ? gamepad_internal_generation(i) : 0;
@@ -624,6 +730,8 @@ static void device_events(Core *core)
 
 void window_begin_frame(PlatformWindow *w)
 {
+    if (!w)
+        return;
     InputState *s = &w->core.in;
     memcpy(s->key_prev, s->key_down, sizeof s->key_down);
     memcpy(s->mouse_prev, s->mouse_down, sizeof s->mouse_down);
@@ -646,6 +754,7 @@ void window_begin_frame(PlatformWindow *w)
     /* Before the new events: last frame's TAP turns into HOLD and a SWIPE ends, so
        a gesture born in this frame's events is still visible after this call. */
     gesture_update(&s->gesture, time_seconds());
+    g_depth++;
     backend_pump_events(w->b, &w->core);
 
     if (s->close_request)
@@ -655,20 +764,29 @@ void window_begin_frame(PlatformWindow *w)
     }
     if (s->exit_key && key_pressed(w, s->exit_key))
         window_set_should_close(w, true);
+    scope_leave();
 }
 
 void window_swap(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_swap(w->b);
 }
 
 void app_run(PlatformWindow *w, FrameCallback frame, void *user)
 {
+    if (!w || !frame)
+        return;
+    g_depth++; /* the loop and the frame callbacks: the window outlives a window_destroy made in them until this returns */
     backend_run(w->b, w, frame, user);
+    scope_leave();
 }
 
 bool poll_event(PlatformWindow *w, Event *out)
 {
+    if (!w)
+        return false;
     InputState *s = &w->core.in;
     if (s->fe_cursor >= s->fe_count)
         return false;
@@ -682,26 +800,36 @@ bool poll_event(PlatformWindow *w, Event *out)
 
 void window_make_current(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_make_current(w->b);
 }
 void window_make_current_on(PlatformWindow *target, PlatformWindow *context)
 {
+    if (!target || !context)
+        return;
     backend_make_current_on(target->b, context->b);
 }
 void window_set_event_hook(PlatformWindow *w, EventHook hook, void *user)
 {
+    if (!w)
+        return;
     w->core.hook = hook;
     w->core.hook_user = user;
 }
 
 void window_text_input_start(PlatformWindow *w)
 {
+    if (!w)
+        return;
     w->core.in.text_input_off = false;
     backend_set_text_input(w->b, true);
 }
 
 void window_text_input_stop(PlatformWindow *w)
 {
+    if (!w)
+        return;
     w->core.in.text_input_off = true;
     w->core.in.composition[0] = '\0';
     backend_set_text_input(w->b, false);
@@ -709,26 +837,36 @@ void window_text_input_stop(PlatformWindow *w)
 
 bool window_text_input_active(PlatformWindow *w)
 {
+    if (!w)
+        return false;
     return !w->core.in.text_input_off;
 }
 
 void window_set_text_input_rect(PlatformWindow *w, int x, int y, int width, int height)
 {
+    if (!w)
+        return;
     backend_set_text_input_rect(w->b, x, y, width, height);
 }
 
 const char *window_text_composition(PlatformWindow *w)
 {
+    if (!w)
+        return "";
     return w->core.in.composition;
 }
 
 void window_set_decorated(PlatformWindow *w, bool on)
 {
+    if (!w)
+        return;
     backend_set_decorated(w->b, on);
 }
 
 void window_set_hit_test(PlatformWindow *w, HitTestFunc fn, void *user)
 {
+    if (!w)
+        return;
     backend_set_hit_test(w->b, w, fn, user);
 }
 
@@ -740,45 +878,67 @@ PlatformCursor *cursor_create(const uint32_t *argb, int width, int height, int h
         error_set("invalid cursor image");
         return NULL;
     }
+    if (!g_ready)
+    {
+        error_set("the platform is not initialized (platform_init has not succeeded)");
+        return NULL;
+    }
     return backend_cursor_create(argb, width, height, hot_x, hot_y);
 }
 
 void cursor_destroy(PlatformCursor *cursor)
 {
-    if (cursor)
+    if (cursor && g_ready) /* after platform_shutdown the connection it belonged to is gone */
         backend_cursor_destroy(cursor);
 }
 
 void mouse_set_cursor_image(PlatformWindow *w, PlatformCursor *cursor)
 {
+    if (!w)
+        return;
     backend_set_cursor_image(w->b, cursor);
 }
 
 void window_set_live_callback(PlatformWindow *w, FrameCallback cb, void *user)
 {
+    if (!w)
+        return;
     backend_set_live_callback(w->b, w, cb, user);
 }
 
 bool mouse_capture(PlatformWindow *w, bool on)
 {
+    if (!w)
+        return false;
     return backend_mouse_capture(w->b, on);
 }
 
 void *window_native_handle(PlatformWindow *w, NativeHandleType type)
 {
-    return w ? backend_native_handle(w->b, type) : NULL;
+    if (!w)
+        return NULL;
+    return backend_native_handle(w->b, type);
 }
 
 void window_set_vsync(PlatformWindow *w, bool on)
 {
+    if (!w)
+        return;
     backend_set_vsync(w->b, on);
 }
 void *gl_proc_address(const char *name)
 {
+    if (!g_ready || !name)
+        return NULL;
     return backend_gl_proc_address(name);
 }
 GLWorker *gl_worker_create(PlatformWindow *w)
 {
+    if (!w)
+    {
+        error_set("no window (NULL)");
+        return NULL;
+    }
     return (GLWorker *)backend_gl_worker_create(w->b);
 }
 bool gl_worker_make_current(GLWorker *worker, bool current)
@@ -793,10 +953,17 @@ void gl_worker_destroy(GLWorker *worker)
 
 bool window_lock_pixels(PlatformWindow *w, Framebuffer *out)
 {
+    if (!w)
+    {
+        error_set("no window (NULL)");
+        return false;
+    }
     return backend_lock_pixels(w->b, out);
 }
 void window_present_pixels(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_present_pixels(w->b);
 }
 
@@ -806,39 +973,75 @@ void window_present_pixels(PlatformWindow *w)
 
 void window_get_size(PlatformWindow *w, int *width, int *height)
 {
+    if (!w)
+    {
+        if (width)
+            *width = 0;
+        if (height)
+            *height = 0;
+        return;
+    }
     backend_get_size(w->b, width, height);
 }
 void window_set_size(PlatformWindow *w, int width, int height)
 {
+    if (!w)
+        return;
     backend_set_size(w->b, width, height);
 }
 void window_get_framebuffer_size(PlatformWindow *w, int *width, int *height)
 {
+    if (!w)
+    {
+        if (width)
+            *width = 0;
+        if (height)
+            *height = 0;
+        return;
+    }
     backend_get_fb_size(w->b, width, height);
 }
 void window_get_position(PlatformWindow *w, int *x, int *y)
 {
+    if (!w)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        return;
+    }
     backend_get_pos(w->b, x, y);
 }
 void window_set_position(PlatformWindow *w, int x, int y)
 {
+    if (!w)
+        return;
     backend_set_pos(w->b, x, y);
 }
 void window_set_title(PlatformWindow *w, const char *title)
 {
+    if (!w)
+        return;
     backend_set_title(w->b, title);
 }
 void window_set_size_limits(PlatformWindow *w, int minw, int minh, int maxw, int maxh)
 {
+    if (!w)
+        return;
     backend_set_size_limits(w->b, minw, minh, maxw, maxh);
 }
 float window_content_scale(PlatformWindow *w)
 {
+    if (!w)
+        return 1.0f;
     return backend_content_scale(w->b);
 }
 
 void window_center_on_monitor(PlatformWindow *w, int monitor)
 {
+    if (!w)
+        return;
     MonitorInfo m;
     if (!monitor_get_info(monitor, &m))
         return;
@@ -849,6 +1052,8 @@ void window_center_on_monitor(PlatformWindow *w, int monitor)
 
 void window_set_monitor(PlatformWindow *w, int monitor)
 {
+    if (!w)
+        return;
     MonitorInfo m;
     if (!monitor_get_info(monitor, &m))
         return;
@@ -861,73 +1066,107 @@ void window_set_monitor(PlatformWindow *w, int monitor)
 
 void window_minimize(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_minimize(w->b);
 }
 void window_maximize(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_maximize(w->b);
 }
 void window_restore(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_restore(w->b);
 }
 void window_show(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_show(w->b);
 }
 void window_hide(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_hide(w->b);
 }
 void window_focus(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_focus(w->b);
 }
 void window_request_attention(PlatformWindow *w)
 {
+    if (!w)
+        return;
     backend_request_attention(w->b);
 }
 
 bool window_is_focused(PlatformWindow *w)
 {
+    if (!w)
+        return false;
     return backend_get_flag(w->b, WIN_FLAG_FOCUSED);
 }
 bool window_is_minimized(PlatformWindow *w)
 {
+    if (!w)
+        return false;
     return backend_get_flag(w->b, WIN_FLAG_MINIMIZED);
 }
 bool window_is_maximized(PlatformWindow *w)
 {
+    if (!w)
+        return false;
     return backend_get_flag(w->b, WIN_FLAG_MAXIMIZED);
 }
 bool window_is_visible(PlatformWindow *w)
 {
+    if (!w)
+        return false;
     return backend_get_flag(w->b, WIN_FLAG_VISIBLE);
 }
 bool window_is_hovered(PlatformWindow *w)
 {
+    if (!w)
+        return false;
     return backend_get_flag(w->b, WIN_FLAG_HOVERED);
 }
 
 void window_set_mode(PlatformWindow *w, WindowMode mode, int monitor)
 {
+    if (!w)
+        return;
     backend_set_mode(w->b, mode, monitor);
 }
 WindowMode window_get_mode(PlatformWindow *w)
 {
+    if (!w)
+        return WINDOW_WINDOWED;
     return backend_get_mode(w->b);
 }
 
 void window_set_icon(PlatformWindow *w, int width, int height, const uint8_t *rgba)
 {
+    if (!w)
+        return;
     backend_set_icon(w->b, width, height, rgba);
 }
 void window_set_opacity(PlatformWindow *w, float alpha)
 {
+    if (!w)
+        return;
     backend_set_opacity(w->b, alpha);
 }
 void window_set_always_on_top(PlatformWindow *w, bool on)
 {
+    if (!w)
+        return;
     backend_set_always_on_top(w->b, on);
 }
 
@@ -937,20 +1176,20 @@ void window_set_always_on_top(PlatformWindow *w, bool on)
 
 int monitor_count(void)
 {
-    return backend_monitor_count();
+    return g_ready ? backend_monitor_count() : 0;
 }
 bool monitor_get_info(int index, MonitorInfo *out)
 {
-    return backend_monitor_info(index, out);
+    return g_ready && out && backend_monitor_info(index, out);
 }
 
 int monitor_from_point(int x, int y)
 {
-    int n = backend_monitor_count();
+    int n = monitor_count();
     for (int i = 0; i < n; i++)
     {
         MonitorInfo m;
-        if (!backend_monitor_info(i, &m))
+        if (!monitor_get_info(i, &m))
             continue;
         if (x >= m.x && x < m.x + m.width && y >= m.y && y < m.y + m.height)
             return i;
@@ -961,7 +1200,7 @@ int monitor_from_point(int x, int y)
 bool mouse_global_position(int *x, int *y)
 {
     int px = 0, py = 0;
-    bool known = backend_mouse_global_position(&px, &py);
+    bool known = g_ready && backend_mouse_global_position(&px, &py);
     if (x)
         *x = known ? px : 0;
     if (y)
@@ -979,6 +1218,8 @@ int monitor_from_mouse(void)
 
 int monitor_from_window(PlatformWindow *w)
 {
+    if (!w)
+        return -1;
     int x, y, ww, wh;
     window_get_position(w, &x, &y);
     window_get_size(w, &ww, &wh);
@@ -992,6 +1233,8 @@ int monitor_from_window(PlatformWindow *w)
 
 int key_mods(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     const bool *k = w->core.in.key_down;
     int mods = 0;
     if (k[KEY_LEFT_SHIFT] || k[KEY_RIGHT_SHIFT])
@@ -1007,32 +1250,46 @@ int key_mods(PlatformWindow *w)
 
 bool key_down(PlatformWindow *w, int key)
 {
+    if (!w)
+        return false;
     return key > 0 && key < KEY_MAX && w->core.in.key_down[key];
 }
 bool key_up(PlatformWindow *w, int key)
 {
+    if (!w)
+        return false;
     return !key_down(w, key);
 }
 bool key_pressed(PlatformWindow *w, int key)
 {
+    if (!w)
+        return false;
     return key > 0 && key < KEY_MAX && w->core.in.key_down[key] && !w->core.in.key_prev[key];
 }
 bool key_released(PlatformWindow *w, int key)
 {
+    if (!w)
+        return false;
     return key > 0 && key < KEY_MAX && !w->core.in.key_down[key] && w->core.in.key_prev[key];
 }
 
 int key_get_pressed(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return keycode_pop(&w->core.in);
 }
 uint32_t char_get_pressed(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return char_pop(&w->core.in);
 }
 
 void key_set_exit(PlatformWindow *w, int key)
 {
+    if (!w)
+        return;
     w->core.in.exit_key = key;
 }
 
@@ -1042,33 +1299,53 @@ void key_set_exit(PlatformWindow *w, int key)
 
 bool mouse_button_down(PlatformWindow *w, int button)
 {
+    if (!w)
+        return false;
     return button >= 0 && button < MOUSE_BUTTON_MAX && w->core.in.mouse_down[button];
 }
 bool mouse_button_up(PlatformWindow *w, int button)
 {
+    if (!w)
+        return false;
     return !mouse_button_down(w, button);
 }
 bool mouse_button_pressed(PlatformWindow *w, int button)
 {
+    if (!w)
+        return false;
     return button >= 0 && button < MOUSE_BUTTON_MAX &&
            w->core.in.mouse_down[button] && !w->core.in.mouse_prev[button];
 }
 bool mouse_button_released(PlatformWindow *w, int button)
 {
+    if (!w)
+        return false;
     return button >= 0 && button < MOUSE_BUTTON_MAX &&
            !w->core.in.mouse_down[button] && w->core.in.mouse_prev[button];
 }
 
 int mouse_x(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return w->core.in.mouse_x;
 }
 int mouse_y(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return w->core.in.mouse_y;
 }
 void mouse_position(PlatformWindow *w, int *x, int *y)
 {
+    if (!w)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        return;
+    }
     if (x)
         *x = w->core.in.mouse_x;
     if (y)
@@ -1076,6 +1353,14 @@ void mouse_position(PlatformWindow *w, int *x, int *y)
 }
 void mouse_delta(PlatformWindow *w, int *dx, int *dy)
 {
+    if (!w)
+    {
+        if (dx)
+            *dx = 0;
+        if (dy)
+            *dy = 0;
+        return;
+    }
     if (dx)
         *dx = w->core.in.mouse_x - w->core.in.mouse_px;
     if (dy)
@@ -1083,10 +1368,20 @@ void mouse_delta(PlatformWindow *w, int *dx, int *dy)
 }
 float mouse_wheel(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return w->core.in.wheel_y;
 }
 void mouse_wheel_v(PlatformWindow *w, float *x, float *y)
 {
+    if (!w)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        return;
+    }
     if (x)
         *x = w->core.in.wheel_x;
     if (y)
@@ -1095,16 +1390,22 @@ void mouse_wheel_v(PlatformWindow *w, float *x, float *y)
 
 void mouse_set_position(PlatformWindow *w, int x, int y)
 {
+    if (!w)
+        return;
     w->core.in.mouse_x = x;
     w->core.in.mouse_y = y;
     backend_set_mouse_pos(w->b, x, y);
 }
 void mouse_set_cursor(PlatformWindow *w, int cursor)
 {
+    if (!w)
+        return;
     backend_set_cursor(w->b, cursor);
 }
 void mouse_set_mode(PlatformWindow *w, int mode)
 {
+    if (!w)
+        return;
     backend_set_mouse_mode(w->b, mode);
 }
 
@@ -1114,18 +1415,32 @@ void mouse_set_mode(PlatformWindow *w, int mode)
 
 int touch_count(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return w->core.in.touch_count;
 }
 int touch_x(PlatformWindow *w, int index)
 {
+    if (!w)
+        return 0;
     return (index >= 0 && index < w->core.in.touch_count) ? (int)w->core.in.touch[index].x : 0;
 }
 int touch_y(PlatformWindow *w, int index)
 {
+    if (!w)
+        return 0;
     return (index >= 0 && index < w->core.in.touch_count) ? (int)w->core.in.touch[index].y : 0;
 }
 void touch_position(PlatformWindow *w, int index, float *x, float *y)
 {
+    if (!w)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        return;
+    }
     if (index < 0 || index >= w->core.in.touch_count)
     {
         if (x)
@@ -1143,22 +1458,38 @@ void touch_position(PlatformWindow *w, int index, float *x, float *y)
 
 void gesture_set_enabled(PlatformWindow *w, unsigned flags)
 {
+    if (!w)
+        return;
     w->core.in.gesture.enabled = flags;
 }
 unsigned gesture_detected(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return gesture_state_detected(&w->core.in.gesture);
 }
 bool gesture_is_detected(PlatformWindow *w, unsigned gesture)
 {
+    if (!w)
+        return false;
     return gesture != GESTURE_NONE && gesture_detected(w) == gesture;
 }
 float gesture_hold_duration(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return gesture_state_hold_duration(&w->core.in.gesture, time_seconds());
 }
 void gesture_drag_vector(PlatformWindow *w, float *x, float *y)
 {
+    if (!w)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        return;
+    }
     if (x)
         *x = w->core.in.gesture.drag_vector.x;
     if (y)
@@ -1166,10 +1497,20 @@ void gesture_drag_vector(PlatformWindow *w, float *x, float *y)
 }
 float gesture_drag_angle(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return w->core.in.gesture.drag_angle;
 }
 void gesture_pinch_vector(PlatformWindow *w, float *x, float *y)
 {
+    if (!w)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        return;
+    }
     if (x)
         *x = w->core.in.gesture.pinch_vector.x;
     if (y)
@@ -1177,10 +1518,14 @@ void gesture_pinch_vector(PlatformWindow *w, float *x, float *y)
 }
 float gesture_pinch_angle(PlatformWindow *w)
 {
+    if (!w)
+        return 0;
     return w->core.in.gesture.pinch_angle;
 }
 void touch_set_mouse_emulation(PlatformWindow *w, bool on)
 {
+    if (!w)
+        return;
     InputState *s = &w->core.in;
     if (!on && s->mouse_touch_down)
     {
@@ -1192,6 +1537,8 @@ void touch_set_mouse_emulation(PlatformWindow *w, bool on)
 
 int touch_id(PlatformWindow *w, int index)
 {
+    if (!w)
+        return -1;
     return (index >= 0 && index < w->core.in.touch_count) ? w->core.in.touch[index].id : -1;
 }
 

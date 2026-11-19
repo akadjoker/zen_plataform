@@ -28,6 +28,7 @@ typedef struct
 
 static Joy g_joys[JOYSTICK_MAX];
 static unsigned g_joy_gen[JOYSTICK_MAX];
+static unsigned g_epoch; /* bumped by every connect, disconnect, init and shutdown */
 
 static bool valid_slot(int index)
 {
@@ -38,6 +39,7 @@ void gamepad_init(void)
 {
     memset(g_pads, 0, sizeof g_pads);
     memset(g_joys, 0, sizeof g_joys);
+    g_epoch++;
     gamepad_backend_init();
 }
 
@@ -51,6 +53,7 @@ void gamepad_shutdown(void)
     gamepad_backend_shutdown();
     memset(g_pads, 0, sizeof g_pads);
     memset(g_joys, 0, sizeof g_joys);
+    g_epoch++;
 }
 
 int gamepad_internal_connect(const char *name)
@@ -62,6 +65,7 @@ int gamepad_internal_connect(const char *name)
         memset(&g_pads[i], 0, sizeof g_pads[i]);
         g_pads[i].connected = true;
         g_pad_gen[i]++;
+        g_epoch++;
         strncpy(g_pads[i].name, name && name[0] ? name : "Gamepad", GAMEPAD_NAME_CAP - 1);
         return i;
     }
@@ -71,7 +75,10 @@ int gamepad_internal_connect(const char *name)
 void gamepad_internal_disconnect(int slot)
 {
     if (valid_slot(slot))
+    {
         memset(&g_pads[slot], 0, sizeof g_pads[slot]);
+        g_epoch++;
+    }
 }
 
 void gamepad_internal_set_button(int slot, int button, bool down)
@@ -115,6 +122,11 @@ bool gamepad_rumble(int index, float strong, float weak, uint32_t milliseconds)
     return gamepad_backend_rumble(index, strong, weak, milliseconds);
 }
 
+unsigned gamepad_internal_epoch(void)
+{
+    return g_epoch;
+}
+
 unsigned gamepad_internal_generation(int slot)
 {
     return valid_slot(slot) ? g_pad_gen[slot] : 0;
@@ -142,6 +154,7 @@ int joystick_internal_connect(const char *name, int axes, int buttons, int hats)
         j->hats = hats < 0 ? 0 : hats > JOYSTICK_MAX_HATS ? JOYSTICK_MAX_HATS : hats;
         strncpy(j->name, name && name[0] ? name : "Joystick", GAMEPAD_NAME_CAP - 1);
         g_joy_gen[i]++;
+        g_epoch++;
         return i;
     }
     return -1;
@@ -150,7 +163,10 @@ int joystick_internal_connect(const char *name, int axes, int buttons, int hats)
 void joystick_internal_disconnect(int slot)
 {
     if (valid_joy(slot))
+    {
         memset(&g_joys[slot], 0, sizeof g_joys[slot]);
+        g_epoch++;
+    }
 }
 
 void joystick_internal_set_axis(int slot, int axis, float value)

@@ -320,6 +320,23 @@ extern "C"
 #define log_warn(...) log_message(LOGLEVEL_WARN, __VA_ARGS__)
 #define log_error(...) log_message(LOGLEVEL_ERROR, __VA_ARGS__)
 
+    /* Window handles. A window is valid from window_create until window_destroy or platform_shutdown (which destroys the
+       windows still open); after that its pointer must not be used, as after free.
+       - A NULL window (window_create failed and was not checked) is harmless in every function that takes one: it returns
+         a neutral value and does nothing. Neutral means false, 0, NULL, "" for window_text_composition, zeros through
+         the out pointers (sizes, positions, mouse, touch, gesture vectors); the exceptions are window_should_close
+         (true: a window that does not exist is closed, so a loop on it ends), window_content_scale (1), touch_id and
+         monitor_from_window (-1). The dialogs take the window only as a parent and accept NULL for "no parent". The cost
+         is one predictable branch per call (tests/test_null_handles.c checks every function of this header).
+       - window_destroy on a window already destroyed, or after platform_shutdown, does nothing. In an event hook, a frame
+         callback of app_run, a hit test or a live callback it is deferred: the window closes at once (window_should_close
+         is true, so the loop ends) and is freed when window_begin_frame or app_run returns, whichever it was called
+         from; it can destroy its own window, another one, and create one. platform_shutdown called there waits the same
+         way.
+       - Without the platform (before platform_init succeeds, after platform_shutdown) window_create returns NULL, the
+         monitor, clipboard and cursor functions fail or answer empty (monitor_count 0, clipboard_get ""), and
+         platform_init / platform_shutdown called twice in a row do nothing the second time. Window functions are for
+         the thread that created the window. */
     PLATFORM_API PlatformWindow *window_create(const WindowConfig *cfg);
     PLATFORM_API void window_destroy(PlatformWindow *w);
 

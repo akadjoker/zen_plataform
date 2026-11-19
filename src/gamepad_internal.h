@@ -22,6 +22,9 @@ void joystick_internal_link_gamepad(int slot, int gamepad_slot);
 
 /* How many times a slot has been connected: a change means a different device, even
    when the slot was freed and taken again between two looks. */
+/* Changes whenever a gamepad or a joystick connects or disconnects: a window that has seen the current value has nothing
+   new to tell about devices (window_begin_frame skips its scan of the slots). */
+unsigned gamepad_internal_epoch(void);
 unsigned gamepad_internal_generation(int slot);
 unsigned joystick_internal_generation(int slot);
 

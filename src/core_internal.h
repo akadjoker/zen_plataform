@@ -65,6 +65,7 @@ typedef struct
     /* which gamepads and joysticks this window has been told about (and which device
        generation), so connect and disconnect events are per window */
     unsigned pad_seen[GAMEPAD_MAX], joy_seen[JOYSTICK_MAX]; /* 0 = not seen, else generation */
+    unsigned dev_epoch; /* gamepad_internal_epoch when the slots were last compared with those */
     /* Real touches on a desktop (XInput2, WM_TOUCH). The first finger also drives the
        mouse, and while any finger is down the system's own mouse events for it are
        dropped, so a touch is never delivered twice. */
@@ -94,7 +95,12 @@ struct PlatformWindow
     bool should_close;
     void *user;
     WindowConfig cfg;
+    PlatformWindow *next; /* the list of live windows (core.c) */
+    bool dead;            /* window_destroy was called from application code: freed when that returns */
 };
+
+/* Whether platform_init has succeeded and platform_shutdown has not run since. */
+bool core_platform_ready(void);
 
 /* Backend -> core. core_push_event fills the state arrays and the per-frame
    event list in one call; core_push_char only touches the text queue. */
