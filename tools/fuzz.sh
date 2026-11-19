@@ -5,6 +5,7 @@
 #   fuzz_images       png_decode (clipboard images) and framebuffer_load_bmp
 #   fuzz_paths        path_* and the fs_* / io_* calls on odd names (in a sandbox under /dev/shm)
 #   fuzz_x11_events   what another X client sends a window: ClientMessage, SelectionNotify, ConfigureNotify, XDND drops
+#   fuzz_clipboard_x11  the clipboard against a hostile owner of the selection (any property, INCR of any shape)
 # Needs clang with libFuzzer (compiler-rt) and, for fuzz_x11_events, xvfb-run (started through tools/xvfb_run.sh).
 # The start corpus is tests/fuzz/corpus/<name> (small files; every input that ever broke something is kept there, and
 # runs as an ordinary test: test_fuzz_*). A crash, hang or leak is written to $ZP_FUZZ_DIR/work_<target>/ as
@@ -22,7 +23,7 @@ DIR=${ZP_FUZZ_DIR:-${TMPDIR:-/tmp}/zp-fuzz-$(id -un)}
 SECS=${ZP_FUZZ_SECONDS:-120}
 SEED=${ZP_FUZZ_SEED:-1}
 JOBS=${ZP_JOBS:-$(($(nproc) / 2 > 0 ? $(nproc) / 2 : 1))}
-TARGETS=${*:-fuzz_images fuzz_paths fuzz_x11_events}
+TARGETS=${*:-fuzz_images fuzz_paths fuzz_x11_events fuzz_clipboard_x11}
 command -v clang > /dev/null || { echo "fuzz.sh: clang not found" >&2; exit 2; }
 SAN="-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined"
 CFLAGS="-g -O1 -fno-omit-frame-pointer -DPLATFORM_STATIC -I$ROOT/include -I$ROOT/src"
@@ -34,8 +35,8 @@ for t in $TARGETS; do
     case $t in
         fuzz_images) corpus=images; srcs="$ROOT/src/png.c $ROOT/src/image.c $ROOT/src/draw2d.c $FS"; run= ;;
         fuzz_paths) corpus=paths; srcs="$FS"; run= ;;
-        fuzz_x11_events)
-            corpus=x11_events; run=$ROOT/tools/xvfb_run.sh
+        fuzz_x11_events | fuzz_clipboard_x11)
+            corpus=x11_events; [ $t = fuzz_clipboard_x11 ] && corpus=clipboard_x11; run=$ROOT/tools/xvfb_run.sh
             # the library itself, with the sanitizers: the harness drives its public API
             if [ ! -f "$DIR/clang/libplatform.a" ] || [ -n "$(find "$ROOT/src" "$ROOT/include" -newer "$DIR/clang/libplatform.a" -name '*.[ch]' | head -n 1)" ]; then
                 CC=clang cmake -S "$ROOT" -B "$DIR/clang" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_BUILD_TESTS=OFF -DPLATFORM_BUILD_EXAMPLES=OFF \

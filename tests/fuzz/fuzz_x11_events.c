@@ -53,6 +53,19 @@ static Window window_of(Cur *c)
     uint8_t b = u8(c);
     return b < 200 ? g_target : b < 230 ? g_hw : (Window)u32(c);
 }
+/* XChangeProperty takes format 16 as an array of short and format 32 as an array of long (8 bytes each on this
+   machine): the bytes of the input are copied into such an array */
+static void set_prop(Display *d, Window w, Atom prop, Atom type, int fmt, const uint8_t *bytes, size_t len)
+{
+    size_t unit = (size_t)fmt / 8, n = len / unit;
+    size_t width = fmt == 32 ? sizeof(long) : unit;
+    uint8_t *mem = calloc(n * width + 8, 1);
+    for (size_t i = 0; i < n; i++)
+        memcpy(mem + i * width, bytes + i * unit, unit);
+    XChangeProperty(d, w, prop, type, fmt, PropModeReplace, mem, (int)n);
+    free(mem);
+}
+
 static int error_handler(Display *d, XErrorEvent *e)
 {
     (void)d, (void)e;
@@ -118,8 +131,7 @@ static void serve(Cur *c)
                 memcpy(buf + k * len, buf, len);
             int fmt = (mode >> 3) % 4 == 0 ? 16 : (mode >> 3) % 4 == 1 ? 32 : 8;
             Atom type = (mode >> 5) % 2 ? A[22] : atom(c);
-            size_t units = len * reps / (size_t)(fmt / 8);
-            XChangeProperty(g_hd, r->requestor, r->property, type, fmt, PropModeReplace, buf, (int)units);
+            set_prop(g_hd, r->requestor, r->property, type, fmt, buf, len * reps);
             free(buf);
         }
         XSendEvent(g_hd, r->requestor, False, 0, &n);
@@ -210,7 +222,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             int fmt = (u8(c) % 3 + 1) * 8 / (u8(c) % 2 + 1);
             if (fmt != 8 && fmt != 16 && fmt != 32)
                 fmt = 8;
-            XChangeProperty(g_hd, g_target, atom(c), atom(c), fmt, PropModeReplace, buf, (int)(len / (size_t)(fmt / 8)));
+            Atom prop = atom(c), type = atom(c);
+            set_prop(g_hd, g_target, prop, type, fmt, buf, len);
             free(buf);
             break;
         }

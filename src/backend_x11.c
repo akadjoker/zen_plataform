@@ -73,6 +73,10 @@ typedef int (*glXSwapIntervalSGIProc)(int);
 #define CLIP_TIMEOUT_MS 1000        /* wait for another client, per step */
 #define CLIP_DEAD_MS 10000          /* how long an owner that did not answer is not asked again */
 #define CLIP_READ_LIMIT (512u << 20) /* refuse pastes larger than this */
+/* An INCR transfer may last 10 s and 4 ms for every KB that has arrived (a rate of 256 KB/s is enough to keep it going): an
+   owner that sends one byte every 900 ms never trips the one-second wait of each step, and used to hold the program for as
+   long as it liked. */
+#define CLIP_INCR_BASE_MS 10000
 
 typedef struct
 {
@@ -3318,8 +3322,16 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
     size_t have = 0;
     if (!all)
         return false;
+    const long incr_start = clip_now_ms();
     for (;;)
     {
+        if (clip_now_ms() - incr_start > CLIP_INCR_BASE_MS + (long)(have / 256))
+        {
+            free(all);
+            g.clip_dead_owner = owner; /* it is not asked again for a while: not every paste costs the whole wait */
+            g.clip_dead_until = clip_now_ms() + CLIP_DEAD_MS;
+            return false;
+        }
         do
         {
             if (!clip_wait_event(PropertyNotify, &ev))

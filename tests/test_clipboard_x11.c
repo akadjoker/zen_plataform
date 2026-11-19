@@ -412,6 +412,88 @@ static void test_dead_owner(void)
    paste is served by the manager, which keeps only some types. That is not a
    failure of ours: when the reader fails and we find we no longer own the content,
    set it again and retry. A bare X server, as in CI, passes on the first attempt. */
+/* An owner that starts an INCR transfer and then sends one byte every 200 ms for ever: no single step times out, so the
+   program used to wait as long as the owner liked. It gives up after about ten seconds (CLIP_INCR_BASE_MS). */
+static void run_dripping_owner(int ready_fd)
+{
+    Display *d = XOpenDisplay(NULL);
+    if (!d)
+        _exit(1);
+    /* the first window id of a new client is the one the client before it had, if that one is gone: the program remembers
+       the dead owner of the test before this one by window id, so this one's window is the second */
+    XCreateSimpleWindow(d, DefaultRootWindow(d), 0, 0, 10, 10, 0, 0, 0);
+    Window w = XCreateSimpleWindow(d, DefaultRootWindow(d), 0, 0, 10, 10, 0, 0, 0);
+    Atom clip = XInternAtom(d, "CLIPBOARD", False), incr = XInternAtom(d, "INCR", False);
+    XSetSelectionOwner(d, clip, w, CurrentTime);
+    XFlush(d);
+    char c = 'r';
+    if (write(ready_fd, &c, 1) != 1)
+        _exit(1);
+    close(ready_fd);
+    Window req = None;
+    Atom prop = None;
+    for (;;)
+    {
+        XEvent ev;
+        XNextEvent(d, &ev);
+        if (ev.type == SelectionRequest)
+        {
+            XSelectionRequestEvent *r = &ev.xselectionrequest;
+            long total = 1L << 20;
+            XEvent n;
+            memset(&n, 0, sizeof n);
+            XSelectInput(d, r->requestor, PropertyChangeMask);
+            XChangeProperty(d, r->requestor, r->property, incr, 32, PropModeReplace, (unsigned char *)&total, 1);
+            n.xselection.type = SelectionNotify;
+            n.xselection.requestor = r->requestor;
+            n.xselection.selection = r->selection;
+            n.xselection.target = r->target;
+            n.xselection.property = r->property;
+            n.xselection.time = r->time;
+            XSendEvent(d, r->requestor, False, 0, &n);
+            req = r->requestor;
+            prop = r->property;
+            XFlush(d);
+        }
+        else if (ev.type == PropertyNotify && req && ev.xproperty.window == req && ev.xproperty.atom == prop &&
+                 ev.xproperty.state == PropertyDelete)
+        {
+            usleep(200000);
+            XChangeProperty(d, req, prop, XA_STRING, 8, PropModeReplace, (const unsigned char *)"x", 1);
+            XFlush(d);
+        }
+    }
+}
+
+static void test_dripping_incr_owner(void)
+{
+    int fds[2];
+    CHECK(pipe(fds) == 0);
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        close(fds[0]);
+        run_dripping_owner(fds[1]);
+    }
+    close(fds[1]);
+    char c;
+    CHECK(read(fds[0], &c, 1) == 1);
+    close(fds[0]);
+    double t0 = now_s();
+    size_t n = 7;
+    void *d = clipboard_get_data(CLIPBOARD_TEXT, &n);
+    double took = now_s() - t0;
+    printf("  a paste from an owner that drips for ever: gave up after %.1f s\n", took);
+    CHECK(d == NULL && n == 0);
+    CHECK(took > 5.0 && took < 20.0);
+    fs_free(d);
+    double t1 = now_s();
+    CHECK(clipboard_get_data(CLIPBOARD_TEXT, &n) == NULL); /* and is not asked again at once */
+    CHECK(now_s() - t1 < 2.0);
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+}
+
 static bool read_back_with_reader(PlatformWindow *w, const ClipboardItem *items, int count, int *attempts)
 {
     for (*attempts = 1; *attempts <= 5; (*attempts)++)
@@ -482,6 +564,7 @@ int main(void)
     }
     test_foreign_owner();
     test_dead_owner();
+    test_dripping_incr_owner();
     test_we_own();
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);
