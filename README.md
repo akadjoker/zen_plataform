@@ -108,6 +108,50 @@ window_destroy(w);
 platform_shutdown();
 ```
 
+### Sleeping until something happens (0 % CPU when idle)
+
+`app_run` and a loop of `window_begin_frame` calls run flat out: a window with no vsync spins a core. A program that draws
+only when something changed sleeps in `platform_wait_events` between frames:
+
+```c
+while (!window_should_close(w))
+{
+    platform_wait_events(-1);   // sleeps until an event, a platform_wake, a gamepad, or the timeout (seconds; -1: none)
+    window_begin_frame(w);      // the events the wait woke for are here: the wait takes nothing
+    handle_input(w);
+    if (dirty) draw(w);
+}
+
+// a worker thread, a timer or a signal handler finishes something: set the data, then
+platform_wake();                // any thread, any time; a wake that finds no wait ends the next one at once, once
+```
+
+`platform_wait_events` returns true when something is waiting for the next frame (events, a wake, a gamepad) and false when
+the time ran out, a signal interrupted it (EINTR: look at your flag) or the backend has a deadline of its own that only
+`window_begin_frame` serves (a key held, the repeats the Wayland backend makes itself, a drop whose source never answers):
+call `window_begin_frame` after every return and loop, that is the whole contract. A wait with events already pending
+returns at once. The click that was released in the frame of its press and the tap that turns into a hold count as pending
+(the state that only the next `window_begin_frame` changes). Gamepads wake the wait on Linux (their descriptors are watched);
+on Windows XInput cannot be waited on, so a plugged pad limits the sleep to 8 ms. On the web it returns at once (the browser
+calls the frame); on Android it sleeps in the looper. `platform_wake` costs one `write(2)` and is safe in a signal handler
+once the platform is up.
+
+For programs that draw on demand `app_run_events` is `app_run` with this built in: the frame callback runs when events
+arrived, `platform_wake` was called, the frame asked for another with `app_request_frame()` (an animation), or the time given
+to `app_request_frame_at(time_seconds() + 0.5)` (a blinking caret) has come; the first frame always runs.
+
+```c
+static void frame(PlatformWindow *w, void *user)
+{
+    draw(w, user);
+    if (animating(user))        app_request_frame();                              // again, now
+    else if (caret_blinks(user)) app_request_frame_at(time_seconds() + 0.5);       // or at a deadline
+}
+app_run_events(w, frame, &state);   // idle: the process sleeps in poll(2)
+```
+
+Measured against GLFW and SDL2 in `docs/COMPARACAO_CORE.md` (instructions per wake and wait cycle, wake latency, idle CPU).
+
 ### Input state (polled)
 
 ```c
