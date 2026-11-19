@@ -106,3 +106,42 @@ repor antes de abrir um grupo, uma janela ou uma lista, senao estes cortam-se pe
   um grupo nao apanha o rato" nao existe. Os exemplos `demo_widgets_pixel` e `demo_dock_pixel`, guiados com cliques por um Xvfb
   privado (menus, combo, lista, arrastar janelas), ficam pixel a pixel iguais aos da main, com a unica excepcao do contorno do grupo
   do dialogo de ficheiros.
+
+## Nucleo: o que a ronda de bordas e da comparacao com GLFW e SDL deixou (ramo core-edge-bench)
+
+Os defeitos que se provaram (GLX carregado sem janela GL, `window_set_vsync` numa janela de pixeis, `window_set_size` com 0 ou mais de
+65535, janela que fica no ecra depois de `window_destroy`) estao corrigidos com `tests/test_core_edge_x11.c`; os numeros estao em
+`docs/COMPARACAO_CORE.md`. O que fica:
+
+- **Ponteiro `NULL` de janela.** So `window_create(NULL)` e `window_destroy(NULL)` o aceitam; `window_should_close(NULL)`,
+  `key_down(NULL, ...)`, `mouse_x(NULL)` e as outras desreferenciam-no e rebentam (o GLFW tambem, com uma assercao; o SDL verifica). Nao se
+  mexeu: uma comparacao por chamada nas funcoes de estado que se chamam centenas de vezes por frame e um contrato por decidir ("NULL e erro
+  do programa", a documentar em `platform.h`, ou "NULL e inofensivo"). Provar e trivial (uma chamada), por isso nao se pos teste: o teste
+  seria um crash.
+- **Janela destruida dentro do gancho de eventos da propria janela** (`window_set_event_hook`). O gancho corre dentro de `core_push_event`,
+  que depois de o gancho voltar ainda usa o `Core` (`frame_event_add`, o `switch` do tipo); destruir a janela no gancho liberta esse `Core`.
+  `platform.h` so proibe `window_begin_frame` e `poll_event` no gancho. O teste `test_core_edge_x11` (secao "destroy during events") destroi a
+  janela de dentro do seu proprio ciclo `poll_event` (que para a seguir), que e seguro; o do gancho nao se escreveu por ser um uso depois de
+  libertar. A correccao seria um contador de "dentro do bombeamento" em `PlatformWindow` e libertar quando o bombeamento acaba, ou escrever a
+  proibicao no cabecalho.
+- **Titulo maior do que um pedido do servidor.** Um servidor sem BIG-REQUESTS aceita 256 KB num pedido; `XChangeProperty` com mais da
+  `BadLength` e o Xlib acaba o processo. O Xvfb daqui tem BIG-REQUESTS (um titulo de 8 MB passa, secao "titles"), por isso nao se
+  provou. Cortar o titulo (por exemplo a 32 KB, numa fronteira UTF-8) em `set_title` resolveria.
+- **A lista de eventos da frame (256) perde o que chega depois de cheia** (`FRAME_EVENT_MAX`): o estado (`key_down`, botoes, roda,
+  posicao) e as filas de teclas (15) e de texto (31) ficam exactos, a lista fica com os primeiros 256 e so deixa entrar, cheia, um
+  evento de ponteiro, tamanho ou posicao ao tirar outro destes. Um programa que siga so o fluxo de eventos (um editor de texto) e passe
+  mais de 256 eventos numa frame perde as teclas do fim, e as filas de teclas e de texto enchem muito antes. Esta documentado e fixado
+  em `tests/test_core_edge.c`; nao se mudou porque 256 eventos numa frame ja sao seis segundos de escrita a 40 teclas por segundo.
+- **O metodo de entrada abre-se no arranque e faz o fallback.** `backend_init` chama `XOpenIM`; com `XMODIFIERS=@im=ibus` e o ibus em
+  baixo (o Xvfb, uma sessao sem o servico) falha e repete com `@im=none`, que e o metodo de entrada interno do Xlib e le a tabela de compose
+  (47 M de instrucoes, 10 a 30 ms no arranque). O GLFW e o SDL, na mesma situacao, ficam sem metodo de entrada (sem teclas mortas) e nao
+  pagam. Quando o servidor do metodo esta de pe, o `XOpenIM` e barato. Adiar o `XOpenIM` para a primeira janela nao poupa nada a um
+  programa que abre uma; adia-lo para a primeira tecla perde a primeira tecla morta (o filtro tem de existir antes de ela chegar). Nao se
+  mexeu.
+- **Um `XCreateIC` por janela e metade de criar e destruir uma janela** (cerca de 56 mil das 111 mil instrucoes), a funcao do Xlib que
+  prepara o contexto de entrada com a tabela de compose. E o preco das teclas mortas desde a primeira tecla; criar o contexto so quando
+  a janela recebe o foco (o `FocusIn`) pouparia as janelas que nunca o tem (um dialogo que se abre e fecha), com o risco de ainda nao existir
+  quando chega a primeira tecla de uma janela que ja tinha o foco do servidor (a de um servidor sem gestor de janelas).
+- **Teclas: `XLookupKeysym` por evento.** 580 instrucoes por tecla (da ordem de 15 % do caminho de uma tecla); uma tabela
+  keycode -> tecla poupava-as, mas tem de se invalidar com `MappingNotify` e `XkbMapNotify` (o Xlib actualiza o seu mapa sozinho com o XKB;
+  a zen_platform nao escolhe esses eventos), por isso nao se fez sem um teste que mude o teclado a meio.

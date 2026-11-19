@@ -74,6 +74,7 @@ version in `release_version`; the release is created on the chosen commit.
 | `-DPLATFORM_USE_FAKE=ON` | OFF | Use fake/headless backend |
 | `-DPLATFORM_LINUX_BACKEND=wayland` | x11 | Window system on Linux: `x11` or `wayland` |
 | `-DPLATFORM_SANITIZE=ON` | OFF | Enable ASan + UBSan |
+| `-DPLATFORM_BUILD_COMPARE=ON` | OFF | Build the GLFW / SDL2 comparison programs of `bench/compare` (X11 only; they need those libraries); see `docs/COMPARACAO_CORE.md` and `tools/bench_compare.sh` |
 
 ### Platforms
 
