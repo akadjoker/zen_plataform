@@ -483,7 +483,8 @@ static void test_group_flag(void)
     CHECK(a > 0 && finished(a));
     CHECK(!find_process((pid_t)a)->group); /* the leader was alone */
 
-    const char *file = "process_slots_member.pid";
+    char file[64];
+    snprintf(file, sizeof file, "process_slots_member_%d.pid", (int)getpid()); /* runs may overlap in one folder */
     remove(file);
     char script[128];
     snprintf(script, sizeof script, "sleep 60 & echo $! > %s; exit 0", file);
