@@ -107,40 +107,52 @@ repor antes de abrir um grupo, uma janela ou uma lista, senao estes cortam-se pe
   privado (menus, combo, lista, arrastar janelas), ficam pixel a pixel iguais aos da main, com a unica excepcao do contorno do grupo
   do dialogo de ficheiros.
 
-## Nucleo: o que as duas rondas de bordas e da comparacao com GLFW e SDL deixaram (ramos core-edge-bench e core-round2)
+## Nucleo: o que as tres rondas de bordas e da comparacao com GLFW e SDL deixaram (ramos core-edge-bench, core-round2 e core-round3)
 
 Fechado e retirado desta lista (provas nos testes e nas mensagens dos commits; `docs/COMPARACAO_CORE.md` tem os numeros): o GLX
 tocado no `platform_init`, `window_set_vsync` numa janela de pixeis, tamanhos de janela fora do que o protocolo leva, a janela que
 ficava no ecra depois de `window_destroy`, o ponteiro de janela `NULL` (contrato em `platform.h`, `tests/test_null_handles.c`), a
-destruicao de uma janela dentro do gancho de eventos, do teste de acerto ou da frame do `app_run`, o titulo acima do pedido
-maximo do servidor, a tabela de teclas, o `XOpenIM` com o servidor de metodo parado, e o que os fuzzers encontraram
-(`tests/fuzz`, `tools/fuzz.sh`). O que fica:
+destruicao de uma janela dentro do gancho de eventos, do teste de acerto ou da frame do `app_run` (agora tambem no web, onde cada
+frame do navegador e um ambito, no Wayland dentro da espera e do `window_swap`, e no Windows dentro do teste de acerto e da chamada
+de tempo real), o titulo acima do pedido maximo do servidor, a tabela de teclas, o `XOpenIM` com o servidor de metodo parado e com
+`XMODIFIERS` vazio (abre-se na primeira tecla), a copia do `stb_image` da zen_ui, o KeyPress de keycode 0 de outro cliente (teste
+dirigido que nao depende do sanitizador), o `key_mods` que ia ao servidor em cada chamada, a espera por eventos que nao havia
+(`platform_wait_events`, `platform_wake`, `app_run_events`), e o que os fuzzers encontraram (`tests/fuzz`, `tools/fuzz.sh`). O que fica:
 
-- **O metodo de entrada interno do Xlib (a tabela de compose) paga-se no arranque quando `XMODIFIERS` esta vazio e nao ha servidor de
-  metodo, e na primeira tecla quando `XMODIFIERS` aponta para um servidor que nao corre.** Com o servidor parado o arranque custa 5,0 M
-  de instrucoes (era 52,5 M; GLFW 13,9 M) e a primeira tecla, de qualquer janela, 47,6 M (10 a 30 ms, uma vez): o custo mudou de sitio,
-  nao desapareceu. Um jogo que nao leia teclas nao o paga; um que as leia tem um soluco de uma ou duas frames na primeira. Sem
-  `XMODIFIERS` a biblioteca continua a abrir o metodo no arranque (53 M, igual ao GLFW e ao SDL2): o `XOpenIM` e quem decide se ha
-  servidor e nao se pode pedir "so se houver servidor". Faltava ler a propriedade `XIM_SERVERS` da raiz e o dono de `@server=<nome>` (tres
-  idas ao servidor) para saber se vale a pena abrir; nao se fez porque duplica a logica do Xlib e um servidor que se registe de outra
-  forma ficava sem metodo de entrada.
-- **Um `XCreateIC` por janela e metade de criar e destruir uma janela** (cerca de 56 mil das 111 mil instrucoes), a funcao do Xlib que
-  prepara o contexto de entrada com a tabela de compose. E o preco das teclas mortas desde a primeira tecla. Com a abertura tardia
-  do metodo ja nao se paga antes da primeira tecla quando o servidor esta parado; com o metodo aberto no arranque continua a pagar-se
-  por janela. Criar o contexto so no `FocusIn` poupava as janelas que nunca o tem, com o risco de ainda nao existir quando chega a
-  primeira tecla de uma janela com o foco do servidor.
+- **A espera por eventos nao foi medida em Wayland contra o GLFW e o SDL2, nem corrida no Windows, no Android nem no web.** X11 (Xvfb) e
+  Wayland (o compositor de teste, em-processo) correm os mesmos testes (`tests/wait_common.h`); o fake corre-os sob o TSan. O Windows
+  (`MsgWaitForMultipleObjectsEx`) compila com o MinGW e nunca correu; o Android (`ALooper_pollOnce`) nao se compilou (sem NDK) e o corpo
+  foi verificado contra declaracoes das tres funcoes; o web devolve logo. Para fechar: uma maquina Windows, o NDK e o Emscripten.
+- **O que a espera nao espera, por escolha ou porque nao da** (`platform.h` diz-o): um servidor de metodo de entrada que fale por um
+  socket proprio e nao pela ligacao X (raro; o GLFW e o SDL ignoram-no tambem); outro fio do programa que leia a ligacao X por conta
+  propria (um driver GL ou Vulkan com o xcb) e deixe eventos numa fila com o socket calado (o `backend_gl_worker_*` acorda a espera
+  depois de cada chamada sua; para o resto a aplicacao chama `platform_wake` ou espera com tempo); o XInput e o winmm (acorda-se a cada
+  8 ms com um comando ligado e a cada segundo sem nenhum); e um comando de jogo que mande eventos sem parar (um joystick com ruido no
+  eixo) acorda a espera sem parar: nao ha como ligar os comandos sem os ler.
+- **A espera acorda a cada 0,1 s enquanto uma tecla esta premida numa janela com o foco** (a verificacao do `sync_stuck_keys`, um
+  `XQueryKeymap` e um `XkbGetState`, para o caso de o servidor nunca ter mandado a libertacao). Um evento nao a substitui (e o evento que
+  se perdeu); o que a evitaria era confiar que o servidor manda sempre a libertacao, o que o codigo ja deixou de fazer por causa de
+  gestores de janelas e metodos de entrada que a engolem.
+- **O `window_begin_frame` le o descritor do inotify dos comandos em cada volta** (um `read` que da `EAGAIN`: uma chamada ao sistema por
+  frame, sem custo medido em instrucoes). Com a espera, a leitura so seria precisa depois de o `poll` o dar pronto; nao se mexeu.
+- **O metodo de entrada interno do Xlib (a tabela de compose) paga-se na primeira tecla** (47,6 M de instrucoes, 10 a 30 ms, uma vez)
+  quando `XMODIFIERS` esta vazio ou aponta para um servidor que nao corre; o arranque custa 5,0 M (era 52,8 M) e uma janela criada e
+  destruida 66,6 k (era 109,3 k). Um programa que nao leia teclas nao o paga; um que as leia tem um soluco de uma ou duas frames na
+  primeira. O custo por tecla depois disso e o mesmo (3352 contra 3351 instrucoes). O `XCreateIC` por janela custa o que custava, agora
+  na primeira tecla.
 - **A lista de eventos da frame (256) perde o que chega depois de cheia** (`FRAME_EVENT_MAX`): o estado (`key_down`, botoes, roda,
   posicao) e as filas de teclas (15) e de texto (31) ficam exactos, a lista fica com os primeiros 256 e so deixa entrar, cheia, um
   evento de ponteiro, tamanho ou posicao ao tirar outro destes. Um programa que siga so o fluxo de eventos (um editor de texto) e passe
   mais de 256 eventos numa frame perde as teclas do fim. Esta documentado e fixado em `tests/test_core_edge.c`.
-- **Destruir a janela dentro de um gancho: so se provou no X11 e no Wayland.** A destruicao fica adiada ate `window_begin_frame` ou
-  `app_run` voltar (`g_depth` em `core.c`); o ponteiro da janela deixa de valer nessa altura, por isso um programa que destrua a sua
-  janela no gancho e depois chame `poll_event` na mesma frame le memoria libertada (o teste do Wayland tem de ter cuidado com isso).
-  No Windows o gancho e a chamada de volta de "tempo real" correm dentro do ciclo do sistema, fora destes dois pontos: a destruicao
-  fica para o proximo `window_begin_frame`, `window_create` ou `platform_shutdown`; nao se correu (sem wine). No web e no Android o
-  `app_run` volta logo e as frames correm depois, fora do ambito: ai um `window_destroy` dentro da frame nao fica adiado.
-- **Windows: so se compila.** Tudo o que mudou em `core.c`, `clipboard.c`, `png.c` e `gamepad.c` compila no MinGW sem avisos
-  (`tools/check.sh mingw`); o que e do X11 e do Wayland nao se compilou no Windows e o resto nao se correu (nao ha wine aqui).
+- **Destruir a janela num gancho no Windows, no web e no Android: so se provou por leitura (e no fake, a sequencia do ambito).** O
+  teste de acerto e a chamada de tempo real do Windows correm entre `core_scope_enter` e `core_scope_leave` (`tests/test_win32_review.c`,
+  compilado, nunca corrido); o web abre um ambito por frame (`main_tick`, nao compilado: sem Emscripten); o Android corre o mesmo codigo
+  da secretaria.
+- **Windows: so se compila, e agora com um teste por cada correccao da leitura** (`tests/test_win32_review.c`: o teste de acerto e a
+  chamada de tempo real que destroem a janela, tamanhos e posicoes de INT_MAX, o vsync de uma janela de pixeis, os caminhos de um
+  arrasto que viviam menos do que o evento, um HDROP que nao e um, a area de transferencia com texto sem NUL, um DIB maior do que o
+  bloco e uma lista de ficheiros que nao acaba). Nenhum se correu: sem Windows nem wine. O IME (`imm_composition`) so se corrigiu pela
+  documentacao do `ImmGetCompositionString`, sem teste (precisava de um IME). Falta correr o ficheiro numa maquina Windows.
 - **O dono morto do clipboard lembra-se pelo id da janela.** Um cliente novo pode receber o id de janela de um cliente que morreu
   (o servidor reaproveita a base dos ids); se o anterior estava marcado como morto, os pedidos ao novo falham durante 10 s. Um dono
   parado de verdade ainda tem os seus ids e o servidor larga a seleccao quando o cliente morre, por isso nao se viu fora de um teste
@@ -148,11 +160,19 @@ maximo do servidor, a tabela de teclas, o `XOpenIM` com o servidor de metodo par
 - **Wayland: nao se mediu contra o GLFW e o SDL2.** O GLFW 3.3.10 do pacote Ubuntu so tem X11 e nao ha compositor sem janela (o weston
   nao esta instalado); o SDL2 em Wayland nao se tentou sem um. As seccoes do X11 correm no Wayland contra o compositor de teste
   (`tests/test_core_edge_wayland.c`), que nao tem dispositivo de dados nem o resto do que um compositor a serio tem: o clipboard do
-  Wayland, o arrastar e largar e as decoracoes do lado do compositor continuam sem teste de bordas.
-- **Os fuzzers correram minutos, nao horas.** `fuzz_images` (PNG e BMP), `fuzz_paths`, `fuzz_x11_events` e `fuzz_clipboard_x11` correram de
-  100 a 150 s cada, com semente fixa, depois de corrigidos os defeitos que acharam; o X11 de baixo nivel (XInput2, o metodo de entrada
-  de um servidor ibus), o Wayland (o que um compositor hostil manda), o arrastar e largar fora do X11 e a copia do `stb_image` do `zen_ui`
-  (fora do ambito, e com os mesmos problemas do PNG que se corrigiram em `png.c`) nao tem fuzzer. Para os fechar: correr
-  `tools/fuzz.sh` com `ZP_FUZZ_SECONDS` de horas, e um alvo por protocolo que falta.
+  Wayland, o arrastar e largar e as decoracoes do lado do compositor continuam sem teste de bordas. Mil `platform_init` /
+  `platform_shutdown` demoram 17 s a 70 s (compilar o keymap do xkbcommon em cada um).
+- **Os fuzzers correram 10 minutos cada, com semente fixa, nao horas.** `fuzz_images` (PNG e BMP, e a copia do stb da zen_ui),
+  `fuzz_paths`, `fuzz_x11_events`, `fuzz_clipboard_x11`, `fuzz_touch` (o que o XInput 2, o WM_TOUCH e os backends tacteis entregam ao
+  nucleo) e `fuzz_wayland` (um compositor hostil). Os eventos XInput 2 em si nao se alcancam por outro cliente (o `XSendEvent` recusa
+  eventos genericos e o Xvfb nao tem dispositivo tactil): so um servidor hostil os manda, e para isso faltava um servidor X falso a
+  falar o protocolo; o `fuzz_wayland` manda mensagens legais de significado absurdo, porque a libwayland do cliente larga a ligacao
+  que ouve ou manda uma mal formada. Faltam o arrastar e largar fora do X11, o ibus a falar com a biblioteca com bytes de
+  fuzzer, e correr tudo `ZP_FUZZ_SECONDS` de horas.
+- **Em `libX11` a recuperacao de um erro de E/S (o servidor morto) e acusada pelo TSan** (`unlock of an unlocked mutex` dentro do
+  `XPending` da ligacao partida): a seccao "the server goes away while waiting" de `tests/test_wait_x11.c` salta-se sob o TSan; corre
+  nas compilacoes Release e ASan.
+- **`platform_wake` depois de um `fork`**: o filho herda o descritor e acorda o pai. Um programa que faca `fork` sem `exec` e chame
+  `platform_wake` no filho vai acordar a espera do pai; nao se tratou (`pthread_atfork`).
 - **`process_spawn` apos `fork` usa `fprintf`.** Nao se reproduziu um bloqueio com o lock do `stderr` tomado por outro fio (o glibc 2.39
   reinicia os locks do stdio no filho); com outra libc podia haver. Trocar o `fprintf` por um `write` e trivial; nao se fez sem prova.
