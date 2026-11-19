@@ -5,13 +5,14 @@ O que se compara e o nucleo (janela, teclado, rato, eventos, tempo) do backend X
 `bench_sdl2.c`), todas a correr no mesmo Xvfb invisivel. Repete-se com `tools/bench_compare.sh` (mais abaixo); os rotulos das tabelas
 vem do script e estao em ingles. O SDL3 nao esta instalado nem em pacote nesta maquina e nao entrou.
 
-Em resumo (numeros nas tabelas): em instrucoes, esperas ao servidor, memoria, poll parado, ciclo de janela e movimentos do rato a
-zen_platform ganha ou empata com o GLFW e o SDL2. Perde em tres sitios, explicados em "Onde perde": o arranque quando o servidor de metodo
-de entrada configurado nao esta la (faz mais: tem teclas mortas, e o GLFW e o SDL ficam sem metodo de entrada), uma tecla por evento
-(16 a 20 % mais instrucoes do que o GLFW, o SDL fica a meio) e a biblioteca partilhada (340 kB contra 276 kB do GLFW; o programa minimo
-ligado em estatico fica em 126 kB). Antes deste ramo perdia tambem, e muito, o arranque sem GL (133 M de instrucoes; agora 53 M, e 10 M sem compose), a
-memoria (59 MB de RSS sem abrir GL; agora 5,5 MB, o GLFW tem 5,4) e as esperas ao servidor (74; agora 21, o GLFW tem 78); ver "Antes e
-depois".
+Em resumo (numeros nas tabelas, medidos no fim da segunda ronda, ramo `core-round2`): em instrucoes, esperas ao servidor, memoria, poll
+parado, ciclo de janela, movimentos do rato e teclas a zen_platform ganha ou empata com o GLFW e o SDL2, e o arranque com o servidor de
+metodo de entrada parado (4,99 M de instrucoes contra 13,89 M do GLFW) deixou de ser uma perda. Perde em dois sitios, explicados em "Onde
+perde": o primeiro uso da tabela de compose (o custo de 47 M de instrucoes foi do arranque para a primeira tecla quando `XMODIFIERS` aponta
+para um servidor parado, e continua no arranque quando `XMODIFIERS` esta vazio, onde empata com o GLFW e o SDL2) e o tamanho da biblioteca
+partilhada (345 kB contra 276 kB do GLFW; o programa minimo ligado em estatico fica em 130 kB). Uma tecla custa o mesmo que no GLFW
+(3351 instrucoes por evento nos dois; 4035 antes desta ronda). O que a primeira ronda tinha corrigido (arranque sem GL, memoria, esperas ao
+servidor) esta em "Antes e depois"; o que esta ronda mudou, em "Segunda ronda".
 
 ## Maquina e versoes
 
@@ -85,141 +86,141 @@ a etapa `startup` (as outras de uma corrida completa); o numero de instrucoes e 
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| ms to window viewable + first loop turn (median) | 35.846 | 33.085 | 87.013 |
-|   of which init (ms) | 26.429 | 32.291 | 64.025 |
-|   of which window create (ms) | 0.853 | 0.930 | 4.963 |
-| instructions (whole process) | 52951314 | 61771913 | 57506435 |
-| X requests that wait for a reply | 21 | 78 | 122 |
-| syscalls | 674 | 1054 | 1590 |
+| ms to window viewable + first loop turn (median) | 22.419 | 28.660 | 43.984 |
+|   of which init (ms) | 20.946 | 22.911 | 36.000 |
+|   of which window create (ms) | 0.401 | 0.614 | 1.735 |
+| instructions (whole process) | 52821109 | 61750399 | 57509554 |
+| X requests that wait for a reply | 21 | 79 | 122 |
+| syscalls | 673 | 1058 | 1582 |
 
 ### Start-up, gl, locale pt_PT.UTF-8 (the input method loads its compose table)
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| ms to window viewable + first loop turn (median) | 159.799 | 191.183 | 299.524 |
-|   of which init (ms) | 28.323 | 33.706 | 56.583 |
-|   of which window create (ms) | 149.917 | 152.106 | 227.227 |
-| instructions (whole process) | 201501076 | 214624115 | 294779182 |
-| X requests that wait for a reply | 40 | 103 | 151 |
-| syscalls | 2608 | 10028 | 3631 |
+| ms to window viewable + first loop turn (median) | 107.792 | 121.650 | 137.314 |
+|   of which init (ms) | 15.239 | 21.045 | 28.732 |
+|   of which window create (ms) | 79.489 | 92.714 | 95.612 |
+| instructions (whole process) | 201347215 | 214694072 | 294718216 |
+| X requests that wait for a reply | 39 | 103 | 150 |
+| syscalls | 2701 | 10086 | 3725 |
 
 ### Start-up, nogl, locale C (no compose table to load)
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| ms to window viewable + first loop turn (median) | 15.872 | 38.639 | 62.566 |
-|   of which init (ms) | 5.394 | 10.964 | 30.049 |
-|   of which window create (ms) | 1.304 | 0.926 | 1.641 |
-| instructions (whole process) | 10040677 | 18907627 | 14737924 |
-| X requests that wait for a reply | 20 | 79 | 123 |
-| syscalls | 556 | 937 | 1464 |
+| ms to window viewable + first loop turn (median) | 7.997 | 11.840 | 25.295 |
+|   of which init (ms) | 3.912 | 8.523 | 14.148 |
+|   of which window create (ms) | 0.353 | 0.617 | 1.394 |
+| instructions (whole process) | 10063186 | 18897638 | 14775524 |
+| X requests that wait for a reply | 20 | 79 | 122 |
+| syscalls | 555 | 931 | 1462 |
 
 ### Start-up, nogl, locale pt_PT.UTF-8, XMODIFIERS=@im=ibus with no server
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| ms to window viewable + first loop turn (median) | 47.665 | 16.603 | 63.411 |
-|   of which init (ms) | 18.593 | 18.440 | 38.132 |
-|   of which window create (ms) | 0.982 | 1.077 | 4.459 |
-| instructions (whole process) | 52472748 | 13902251 | 57010575 |
-| X requests that wait for a reply | 22 | 77 | 125 |
-| syscalls | 663 | 882 | 1574 |
+| ms to window viewable + first loop turn (median) | 6.938 | 10.846 | 38.026 |
+|   of which init (ms) | 3.280 | 7.193 | 27.928 |
+|   of which window create (ms) | 0.566 | 0.594 | 1.215 |
+| instructions (whole process) | 4993485 | 13892303 | 57028737 |
+| X requests that wait for a reply | 19 | 77 | 122 |
+| syscalls | 497 | 879 | 1567 |
 
 ### Memory after init, a window and 1000 idle turns, nogl
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| RSS (kB) | 5508 | 5376 | 9228 |
-| PSS (kB) | 1514 | 1568 | 3904 |
-| PSS anonymous (kB) | 1204 | 1140 | 1596 |
+| RSS (kB) | 5616 | 5408 | 9096 |
+| PSS (kB) | 1562 | 1585 | 3504 |
+| PSS anonymous (kB) | 1212 | 1136 | 1612 |
 | shared libraries mapped | 15 | 19 | 49 |
-| heap: malloc calls | 11424 | 11745 | 12092 |
-| heap: bytes asked for | 2078876 | 2242821 | 2189846 |
-| heap: peak live bytes (approximate) | 995784 | 1013384 | 1081896 |
+| heap: malloc calls | 11428 | 11746 | 12090 |
+| heap: bytes asked for | 2080572 | 2242653 | 2189320 |
+| heap: peak live bytes (approximate) | 998072 | 1013304 | 1081800 |
 
 ### Memory after init, a window and 1000 idle turns, gl
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| RSS (kB) | 79828 | 81376 | 89680 |
-| PSS (kB) | 30768 | 32278 | 38997 |
-| PSS anonymous (kB) | 22192 | 22228 | 28188 |
+| RSS (kB) | 79656 | 81476 | 89568 |
+| PSS (kB) | 29356 | 30923 | 36977 |
+| PSS anonymous (kB) | 22024 | 22176 | 28348 |
 | shared libraries mapped | 47 | 50 | 77 |
-| heap: malloc calls | 49410 | 50072 | 84115 |
-| heap: bytes asked for | 53299401 | 53590643 | 103362598 |
-| heap: peak live bytes (approximate) | 30125088 | 30322792 | 30204248 |
+| heap: malloc calls | 49407 | 50069 | 84106 |
+| heap: bytes asked for | 53296525 | 53587463 | 103357008 |
+| heap: peak live bytes (approximate) | 30125192 | 30322904 | 30204184 |
 
 ### Idle poll (an event loop turn with no event), no GL
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| ns per turn, 1e6 turns (median) | 1688.70 | 4057.99 | 3956.81 |
-| instructions per turn | 1746 | 2243 | 2955 |
+| ns per turn, 1e6 turns (median) | 2618.29 | 4257.90 | 3647.97 |
+| instructions per turn | 1481 | 2243 | 2955 |
 
 ### Window create + destroy, nogl
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| us per cycle, 1000 cycles (median of 5) | 124.24 | 927.80 | 1002.24 |
-| CPU us per cycle | 114.96 | 931.58 | 1504.16 |
-| instructions per cycle | 108499 | 148960 | 262944 |
+| us per cycle, 1000 cycles (median of 5) | 187.23 | 1815.91 | 2819.01 |
+| CPU us per cycle | 204.09 | 1483.34 | 1873.86 |
+| instructions per cycle | 109141 | 169104 | 260839 |
 
 ### Window create + destroy, gl
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| us per cycle, 100 cycles (median of 5) | 12759.77 | 18822.26 | 20743.05 |
-| CPU us per cycle | 8712.20 | 18019.89 | 14802.57 |
-| instructions per cycle | 64506473 | 70708742 | 127959908 |
+| us per cycle, 100 cycles (median of 5) | 15909.33 | 24961.28 | 31826.56 |
+| CPU us per cycle | 17098.29 | 26164.37 | 32302.74 |
+| instructions per cycle | 64499374 | 70670025 | 127961561 |
 
 ### Window create + destroy, nogl, locale C (no compose table, so an input context costs less)
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| us per cycle, 1000 cycles (median of 5) | 170.89 | 1254.93 | 1308.98 |
-| CPU us per cycle | 165.52 | 1212.67 | 1375.03 |
-| instructions per cycle | 106553 | 152460 | 250178 |
+| us per cycle, 1000 cycles (median of 5) | 250.35 | 2158.04 | 2048.38 |
+| CPU us per cycle | 203.72 | 1682.96 | 1981.41 |
+| instructions per cycle | 109428 | 183872 | 249217 |
 
 ### Events, motion, 100 waiting at each turn (a frame in which 100 arrived), no GL
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
 | events delivered to the application | 100000 | 100000 | 100000 |
-| CPU ms in the turns, 100000 events (median of 3) | 167.542 | 168.398 | 420.106 |
-| instructions per injected event | 1947 | 1938 | 7595 |
+| CPU ms in the turns, 100000 events (median of 3) | 214.673 | 230.049 | 590.830 |
+| instructions per injected event | 1803 | 1938 | 7596 |
 
 ### Events, motion, all 100000 waiting at the first turn (a frame that took long), no GL
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
-| events delivered to the application | 256 | 100000 | 65674 |
-| CPU ms in the turns, 100000 events (median of 3) | 46.350 | 42.291 | 305.729 |
-| instructions per injected event | 2411 | 2423 | 9777 |
+| events delivered to the application | 768 | 100000 | 68836 |
+| CPU ms in the turns, 100000 events (median of 3) | 53.109 | 55.543 | 371.902 |
+| instructions per injected event | 2276 | 2422 | 9778 |
 
 ### Events, key, 100 waiting at each turn (a frame in which 100 arrived), no GL
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
 | events delivered to the application | 10000 | 10000 | 10000 |
-| CPU ms in the turns, 20000 events (median of 3) | 38.244 | 34.998 | 59.698 |
-| instructions per injected event | 4023 | 3350 | 4260 |
+| CPU ms in the turns, 20000 events (median of 3) | 46.026 | 49.774 | 77.773 |
+| instructions per injected event | 3351 | 3351 | 4256 |
 
 ### Events, key, all 20000 waiting at the first turn (a frame that took long), no GL
 
 | metric | zp | glfw | sdl2 |
 |---|---:|---:|---:|
 | events delivered to the application | 85 | 10000 | 10000 |
-| CPU ms in the turns, 20000 events (median of 3) | 21.620 | 19.061 | 843.472 |
-| instructions per injected event | 4448 | 3844 | 59915 |
+| CPU ms in the turns, 20000 events (median of 3) | 18.934 | 19.621 | 1138.534 |
+| instructions per injected event | 3782 | 3845 | 59916 |
 
 ### Binary sizes (stripped, kB)
 
 | file | kB |
 |---|---:|
-| minimal program, zen_platform linked statically | 126 |
-| libplatform.a (archive, with its debug info stripped) | 993 |
+| minimal program, zen_platform linked statically | 130 |
+| libplatform.a (archive, with its debug info stripped) | 1004 |
 | minimal program, zen_platform shared (program alone) | 18 |
-| libplatform.so (shared) | 340 |
+| libplatform.so (shared) | 345 |
 | minimal program, GLFW (program alone) | 22 |
 | libglfw.so (distribution, stripped) | 276 |
 | minimal program, SDL2 (program alone) | 18 |
@@ -261,6 +262,79 @@ O que mudou e porque (um commit por coisa, com a medicao na mensagem):
   se sabe: o `XSetWMProtocols` pedia o atomo `WM_PROTOCOLS` de cada vez e a procura do monitor (quatro pedidos do Xrandr por monitor) so serve
   a quem centra a janela ou vai para ecra inteiro.
 - **A lista de eventos cheia deixou de ser percorrida** por cada tecla que nao cabe (256 comparacoes por evento).
+
+## Segunda ronda: antes e depois (so a zen_platform)
+
+"Antes" e a ponta da `main` no inicio da ronda (`fb9df47`), "depois" a ponta de `core-round2`; as duas contadas no mesmo Xvfb, com o mesmo
+valgrind e os mesmos programas (`bench/compare`), numa maquina com carga 8 a 36 (os tempos nao se comparam; as instrucoes sim). Os numeros
+do GLFW e do SDL2 sao os das tabelas acima.
+
+| | antes | depois | GLFW | SDL2 |
+|---|---:|---:|---:|---:|
+| tecla, 100 por volta, instrucoes por evento | 4035 | 3351 | 3351 | 4256 |
+| tecla, 20 000 numa volta (lista cheia), instrucoes por evento | 4450 | 3782 | 3845 | 59 916 |
+| movimento, 100 por volta, instrucoes por evento | 1953 | 1803 | 1938 | 7596 |
+| poll parado, instrucoes por volta | 1746 | 1481 | 2243 | 2955 |
+| arranque sem GL com `XMODIFIERS=@im=ibus` e o servidor parado, instrucoes | 52 462 207 | 4 993 485 | 13 892 303 | 57 028 737 |
+| arranque sem GL, `XMODIFIERS` vazio, instrucoes | 52 922 829 | 52 821 109 | 61 750 399 | 57 509 554 |
+| arranque sem GL, `LC_ALL=C`, instrucoes | 10 055 982 | 10 063 186 | 18 897 638 | 14 775 524 |
+| criar + destruir uma janela sem GL, instrucoes | 109 532 | 109 141 | 169 104 | 260 839 |
+| criar + destruir uma janela com GL, instrucoes | 64 506 473 | 64 499 374 | 70 670 025 | 127 961 561 |
+| primeira tecla com `XMODIFIERS=@im=ibus` e o servidor parado, instrucoes (so depois) | 0 | cerca de 47 600 000 | 0 | 0 |
+| RSS sem GL, kB (tres corridas) | 5488 a 5612 | 5492 a 5580 | 5408 | 9096 |
+| `libplatform.so`, kB | 340 | 345 | 276 | 1881 |
+
+O que mudou e porque (um commit por coisa, com a medicao na mensagem):
+
+- **Teclas.** O perfil da primeira ronda dizia que o `XFilterEvent` custava 1260 instrucoes por evento contra 175 no GLFW; medido de novo,
+  como diferenca entre corridas de 0 e 10 000 eventos (`callgrind`, por funcao), custa 174 nos dois: o numero vinha de uma conta que
+  misturava o arranque. O que sobrava era nosso: `im_copy` percorria as 64 entradas da tabela das teclas tomadas pelo metodo de
+  entrada em todos os eventos (396 instrucoes; agora so se percorre quando ha uma entrada viva, e as entradas com mais de 10 s de
+  idade do servidor saem), o `XLookupKeysym` (cerca de 190 com o que chama; agora uma tabela keycode -> tecla, invalidada por
+  `MappingNotify`, `XkbMapNotify` e `XkbNewKeyboardNotify`) e um `XPending` por evento (160; o ciclo olha para a fila com `XQLength` e so
+  chama o `XPending` quando ela esvazia). Com o servidor sem BIG-REQUESTS desligavel (ver abaixo) o teste do teclado muda o mapa a meio
+  de duas maneiras (`XChangeKeyboardMapping` e `setxkbmap`) e confere que as teclas o seguem; desligando uma a uma as invalidacoes ve-se que
+  o `MappingNotify` sozinho falha na troca de disposicao (o servidor nao o manda para `setxkbmap`) e que os eventos do XKB sozinhos chegam
+  para as duas, por isso ficam os dois (o `MappingNotify` serve a servidores sem XKB).
+- **Arranque com o servidor de metodo de entrada parado.** O metodo interno do Xlib (a tabela de compose, 47 M de instrucoes) abre-se
+  na primeira tecla, antes de ela ser filtrada, e nao no arranque: o arranque desce de 52,5 M para 5,0 M; a primeira tecla morta
+  continua a compor (teste com a tabela de compose do proprio teste, vigiada por `inotify`: nao e aberta no arranque, e aberta pela primeira
+  tecla, e a primeira tecla do processo e a morta). **Nao e de graca:** os 47,6 M passam para a primeira tecla de qualquer janela
+  (10 a 30 ms, uma vez). Alternativas medidas: abrir o metodo na primeira janela nao poupa nada a quem abre uma; abri-lo so quando uma tecla
+  precisa de composicao (morta, Multi_key, fora do Latin-1) obrigava a um segundo caminho para o texto sem metodo de entrada
+  (`XLookupString` mais uma tabela de keysyms) que o GLFW tem e nos nao, e a um soluco apenas para quem escreve acentos. Com `XMODIFIERS`
+  vazio nao se mexeu: o `XOpenIM` abre o metodo interno de qualquer forma.
+- **Poll parado.** 1746 -> 1481: o ciclo percorria as ranhuras de comandos e joysticks (cerca de 270 instrucoes) em todas as voltas; agora so
+  quando algum liga ou desliga (`gamepad_internal_epoch`). Pagaram-se com isto as duas instrucoes do teste de `NULL` e os incrementos do contador de
+  despacho (`g_depth`).
+- **Janela `NULL`.** Duas instrucoes por chamada (`test` e salto), medidas em 600 000 chamadas de `key_down`, `mouse_x`,
+  `mouse_button_down`, `window_should_close`, `mouse_wheel` e `key_pressed` (6 444 838 contra 7 644 865 instrucoes).
+
+## Defeitos que a segunda ronda encontrou (cada um com o teste que falhava antes e passa depois)
+
+| defeito | visto |
+|---|---|
+| `window_destroy(NULL)` aceitava-se, o resto da API (97 funcoes que levam uma janela) desreferenciava-a | `tests/test_null_handles.c`, uma linha por funcao, cada uma num processo filho, e le `platform.h` para nao deixar entrar uma funcao nova sem a sua linha: com o nucleo anterior rebentava (a primeira falha foi um `double free`), passa |
+| `window_destroy` duas vezes, ou depois do `platform_shutdown`, libertava duas vezes; o shutdown deixava as janelas por destruir | mesmo teste, parte do ciclo de vida: passa (as janelas vivas ficam numa lista, o que nao esta nela ignora-se, o shutdown destroi as que sobram) |
+| destruir a janela dentro do gancho de eventos, do teste de acerto ou da frame do `app_run` (a propria, outra, criar uma, `platform_shutdown` no gancho) | seccoes "destroy inside callbacks" e "shutdown inside a hook" de `test_core_edge_x11`: com o nucleo anterior o ASan da `heap-use-after-free` em `frame_event_add` e `SEGV` em `Xutf8LookupString`; agora a destruicao fica para quando a chamada volta (`g_depth`) |
+| qualquer `ClientMessage` cujo primeiro campo fosse o atomo de `WM_DELETE_WINDOW` fechava a janela, tambem de outro tipo ou formato | seccao "events from a hostile client": falhava (o evento de fecho chegava), passa |
+| uma resposta XDND (`SelectionNotify`) podia nomear qualquer propriedade da janela: lia-se e apagava-se (o titulo, por exemplo) | mesma seccao: com o codigo anterior o titulo desaparecia, passa |
+| um `KeyPress` de keycode 0 enviado por outro cliente ia ao `Xutf8LookupString` e rebentava no Xlib (`strlen` num apontador que nao existe) | encontrado por `fuzz_x11_events`; a entrada que o reproduz esta em `tests/fuzz/corpus/x11_events` e corre como teste |
+| `png_decode`: um PNG de 100 bytes cujo IDAT declarava 1,9 GB fazia o stb pedir 1,9 GB; outro de 70 bytes fazia o inflate encher a saida de zeros durante minutos e estourar um `int`; um IDAT inicial vazio e `NULL + 0` | `fuzz_images`; as tres entradas ficam em `tests/fuzz/corpus/images`; com o codigo anterior o teste de regressao falha sob o ASan (`allocation-size-too-big`), agora o decodificador recusa o que o ficheiro nao tem, imagens acima de 64 M de pixeis, e o stb nao cresce alem do que o IHDR pode precisar |
+| uma transferencia INCR de um dono que manda um byte a cada 200 ms nunca acabava | `test_clipboard_x11`: com o codigo anterior fica preso; agora desiste aos 10,0 s e nao volta a perguntar de seguida |
+| um titulo de 8 MB ficava guardado inteiro (num servidor sem BIG-REQUESTS e um `BadLength` e o Xlib acaba o processo) | seccao "titles": com o codigo anterior ficavam 8 MB e agora menos do que um pedido leva, cortado numa fronteira de caracter; **o `BadLength` em si nao se provou: o `-extension BIG-REQUESTS` do Xvfb nao tira a extensao (o `xdpyinfo` continua a listar-la)** |
+| o servidor que desaparece a meio acabava o processo no Xlib (`X connection broken`, `exit(1)`) | seccao "the server goes away" (um Xvfb proprio, morto com `SIGKILL`): `XSetIOErrorHandler` e `XSetIOErrorExitHandler` (os dois: o de saida sozinho nao chega) marcam a ligacao perdida, cada janela recebe `EVENT_WINDOW_CLOSE` e as chamadas seguintes falham logo; o GLX deixou de ser chamado depois (inventava um erro X e o handler por omissao acabava o processo) |
+| Wayland: uma janela acima de 16384 pixeis (a do pool do `wl_shm` e um `int`) partia a ligacao com o erro 71; um titulo acima de 4000 bytes, com o erro 7 (E2BIG) | `tests/test_core_edge_wayland.c`: com o codigo anterior a ligacao parte na seccao dos tamanhos, com este passam 1158 verificacoes sob o ASan |
+
+Passaram sem defeito: `fuzz_paths` (348 500 execucoes em 121 s, caminhos vazios, de 6000 bytes, com NULs, UTF-8 invalido, `..` e laços de ligacoes
+simbolicas, em `/dev/shm`), `test_process_hostile` (um argumento de 1 MB, 50 000 argumentos, um ambiente de 1 MB, directorio como programa,
+listas com NULL no meio, filhos mortos por `SIGKILL`, `SIGSEGV` e `SIGTERM`, e um `exec` que falha com o lock do `stderr` tomado por outro fio: 48
+verificacoes), o arrastar com o botao premido para fora da janela (coordenadas negativas e a milhares de pixeis, a libertacao la fora: 18
+verificacoes), a varredura de todos os keycodes e de 20 327 keysyms (o intervalo das funcoes e do teclado numerico inteiro, num Xvfb proprio porque o servidor actua sobre alguns keysyms),
+`fuzz_x11_events` (362 420 execucoes em 141 s com ClientMessage de qualquer tipo e formato, SelectionNotify com propriedades ausentes,
+enormes ou de outro tipo, ConfigureNotify absurdos, eventos de qualquer tipo com bytes quaisquer e quedas de XDND com listas de URIs de qualquer
+forma) e `fuzz_clipboard_x11` (57 126 execucoes em 141 s com um dono hostil: propriedades de qualquer tipo e formato, INCR de qualquer forma,
+um PNG por cima, o que nunca responde).
 
 ## Onde a zen_platform perde e porque
 
