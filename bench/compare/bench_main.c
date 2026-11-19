@@ -6,9 +6,12 @@
      bench_<lib> idle N [gl]           ns per event loop turn with no event, N turns
      bench_<lib> cycle N [gl]          ns per window create + destroy, N cycles
      bench_<lib> mem [gl]              RSS and PSS after init, window, 1000 idle turns; shared libraries mapped
-     bench_<lib> events motion|key N [gl]   waits for bench_run to inject N events, then drains them (see bench_run.c) */
+     bench_<lib> events motion|key N batch [gl]   waits for bench_run to inject N events, then drains them (see bench_run.c);
+                                       batch 0: all N are waiting when the first turn starts (a frame that took long);
+                                       batch B: B events wait for each turn (a frame in which B events arrived) */
 #define _GNU_SOURCE
 #include "bench.h"
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,6 +110,11 @@ int main(int argc, char **argv)
     long long t0 = getenv("BENCH_T0") ? atoll(getenv("BENCH_T0")) : now_ns();
     Counts c = {0};
 
+    /* The input method of a window needs the locale; zen_platform sets it itself, GLFW and SDL leave it to the
+       application. BENCH_SETLOCALE=1 makes the application do it for all three, so they do the same work. */
+    if (getenv("BENCH_SETLOCALE"))
+        setlocale(LC_CTYPE, "");
+
     if (strcmp(mode, "startup") == 0)
     {
         long long t1 = now_ns();
@@ -184,6 +192,7 @@ int main(int argc, char **argv)
     if (strcmp(mode, "events") == 0)
     {
         n = argc > 3 ? atoll(argv[3]) : 0;
+        int batch = argc > 4 ? atoi(argv[4]) : 0;
         if (!lib_init())
             return 1;
         void *win = lib_window(gl, 100, 100, 400, 300);
@@ -205,6 +214,29 @@ int main(int argc, char **argv)
         fflush(stdout);
         if (!fgets(line, sizeof line, stdin))
             return 1;
+        if (batch > 0)
+        {
+            /* One turn per batch, on the harness's word; only the turns are timed. The events of a batch are all in
+               the socket when its turn starts (bench_run syncs before it says go). */
+            long long wall = 0, cpu = 0, turns2 = 0;
+            while (fgets(line, sizeof line, stdin) && strncmp(line, "go", 2) == 0)
+            {
+                long long a = now_ns(), ca = cpu_ns();
+                lib_poll(win, &c);
+                wall += now_ns() - a;
+                cpu += cpu_ns() - ca;
+                turns2++;
+                printf("ok\n");
+                fflush(stdout);
+            }
+            printf("lib=%s gl=%d kind=%s injected=%lld batch=%d motion=%ld key_down=%ld key_up=%ld text=%ld other=%ld "
+                   "turns=%lld wall_ms=%.3f cpu_ms=%.3f\n",
+                   lib_name(), gl, argv[2], n, batch, c.motion, c.key_down, c.key_up, c.text, c.other, turns2,
+                   wall / 1e6, cpu / 1e6);
+            lib_window_free(win);
+            lib_exit();
+            return 0;
+        }
         /* The events are in the socket (or on their way: the server keeps writing while this reads). A library does
            not have to deliver all of them (a queue that holds so many, zen_platform compacting moves), so the end
            is not an event: it is the connection quiet and nothing delivered for 30 ms. The time and the CPU time
@@ -231,7 +263,7 @@ int main(int argc, char **argv)
             else
                 nap_ms(1);
         }
-        printf("lib=%s gl=%d kind=%s injected=%lld motion=%ld key_down=%ld key_up=%ld text=%ld other=%ld turns=%lld "
+        printf("lib=%s gl=%d kind=%s injected=%lld batch=0 motion=%ld key_down=%ld key_up=%ld text=%ld other=%ld turns=%lld "
                "wall_ms=%.3f cpu_ms=%.3f\n",
                lib_name(), gl, argv[2], n, c.motion, c.key_down, c.key_up, c.text, c.other, turns, (last - a) / 1e6,
                (clast - ca) / 1e6);

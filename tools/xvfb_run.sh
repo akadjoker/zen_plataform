@@ -11,6 +11,7 @@
 #  - XDG_DATA_HOME and XDG_CONFIG_HOME point to a throw-away folder, so the tests
 #    that write settings, recent files or a library never touch the user's own.
 # ZP_XDG_DIR keeps that folder (and its content) in a place of the caller's choice.
+# ZP_XVFB_ARGS adds options to the Xvfb command line (tools/bench_compare.sh passes -noreset).
 
 command -v xvfb-run > /dev/null || { echo "xvfb_run.sh: xvfb-run not found" >&2; exit 127; }
 [ $# -gt 0 ] || { echo "usage: $0 command..." >&2; exit 2; }
@@ -28,4 +29,4 @@ fi
 # ZP_PRIVATE_X tells a test that the X server it finds is the throw-away one: a test that changes the keyboard layout
 # (test_input_x11, setxkbmap) runs only then, never on the display of whoever is working.
 env -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR XDG_DATA_HOME="$X" XDG_CONFIG_HOME="$X/cfg" ZP_PRIVATE_X=1 \
-    xvfb-run -a -s "-screen 0 1280x800x24" "$@"
+    xvfb-run -a -s "-screen 0 1280x800x24 ${ZP_XVFB_ARGS:-}" "$@"

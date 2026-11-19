@@ -1,5 +1,6 @@
 /* mcount.c - LD_PRELOAD heap counter: calls, bytes asked for, live and peak live bytes (as the allocator sizes
-   them), written to stderr at exit as one line. malloc, calloc, realloc and free of the process and of every
+   them, a block of memalign and friends being unknown to it: the live and peak figures are approximate), written to
+   stderr at exit as one line. malloc, calloc, realloc and free of the process and of every
    library it loads; the allocator's own internal calls are not seen. Not thread safe on purpose: the bench programs
    that use it run one thread (the zen_platform thread API is not started). */
 #define _GNU_SOURCE
@@ -46,7 +47,7 @@ void *realloc(void *old, size_t n)
     void *p = __libc_realloc(old, n);
     if (p)
     {
-        live -= was;
+        live = live > was ? live - was : 0;
         add(p, n);
     }
     return p;
@@ -57,7 +58,8 @@ void free(void *p)
     if (p)
     {
         frees++;
-        live -= malloc_usable_size(p);
+        size_t size = malloc_usable_size(p);
+        live = live > size ? live - size : 0; /* a block of memalign and friends, which are not counted, may go through here */
     }
     __libc_free(p);
 }
