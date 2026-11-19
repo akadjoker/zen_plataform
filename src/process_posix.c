@@ -23,7 +23,8 @@ typedef struct
     /* The group process_spawn made (the child's pid is its id) was last seen with a member in it. While one lives the
        system does not give the number out again (POSIX, "Process ID Reuse": a process id is not reused while a process
        group with that id exists), so the number is still ours. Once the last member is gone it can be anybody's, and
-       process_kill_tree must not signal it. Set at the spawn; cleared by the first look that finds the group empty. */
+       process_kill_tree must not signal it. Set at the spawn, so it is true for every child that runs (reap_children looks
+       at the records that have it, and at no other); cleared by the first look that finds the group empty. */
     bool group;
     int exit_code; /* -1 when the system no longer knew the child (somebody else waited for it) */
     unsigned long order; /* when the child was started: the oldest finished record is the one that makes room */
@@ -122,11 +123,11 @@ static void reap_children(void)
     for (int i = 0; i < PROCESS_CAP; i++)
     {
         ProcessInfo *info = &g_processes[i];
-        if (info->pid == 0)
-            continue;
+        if (!info->group)
+            continue; /* a slot nobody used, or a finished child with nobody left in its group: nothing to look at */
         if (info->running)
             poll_slot(info);
-        else if (info->group && !group_has_members(info->pid))
+        else if (!group_has_members(info->pid))
             info->group = false;
     }
 }
