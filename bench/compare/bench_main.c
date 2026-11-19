@@ -198,6 +198,11 @@ int main(int argc, char **argv)
         void *win = lib_window(gl, 100, 100, 400, 300);
         if (!win || !wait_viewable(win, &c))
             return 1;
+        /* What a window manager does when it maps a window: gives it the keyboard focus. Without a manager (this Xvfb)
+           nobody does, and a library that waits for FocusIn before it takes keys (SDL) or before it lets its input
+           context compose (GLFW) would run a different path from one that does not wait. All three get the focus. */
+        XSetInputFocus(lib_display(win), lib_xwin(win), RevertToParent, CurrentTime);
+        XSync(lib_display(win), False);
         /* bench_run moves the pointer into the window, then asks for the first line; the second line is the go */
         char line[64];
         printf("READY1\n");

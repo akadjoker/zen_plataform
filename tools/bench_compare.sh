@@ -66,6 +66,13 @@ LIBS=zp
 [ -n "${ZP_BENCH_LIBS:-}" ] && LIBS=$ZP_BENCH_LIBS
 RUN=$B/bench_run
 
+# The first GL context of a fresh $HOME fills the driver's caches (some 45 M instructions more than every later one):
+# one throw-away run of each program, with and without GL, so the first library measured is not the one that pays.
+for l in $LIBS; do
+    "$B/bench_$l" startup nogl > /dev/null 2>&1
+    "$B/bench_$l" startup gl > /dev/null 2>&1
+done
+
 say() { printf '%s\n' "$*" | tee -a "$OUT"; }
 
 # median <key>: the median of the key=value fields on stdin
@@ -167,7 +174,7 @@ if want cycle; then
         header "Window create + destroy, $gl$loc" "metric"
         table_row "us per cycle, $n cycles (median of 5)" "rep 5 $B/bench_\$l cycle $n $gl | median us_per_cycle"
         table_row "CPU us per cycle" "rep 5 $B/bench_\$l cycle $n $gl | median cpu_us_per_cycle"
-        table_row "instructions per cycle" "diff_per \$(ir $B/bench_\$l cycle 0 $gl) \$(ir $B/bench_\$l cycle $ni $gl) $ni"
+        table_row "instructions per cycle" "diff_per \$(ir $B/bench_\$l cycle $ni $gl) \$(ir $B/bench_\$l cycle $((2 * ni)) $gl) $ni"
         unset LC_ALL
     done
 fi
