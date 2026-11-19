@@ -44,6 +44,10 @@ typedef struct
     Event frame_events[FRAME_EVENT_MAX];
     int fe_count;
     int fe_cursor;
+    /* Once the list is full: an upper bound on the events in it that can be pushed out (pointer, size and position
+       ones), valid when fe_movers_ok. A full list with none left drops what comes without looking through it. */
+    int fe_movers;
+    bool fe_movers_ok;
 
     /* Active points kept dense in [0, touch_count); matched by OS id. */
     struct

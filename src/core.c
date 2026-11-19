@@ -193,6 +193,13 @@ static void frame_event_add(InputState *s, const Event *ev)
     }
     Event add = *ev;
     int victim = -1;
+    if (!s->fe_movers_ok)
+    {
+        s->fe_movers = 0;
+        for (int i = s->fe_cursor; i < s->fe_count; i++)
+            s->fe_movers += latest_wins(s->frame_events[i].type);
+        s->fe_movers_ok = true;
+    }
     if (latest_wins(ev->type))
     {
         /* Folded into the newest one of its kind, as long as no event of another kind (a button, a key) came after it:
@@ -215,7 +222,7 @@ static void frame_event_add(InputState *s, const Event *ev)
                 break;
             }
     }
-    if (victim < 0)
+    if (victim < 0 && s->fe_movers > 0)
         for (int i = s->fe_cursor; i < s->fe_count; i++)
             if (latest_wins(s->frame_events[i].type))
             {
@@ -242,6 +249,7 @@ static void frame_event_add(InputState *s, const Event *ev)
     }
     memmove(&s->frame_events[victim], &s->frame_events[victim + 1], (size_t)(s->fe_count - 1 - victim) * sizeof s->frame_events[0]);
     s->frame_events[s->fe_count - 1] = add;
+    s->fe_movers += latest_wins(add.type) - 1; /* the victim went out, the new one came in */
 }
 
 void core_push_event(Core *core, const Event *ev)
@@ -630,6 +638,7 @@ void window_begin_frame(PlatformWindow *w)
     s->wheel_x = s->wheel_y = 0;
     s->fe_count = 0;
     s->fe_cursor = 0;
+    s->fe_movers_ok = false;
     /* keycode_q and char_q are not cleared here: the consumer drains them */
 
     gamepad_poll();
