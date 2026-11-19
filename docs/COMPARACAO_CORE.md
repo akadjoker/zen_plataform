@@ -326,7 +326,7 @@ O que mudou e porque (um commit por coisa, com a medicao na mensagem):
 | o servidor que desaparece a meio acabava o processo no Xlib (`X connection broken`, `exit(1)`) | seccao "the server goes away" (um Xvfb proprio, morto com `SIGKILL`): `XSetIOErrorHandler` e `XSetIOErrorExitHandler` (os dois: o de saida sozinho nao chega) marcam a ligacao perdida, cada janela recebe `EVENT_WINDOW_CLOSE` e as chamadas seguintes falham logo; o GLX deixou de ser chamado depois (inventava um erro X e o handler por omissao acabava o processo) |
 | Wayland: uma janela acima de 16384 pixeis (a do pool do `wl_shm` e um `int`) partia a ligacao com o erro 71; um titulo acima de 4000 bytes, com o erro 7 (E2BIG) | `tests/test_core_edge_wayland.c`: com o codigo anterior a ligacao parte na seccao dos tamanhos, com este passam 1158 verificacoes sob o ASan |
 
-Passaram sem defeito: `fuzz_paths` (348 500 execucoes em 121 s, caminhos vazios, de 6000 bytes, com NULs, UTF-8 invalido, `..` e laços de ligacoes
+Passaram sem defeito: `fuzz_paths` (348 500 execucoes em 121 s, caminhos vazios, de 6000 bytes, com NULs, UTF-8 invalido, `..` e lacos de ligacoes
 simbolicas, em `/dev/shm`), `test_process_hostile` (um argumento de 1 MB, 50 000 argumentos, um ambiente de 1 MB, directorio como programa,
 listas com NULL no meio, filhos mortos por `SIGKILL`, `SIGSEGV` e `SIGTERM`, e um `exec` que falha com o lock do `stderr` tomado por outro fio: 48
 verificacoes), o arrastar com o botao premido para fora da janela (coordenadas negativas e a milhares de pixeis, a libertacao la fora: 18
