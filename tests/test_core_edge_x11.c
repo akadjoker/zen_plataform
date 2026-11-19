@@ -9,6 +9,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/keysym.h>
 #ifdef HAVE_XTEST
 #include <X11/extensions/XTest.h>
 #endif
@@ -606,6 +607,84 @@ static void test_clipboard_extremes(void)
         window_destroy(w);
 }
 
+/* The key a physical key reports follows the keyboard mapping while the program runs: the backend keeps a keycode ->
+   key table and must drop it on MappingNotify and on the XKB events. Changed from the test with
+   XChangeKeyboardMapping (a core request: MappingNotify) and with setxkbmap (a keymap loaded: the XKB events);
+   it changes the mapping of the whole server, so it runs only on the private one (tools/xvfb_run.sh sets
+   ZP_PRIVATE_X). */
+static int key_after_press(PlatformWindow *w, KeyCode kc)
+{
+    Display *d = dpy_of(w);
+    XTestFakeKeyEvent(d, kc, True, 0);
+    XTestFakeKeyEvent(d, kc, False, 0);
+    XSync(d, False);
+    time_sleep(30);
+    int got = -1;
+    for (int i = 0; i < 4; i++)
+    {
+        window_begin_frame(w);
+        Event e;
+        while (poll_event(w, &e))
+            if (e.type == EVENT_KEY && e.data.key.down && got < 0)
+                got = e.data.key.key;
+        time_sleep(5);
+    }
+    return got;
+}
+
+static void test_keymap_follows(void)
+{
+    if (!getenv("ZP_PRIVATE_X"))
+    {
+        printf("  skipped: changes the keyboard mapping of the server, which is not a private one\n");
+        return;
+    }
+    PlatformWindow *w = make(RENDER_PIXELS, 300, 200);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    int rx = 0, ry = 0;
+    window_get_position(w, &rx, &ry);
+    settle(w);
+    XTestFakeMotionEvent(d, -1, rx + 100, ry + 100, 0);
+    XSync(d, False);
+    KeyCode a = XKeysymToKeycode(d, 'a');
+    CHECK(key_after_press(w, a) == KEY_A);
+    CHECK(key_after_press(w, a) == KEY_A); /* the second one comes from the table */
+
+    int per = 0;
+    KeySym *orig = XGetKeyboardMapping(d, a, 1, &per);
+    CHECK(orig != NULL && per > 0);
+    if (!orig)
+        return;
+    KeySym *mine = calloc((size_t)per, sizeof *mine);
+    mine[0] = XK_z;
+    XChangeKeyboardMapping(d, a, per, mine, 1);
+    XSync(d, False);
+    CHECK(key_after_press(w, a) == KEY_Z);
+    CHECK(key_after_press(w, a) == KEY_Z);
+    mine[0] = orig[0];
+    XChangeKeyboardMapping(d, a, per, orig, 1);
+    XSync(d, False);
+    CHECK(key_after_press(w, a) == KEY_A);
+    free(mine);
+    XFree(orig);
+
+    /* a whole layout: on a German keyboard the key that says y on a US one says z */
+    KeyCode y = XKeysymToKeycode(d, 'y');
+    CHECK(key_after_press(w, y) == KEY_Y);
+    if (system("setxkbmap de 2> /dev/null") == 0)
+    {
+        CHECK(key_after_press(w, y) == KEY_Z);
+        CHECK(system("setxkbmap us 2> /dev/null") == 0);
+        CHECK(key_after_press(w, y) == KEY_Y);
+    }
+    else
+        printf("  setxkbmap de did not work: the layout half is skipped\n");
+    window_destroy(w);
+}
+
 static void test_clocks(void)
 {
     uint64_t prev = time_nanos();
@@ -659,6 +738,7 @@ int main(void)
 #ifdef HAVE_XTEST
         {"held across destroy", test_held_across_destroy},
         {"wheel burst", test_wheel_burst},
+        {"keymap follows", test_keymap_follows},
 #endif
         {"cursors and grabs", test_cursors_and_grabs},
         {"clipboard extremes", test_clipboard_extremes},

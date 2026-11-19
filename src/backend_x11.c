@@ -99,6 +99,10 @@ static struct
     XContext ctx; /* xid -> BackendWindow* */
     XIM xim;
     bool detectable_repeat; /* a held key sends presses only, no synthetic releases */
+    int xkb_event_base;     /* XKB events (XkbMapNotify, XkbNewKeyboardNotify) arrive as this event type, 0 without XKB */
+    /* keycode -> Key, filled on first use from the keysym of the first group and level, dropped when the keyboard
+       mapping changes (MappingNotify, XkbMapNotify, XkbNewKeyboardNotify). Stored as key + 1: 0 is "not looked up". */
+    short keytab[256];
 
     Atom WM_PROTOCOLS, WM_DELETE_WINDOW, NET_WM_NAME, UTF8_STRING;
     Atom NET_WM_STATE, NET_WM_STATE_FULLSCREEN, NET_WM_STATE_MAXIMIZED_VERT,
@@ -162,6 +166,7 @@ struct BackendWindow
         Time time;
     } im_taken[64];
     int im_taken_next;
+    int im_taken_live; /* how many im_taken entries are not yet matched: 0 lets im_copy skip the scan */
     unsigned long kc_serial[256];
     bool key_early;
     struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
@@ -564,6 +569,17 @@ bool backend_init(void)
     Bool detectable = False;
     XkbSetDetectableAutoRepeat(g.dpy, True, &detectable);
     g.detectable_repeat = detectable == True;
+
+    /* Watch for the keyboard mapping changing, so the keycode table (key_of) is dropped when it does. A MappingNotify
+       comes to every client anyway; the XKB events cover a keymap loaded or a keyboard plugged in without one. */
+    {
+        int opcode, error, major = XkbMajorVersion, minor = XkbMinorVersion;
+        if (XkbQueryExtension(g.dpy, &opcode, &g.xkb_event_base, &error, &major, &minor))
+            XkbSelectEvents(g.dpy, XkbUseCoreKbd, XkbMapNotifyMask | XkbNewKeyboardNotifyMask,
+                            XkbMapNotifyMask | XkbNewKeyboardNotifyMask);
+        else
+            g.xkb_event_base = 0;
+    }
 
     /* Every atom in one request: one round trip to the server, not one per atom (34 of them at start-up). */
     static const struct
@@ -1143,6 +1159,31 @@ static void push(BackendWindow *b, Event *e)
     core_push_event(b->core, e);
 }
 
+/* The key a keycode stands for, from the table (see g.keytab). XLookupKeysym costs some 190 instructions
+   with what it calls, on every key event; the table costs one load. */
+static int key_of(unsigned keycode)
+{
+    if (keycode >= 256)
+        return translate_keysym(NoSymbol);
+    int k = g.keytab[keycode] - 1;
+    if (k < 0)
+    {
+        XKeyEvent probe;
+        memset(&probe, 0, sizeof probe);
+        probe.display = g.dpy;
+        probe.keycode = keycode;
+        k = translate_keysym(XLookupKeysym(&probe, 0));
+        g.keytab[keycode] = (short)(k + 1);
+    }
+    return k;
+}
+
+/* The keyboard mapping changed (another client, setxkbmap, a layout switch, a keyboard plugged in). */
+static void keymap_changed(void)
+{
+    memset(g.keytab, 0, sizeof g.keytab);
+}
+
 /* Keys already down when the window gets the focus send no press of their own: they are
    read from the server's keymap, so a key held across a focus change keeps working. */
 static void press_held_keys(BackendWindow *b)
@@ -1157,7 +1198,7 @@ static void press_held_keys(BackendWindow *b)
     {
         if (!(keymap[kc / 8] & (1 << (kc % 8))) || b->kc_down[kc])
             continue;
-        int key = translate_keysym(XkbKeycodeToKeysym(g.dpy, (KeyCode)kc, 0, 0));
+        int key = key_of((unsigned)kc);
         b->kc_down[kc] = true;
         b->kc_gone[kc] = 0;
         b->kc_key[kc] = key;
@@ -1174,9 +1215,8 @@ static void key_text(BackendWindow *b, XEvent *ev);
 
 static void handle_key(BackendWindow *b, XEvent *ev, bool down)
 {
-    KeySym ks = XLookupKeysym(&ev->xkey, 0);
     Event e = {.type = EVENT_KEY};
-    int key = translate_keysym(ks);
+    int key = key_of(ev->xkey.keycode);
     e.data.key.key = key;
     if (ev->xkey.keycode < 256)
     {
@@ -1732,15 +1772,31 @@ static void release_pointer(BackendWindow *b)
     XFlush(g.dpy);
 }
 
+/* An entry the input method never sent back (the local method takes a dead key and composes a new event of its own,
+   keycode 0) stays in im_taken; one older than this, in server milliseconds, is dropped so the scan can be skipped. */
+#define IM_TAKEN_STALE_MS 10000u
+
 static bool im_copy(BackendWindow *b, const XEvent *ev)
 {
-    for (int i = 0; i < (int)(sizeof b->im_taken / sizeof b->im_taken[0]); i++)
+    if (b->im_taken_live)
     {
-        if (b->im_taken[i].type == ev->type && b->im_taken[i].keycode == ev->xkey.keycode &&
-            b->im_taken[i].serial == ev->xany.serial && b->im_taken[i].time == ev->xkey.time)
+        for (int i = 0; i < (int)(sizeof b->im_taken / sizeof b->im_taken[0]); i++)
         {
-            b->im_taken[i].type = 0;
-            return true;
+            if (!b->im_taken[i].type)
+                continue;
+            if (b->im_taken[i].type == ev->type && b->im_taken[i].keycode == ev->xkey.keycode &&
+                b->im_taken[i].serial == ev->xany.serial && b->im_taken[i].time == ev->xkey.time)
+            {
+                b->im_taken[i].type = 0;
+                b->im_taken_live--;
+                return true;
+            }
+            uint32_t age = (uint32_t)ev->xkey.time - (uint32_t)b->im_taken[i].time;
+            if (age > IM_TAKEN_STALE_MS && age < 0x80000000u)
+            {
+                b->im_taken[i].type = 0;
+                b->im_taken_live--;
+            }
         }
     }
     return ev->xkey.keycode < 256 && (long)(ev->xany.serial - b->kc_serial[ev->xkey.keycode]) < 0;
@@ -1754,6 +1810,8 @@ static void key_early(BackendWindow *b, XEvent *ev)
         return;
     int i = b->im_taken_next;
     b->im_taken_next = (i + 1) % (int)(sizeof b->im_taken / sizeof b->im_taken[0]);
+    if (!b->im_taken[i].type)
+        b->im_taken_live++;
     b->im_taken[i].type = ev->type;
     b->im_taken[i].keycode = ev->xkey.keycode;
     b->im_taken[i].serial = ev->xany.serial;
@@ -1831,7 +1889,7 @@ static void process_event(BackendWindow *b, XEvent *ev)
             {
                 XNextEvent(g.dpy, &next);
                 Event e = {.type = EVENT_KEY};
-                e.data.key.key = translate_keysym(XLookupKeysym(&next.xkey, 0));
+                e.data.key.key = key_of(next.xkey.keycode);
                 e.data.key.scancode = (int)next.xkey.keycode;
                 e.data.key.down = true;
                 e.data.key.repeat = true;
@@ -2333,7 +2391,9 @@ void backend_pump_events(BackendWindow *b, Core *core)
     b->pending_n = 0;
     flush_preedit(b);
 
-    while (XPending(g.dpy))
+    /* XQLength is a read of the queue; XPending (a call that takes the display lock and flushes the output buffer, some
+       160 instructions) is only needed when the queue has run dry, to read what the server sent meanwhile. */
+    while (XQLength(g.dpy) || XPending(g.dpy))
     {
         XEvent ev;
         XNextEvent(g.dpy, &ev);
@@ -2348,6 +2408,22 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
         else if (XFilterEvent(&ev, None))
             continue;
+        if (ev.type == MappingNotify)
+        {
+            if (ev.xmapping.request != MappingPointer)
+            {
+                XRefreshKeyboardMapping(&ev.xmapping); /* Xlib's own copy, which XLookupKeysym reads */
+                keymap_changed();
+            }
+            continue;
+        }
+        if (g.xkb_event_base && ev.type == g.xkb_event_base)
+        {
+            int t = ((const XkbAnyEvent *)&ev)->xkb_type;
+            if (t == XkbMapNotify || t == XkbNewKeyboardNotify)
+                keymap_changed();
+            continue;
+        }
         if (ev.type == SelectionRequest)
         {
             answer_selection_request(&ev.xselectionrequest);
