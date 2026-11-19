@@ -545,40 +545,57 @@ bool backend_init(void)
     XkbSetDetectableAutoRepeat(g.dpy, True, &detectable);
     g.detectable_repeat = detectable == True;
 
-    g.WM_PROTOCOLS = XInternAtom(g.dpy, "WM_PROTOCOLS", False);
-    g.WM_DELETE_WINDOW = XInternAtom(g.dpy, "WM_DELETE_WINDOW", False);
-    g.NET_WM_NAME = XInternAtom(g.dpy, "_NET_WM_NAME", False);
-    g.UTF8_STRING = XInternAtom(g.dpy, "UTF8_STRING", False);
-    g.NET_WM_STATE = XInternAtom(g.dpy, "_NET_WM_STATE", False);
-    g.NET_WM_STATE_FULLSCREEN = XInternAtom(g.dpy, "_NET_WM_STATE_FULLSCREEN", False);
-    g.NET_WM_STATE_MAXIMIZED_VERT = XInternAtom(g.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
-    g.NET_WM_STATE_MAXIMIZED_HORZ = XInternAtom(g.dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
-    g.NET_WM_STATE_HIDDEN = XInternAtom(g.dpy, "_NET_WM_STATE_HIDDEN", False);
-    g.NET_WM_STATE_ABOVE = XInternAtom(g.dpy, "_NET_WM_STATE_ABOVE", False);
-    g.NET_WM_STATE_DEMANDS_ATTENTION = XInternAtom(g.dpy, "_NET_WM_STATE_DEMANDS_ATTENTION", False);
-    g.NET_ACTIVE_WINDOW = XInternAtom(g.dpy, "_NET_ACTIVE_WINDOW", False);
-    g.NET_WM_ICON = XInternAtom(g.dpy, "_NET_WM_ICON", False);
-    g.NET_WM_WINDOW_OPACITY = XInternAtom(g.dpy, "_NET_WM_WINDOW_OPACITY", False);
-    g.MOTIF_WM_HINTS = XInternAtom(g.dpy, "_MOTIF_WM_HINTS", False);
-    g.CLIPBOARD = XInternAtom(g.dpy, "CLIPBOARD", False);
-    g.TARGETS = XInternAtom(g.dpy, "TARGETS", False);
-    g.XSEL_DATA = XInternAtom(g.dpy, "PLATFORM_CLIPBOARD", False);
-    g.INCR = XInternAtom(g.dpy, "INCR", False);
-    g.TEXT_PLAIN = XInternAtom(g.dpy, "text/plain", False);
-    g.TEXT_PLAIN_UTF8 = XInternAtom(g.dpy, "text/plain;charset=utf-8", False);
-    g.TEXT = XInternAtom(g.dpy, "TEXT", False);
-    g.XdndAware = XInternAtom(g.dpy, "XdndAware", False);
-    g.XdndEnter = XInternAtom(g.dpy, "XdndEnter", False);
-    g.XdndPosition = XInternAtom(g.dpy, "XdndPosition", False);
-    g.XdndStatus = XInternAtom(g.dpy, "XdndStatus", False);
-    g.XdndLeave = XInternAtom(g.dpy, "XdndLeave", False);
-    g.XdndDrop = XInternAtom(g.dpy, "XdndDrop", False);
-    g.XdndFinished = XInternAtom(g.dpy, "XdndFinished", False);
-    g.XdndSelection = XInternAtom(g.dpy, "XdndSelection", False);
-    g.XdndTypeList = XInternAtom(g.dpy, "XdndTypeList", False);
-    g.XdndActionCopy = XInternAtom(g.dpy, "XdndActionCopy", False);
-    g.XDND_DATA = XInternAtom(g.dpy, "PLATFORM_XDND", False);
-    g.TEXT_URI_LIST = XInternAtom(g.dpy, "text/uri-list", False);
+    /* Every atom in one request: one round trip to the server, not one per atom (34 of them at start-up). */
+    static const struct
+    {
+        const char *name;
+        Atom *atom;
+    } atoms[] = {
+        {"WM_PROTOCOLS", &g.WM_PROTOCOLS},
+        {"WM_DELETE_WINDOW", &g.WM_DELETE_WINDOW},
+        {"_NET_WM_NAME", &g.NET_WM_NAME},
+        {"UTF8_STRING", &g.UTF8_STRING},
+        {"_NET_WM_STATE", &g.NET_WM_STATE},
+        {"_NET_WM_STATE_FULLSCREEN", &g.NET_WM_STATE_FULLSCREEN},
+        {"_NET_WM_STATE_MAXIMIZED_VERT", &g.NET_WM_STATE_MAXIMIZED_VERT},
+        {"_NET_WM_STATE_MAXIMIZED_HORZ", &g.NET_WM_STATE_MAXIMIZED_HORZ},
+        {"_NET_WM_STATE_HIDDEN", &g.NET_WM_STATE_HIDDEN},
+        {"_NET_WM_STATE_ABOVE", &g.NET_WM_STATE_ABOVE},
+        {"_NET_WM_STATE_DEMANDS_ATTENTION", &g.NET_WM_STATE_DEMANDS_ATTENTION},
+        {"_NET_ACTIVE_WINDOW", &g.NET_ACTIVE_WINDOW},
+        {"_NET_WM_ICON", &g.NET_WM_ICON},
+        {"_NET_WM_WINDOW_OPACITY", &g.NET_WM_WINDOW_OPACITY},
+        {"_MOTIF_WM_HINTS", &g.MOTIF_WM_HINTS},
+        {"CLIPBOARD", &g.CLIPBOARD},
+        {"TARGETS", &g.TARGETS},
+        {"PLATFORM_CLIPBOARD", &g.XSEL_DATA},
+        {"INCR", &g.INCR},
+        {"text/plain", &g.TEXT_PLAIN},
+        {"text/plain;charset=utf-8", &g.TEXT_PLAIN_UTF8},
+        {"TEXT", &g.TEXT},
+        {"XdndAware", &g.XdndAware},
+        {"XdndEnter", &g.XdndEnter},
+        {"XdndPosition", &g.XdndPosition},
+        {"XdndStatus", &g.XdndStatus},
+        {"XdndLeave", &g.XdndLeave},
+        {"XdndDrop", &g.XdndDrop},
+        {"XdndFinished", &g.XdndFinished},
+        {"XdndSelection", &g.XdndSelection},
+        {"XdndTypeList", &g.XdndTypeList},
+        {"XdndActionCopy", &g.XdndActionCopy},
+        {"PLATFORM_XDND", &g.XDND_DATA},
+        {"text/uri-list", &g.TEXT_URI_LIST},
+    };
+    enum { ATOM_COUNT = (int)(sizeof atoms / sizeof atoms[0]) };
+    char *names[ATOM_COUNT];
+    Atom found[ATOM_COUNT];
+    for (int i = 0; i < ATOM_COUNT; i++)
+        names[i] = (char *)atoms[i].name;
+    if (XInternAtoms(g.dpy, names, ATOM_COUNT, False, found))
+    {
+        for (int i = 0; i < ATOM_COUNT; i++)
+            *atoms[i].atom = found[i];
+    }
 
     /* A 1x1 unmapped window owns the CLIPBOARD selection and answers conversion
        requests, so clipboard ownership outlives any single visible window. */
