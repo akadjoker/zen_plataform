@@ -73,7 +73,7 @@ real, sem saltos), mas ha uma perda que se prova com o mesmo programa:
   delta perdido quando o `reanchor` e armado durante a compactacao (as tres notas da ronda 3) deixam de existir com o
   movimento em bruto.
 - O Xvfb nao tem rato real, compositor nem vsync: a perda acima e determinista (o servidor corta o movimento no limite da
-  janela) mas a velocidade a que um rato a sério a faz acontecer so se sabe com um rato.
+  janela) mas a velocidade a que um rato de verdade a faz acontecer so se sabe com um rato.
 
 ## Limpeza dos temporarios de `io_save_file`
 
