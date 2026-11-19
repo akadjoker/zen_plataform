@@ -23,12 +23,14 @@ add_fake_test(test_gestures)
 add_fake_test(test_log)
 add_fake_test(test_events)
 add_fake_test(test_core_edge)
-add_fake_test(test_null_handles)
-target_sources(test_null_handles PRIVATE ${CMAKE_SOURCE_DIR}/src/clipboard.c ${CMAKE_SOURCE_DIR}/src/png.c ${CMAKE_SOURCE_DIR}/src/vulkan.c
-    ${CMAKE_SOURCE_DIR}/src/draw2d.c ${CMAKE_SOURCE_DIR}/src/library.c ${CMAKE_SOURCE_DIR}/src/os.c ${CMAKE_SOURCE_DIR}/src/io.c
-    ${CMAKE_SOURCE_DIR}/src/io_posix.c ${CMAKE_SOURCE_DIR}/src/fs_posix.c)
-target_link_libraries(test_null_handles PRIVATE ${CMAKE_DL_LIBS})
-target_compile_definitions(test_null_handles PRIVATE ZP_HEADER="${CMAKE_SOURCE_DIR}/include/platform.h")
+if(NOT WIN32) # forks a child per function, and uses the POSIX sources
+    add_fake_test(test_null_handles)
+    target_sources(test_null_handles PRIVATE ${CMAKE_SOURCE_DIR}/src/clipboard.c ${CMAKE_SOURCE_DIR}/src/png.c ${CMAKE_SOURCE_DIR}/src/vulkan.c
+        ${CMAKE_SOURCE_DIR}/src/draw2d.c ${CMAKE_SOURCE_DIR}/src/library.c ${CMAKE_SOURCE_DIR}/src/os.c ${CMAKE_SOURCE_DIR}/src/io.c
+        ${CMAKE_SOURCE_DIR}/src/io_posix.c ${CMAKE_SOURCE_DIR}/src/fs_posix.c)
+    target_link_libraries(test_null_handles PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_definitions(test_null_handles PRIVATE ZP_HEADER="${CMAKE_SOURCE_DIR}/include/platform.h")
+endif()
 add_fake_test(test_time)
 
 # Portable modules with no window backend: compile just their sources (in ARGN).
