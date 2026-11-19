@@ -812,6 +812,223 @@ static void test_first_dead_key_late_method(void)
     unlink(g_compose_path);
 }
 
+/* Application code that destroys windows from inside the platform's own dispatch: an event hook, a hit test, the frame
+   callback of app_run. The backend is in the middle of the window's events when the application returns, so the destroy
+   is deferred until window_begin_frame / app_run returns (core.c, g_depth); under ASan a use after free would be a report. */
+typedef struct
+{
+    PlatformWindow *self, *other, *made;
+    int calls;
+    int frames;
+} Hooked;
+
+static int windows_on_server(Display *probe)
+{
+    Window r, parent, *kids = NULL;
+    unsigned n = 0;
+    XQueryTree(probe, DefaultRootWindow(probe), &r, &parent, &kids, &n);
+    if (kids)
+        XFree(kids);
+    return (int)n;
+}
+
+static void inject_key_at(PlatformWindow *w, KeyCode kc)
+{
+    Display *d = dpy_of(w);
+    int rx = 0, ry = 0;
+    window_get_position(w, &rx, &ry);
+    XTestFakeMotionEvent(d, -1, rx + 50, ry + 50, 0);
+    XTestFakeKeyEvent(d, kc, True, 0);
+    XTestFakeKeyEvent(d, kc, False, 0);
+    XSync(d, False);
+    time_sleep(30);
+}
+
+static void hook_destroy_self(PlatformWindow *w, const Event *e, void *user)
+{
+    Hooked *h = user;
+    if (e->type == EVENT_KEY && e->data.key.down && h->calls++ == 0)
+        window_destroy(w);
+}
+
+static void hook_destroy_other(PlatformWindow *w, const Event *e, void *user)
+{
+    (void)w;
+    Hooked *h = user;
+    if (e->type == EVENT_KEY && e->data.key.down && h->calls++ == 0)
+        window_destroy(h->other);
+}
+
+static void hook_create(PlatformWindow *w, const Event *e, void *user)
+{
+    (void)w;
+    Hooked *h = user;
+    if (e->type == EVENT_KEY && e->data.key.down && h->calls++ == 0)
+        h->made = make(RENDER_PIXELS, 120, 90);
+}
+
+static HitTestResult hit_destroy_self(PlatformWindow *w, int x, int y, void *user)
+{
+    (void)x, (void)y;
+    Hooked *h = user;
+    if (h->calls++ == 0)
+        window_destroy(w);
+    return HIT_NORMAL;
+}
+
+static void frame_destroy_self(PlatformWindow *w, void *user)
+{
+    Hooked *h = user;
+    if (++h->frames == 3)
+        window_destroy(w);
+}
+
+static void frame_create_and_destroy_other(PlatformWindow *w, void *user)
+{
+    Hooked *h = user;
+    if (++h->frames == 2)
+    {
+        h->made = make(RENDER_PIXELS, 100, 80);
+        window_destroy(h->other);
+    }
+    if (h->frames == 4)
+        window_set_should_close(w, true);
+}
+
+static void test_destroy_in_callbacks(void)
+{
+    Display *probe = XOpenDisplay(NULL);
+    CHECK(probe != NULL);
+    if (!probe)
+        return;
+    int base = windows_on_server(probe);
+    KeyCode a = XKeysymToKeycode(probe, 'a');
+
+    /* the event hook destroys its own window on the first key press */
+    {
+        Hooked h = {0};
+        PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+        CHECK(w != NULL);
+        h.self = w;
+        window_set_event_hook(w, hook_destroy_self, &h);
+        settle(w);
+        inject_key_at(w, a);
+        window_begin_frame(w); /* the key arrives, the hook destroys the window, the pump goes on with it */
+        CHECK(h.calls == 1);
+        window_destroy(w); /* a second destroy of a window already gone: nothing */
+        XSync(probe, False);
+        CHECK(windows_on_server(probe) == base);
+    }
+    /* the hook of one window destroys another, which has an event of its own in flight */
+    {
+        Hooked h = {0};
+        PlatformWindow *w = make(RENDER_PIXELS, 200, 150), *w2 = make(RENDER_PIXELS, 100, 80);
+        CHECK(w != NULL && w2 != NULL);
+        h.self = w;
+        h.other = w2;
+        window_set_event_hook(w, hook_destroy_other, &h);
+        window_set_event_hook(w2, hook_destroy_other, &h);
+        settle(w);
+        inject_key_at(w, a);
+        window_begin_frame(w);
+        window_begin_frame(w2); /* if it was already freed this is a use after free */
+        CHECK(h.calls >= 1);
+        window_begin_frame(w);
+        XSync(probe, False);
+        CHECK(windows_on_server(probe) == base + 1);
+        window_destroy(w);
+    }
+    /* the hook makes a window */
+    {
+        Hooked h = {0};
+        PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+        CHECK(w != NULL);
+        window_set_event_hook(w, hook_create, &h);
+        settle(w);
+        inject_key_at(w, a);
+        window_begin_frame(w);
+        CHECK(h.calls == 1 && h.made != NULL);
+        if (h.made)
+        {
+            settle(h.made);
+            CHECK(!window_should_close(h.made));
+            window_destroy(h.made);
+        }
+        window_destroy(w);
+    }
+    /* the hit test (called on a left-button press and on pointer motion) destroys its own window */
+    {
+        Hooked h = {0};
+        PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+        CHECK(w != NULL);
+        window_set_hit_test(w, hit_destroy_self, &h);
+        settle(w);
+        Display *d = dpy_of(w);
+        int rx = 0, ry = 0;
+        window_get_position(w, &rx, &ry);
+        XTestFakeMotionEvent(d, -1, rx + 60, ry + 60, 0);
+        XTestFakeButtonEvent(d, 1, True, 0);
+        XTestFakeButtonEvent(d, 1, False, 0);
+        XSync(d, False);
+        time_sleep(30);
+        window_begin_frame(w);
+        CHECK(h.calls >= 1);
+        XSync(probe, False);
+        CHECK(windows_on_server(probe) == base);
+    }
+    /* the frame callback of app_run destroys its own window: the loop ends, and the frame after never runs */
+    {
+        Hooked h = {0};
+        PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+        CHECK(w != NULL);
+        app_run(w, frame_destroy_self, &h);
+        CHECK(h.frames == 3);
+        XSync(probe, False);
+        CHECK(windows_on_server(probe) == base);
+    }
+    /* ... creates one window and destroys another, and ends by should_close */
+    {
+        Hooked h = {0};
+        PlatformWindow *w = make(RENDER_PIXELS, 200, 150), *w2 = make(RENDER_PIXELS, 100, 80);
+        CHECK(w != NULL && w2 != NULL);
+        h.other = w2;
+        app_run(w, frame_create_and_destroy_other, &h);
+        CHECK(h.frames == 4 && h.made != NULL);
+        XSync(probe, False);
+        CHECK(windows_on_server(probe) == base + 2); /* w and the one made */
+        window_destroy(h.made);
+        window_destroy(w);
+    }
+    XCloseDisplay(probe);
+}
+
+static void hook_shutdown(PlatformWindow *w, const Event *e, void *user)
+{
+    (void)w;
+    Hooked *h = user;
+    if (e->type == EVENT_KEY && e->data.key.down && h->calls++ == 0)
+        platform_shutdown();
+}
+
+/* platform_shutdown from a hook waits for the hook to return, then takes everything down: windows included */
+static void test_shutdown_in_hook(void)
+{
+    Hooked h = {0};
+    PlatformWindow *w = make(RENDER_PIXELS, 200, 150), *w2 = make(RENDER_PIXELS, 100, 80);
+    CHECK(w != NULL && w2 != NULL);
+    window_set_event_hook(w, hook_shutdown, &h);
+    window_set_event_hook(w2, hook_shutdown, &h); /* the key goes to whichever is on top */
+    settle(w);
+    KeyCode a = XKeysymToKeycode(dpy_of(w), 'a');
+    inject_key_at(w, a);
+    window_begin_frame(w);
+    window_begin_frame(w2);
+    CHECK(h.calls == 1);
+    CHECK(monitor_count() == 0); /* the platform is down now */
+    window_destroy(w);           /* stale pointers: ignored */
+    window_destroy(w2);
+}
+
 static void test_clocks(void)
 {
     uint64_t prev = time_nanos();
@@ -867,6 +1084,8 @@ int main(void)
         {"held across destroy", test_held_across_destroy},
         {"wheel burst", test_wheel_burst},
         {"keymap follows", test_keymap_follows},
+        {"destroy inside callbacks", test_destroy_in_callbacks},
+        {"shutdown inside a hook", test_shutdown_in_hook},
         {"first dead key, input method opened late", test_first_dead_key_late_method, pre_dead_server},
 #endif
         {"cursors and grabs", test_cursors_and_grabs},
