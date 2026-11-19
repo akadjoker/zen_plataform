@@ -336,39 +336,52 @@ static EM_BOOL on_touch(int type, const EmscriptenTouchEvent *e, void *user)
 /* ========================================================================== */
 
 #define WEB_DROP_MAX 64
+/* Each batch of paths stays valid after it is queued: events wait in the queue until the frame drains it, and several
+   batches (fetched files finishing in the same frame) can be waiting. A slot is reused only after
+   WEB_DROP_BATCHES later batches. */
+#define WEB_DROP_BATCHES 256
 
-static char *g_drop_paths[WEB_DROP_MAX];
-static int g_drop_n;
+typedef struct
+{
+    char *paths[WEB_DROP_MAX];
+    int n;
+} DropBatch;
+
+static DropBatch g_drop_ring[WEB_DROP_BATCHES];
+static int g_drop_next;
 static int g_drop_staged;
 
-static void web_drop_clear(void)
+static void web_drop_clear(DropBatch *d)
 {
-    for (int i = 0; i < g_drop_n; i++)
-        free(g_drop_paths[i]);
-    g_drop_n = 0;
+    for (int i = 0; i < d->n; i++)
+        free(d->paths[i]);
+    d->n = 0;
 }
 
 /* Called from the JS side, one path per file, then the end call. */
 EMSCRIPTEN_KEEPALIVE void pf_web_drop_add(char *path)
 {
+    DropBatch *d = &g_drop_ring[g_drop_next];
     if (g_drop_staged == 0)
-        web_drop_clear();
+        web_drop_clear(d);
     if (g_drop_staged < WEB_DROP_MAX)
-        g_drop_paths[g_drop_staged++] = path;
+        d->paths[g_drop_staged++] = path;
     else
         free(path);
 }
 
 EMSCRIPTEN_KEEPALIVE void pf_web_drop_end(void)
 {
-    g_drop_n = g_drop_staged;
+    DropBatch *d = &g_drop_ring[g_drop_next];
+    d->n = g_drop_staged;
     g_drop_staged = 0;
-    if (g_drop_n == 0 || !g_active)
+    if (d->n == 0 || !g_active)
         return;
     Event e = {.type = EVENT_WINDOW_DROP};
-    e.data.drop.count = g_drop_n;
-    e.data.drop.paths = (const char **)g_drop_paths;
+    e.data.drop.count = d->n;
+    e.data.drop.paths = (const char **)d->paths;
     enqueue_event(g_active, &e);
+    g_drop_next = (g_drop_next + 1) % WEB_DROP_BATCHES;
 }
 
 /* Implemented in web/pf_web.js (a --js-library the platform target adds to the link). */
