@@ -107,41 +107,52 @@ repor antes de abrir um grupo, uma janela ou uma lista, senao estes cortam-se pe
   privado (menus, combo, lista, arrastar janelas), ficam pixel a pixel iguais aos da main, com a unica excepcao do contorno do grupo
   do dialogo de ficheiros.
 
-## Nucleo: o que a ronda de bordas e da comparacao com GLFW e SDL deixou (ramo core-edge-bench)
+## Nucleo: o que as duas rondas de bordas e da comparacao com GLFW e SDL deixaram (ramos core-edge-bench e core-round2)
 
-Os defeitos que se provaram (GLX carregado sem janela GL, `window_set_vsync` numa janela de pixeis, `window_set_size` com 0 ou mais de
-65535, janela que fica no ecra depois de `window_destroy`) estao corrigidos com `tests/test_core_edge_x11.c`; os numeros estao em
-`docs/COMPARACAO_CORE.md`. O que fica:
+Fechado e retirado desta lista (provas nos testes e nas mensagens dos commits; `docs/COMPARACAO_CORE.md` tem os numeros): o GLX
+tocado no `platform_init`, `window_set_vsync` numa janela de pixeis, tamanhos de janela fora do que o protocolo leva, a janela que
+ficava no ecra depois de `window_destroy`, o ponteiro de janela `NULL` (contrato em `platform.h`, `tests/test_null_handles.c`), a
+destruicao de uma janela dentro do gancho de eventos, do teste de acerto ou da frame do `app_run`, o titulo acima do pedido
+maximo do servidor, a tabela de teclas, o `XOpenIM` com o servidor de metodo parado, e o que os fuzzers encontraram
+(`tests/fuzz`, `tools/fuzz.sh`). O que fica:
 
-- **Ponteiro `NULL` de janela.** So `window_create(NULL)` e `window_destroy(NULL)` o aceitam; `window_should_close(NULL)`,
-  `key_down(NULL, ...)`, `mouse_x(NULL)` e as outras desreferenciam-no e rebentam (o GLFW tambem, com uma assercao; o SDL verifica). Nao se
-  mexeu: uma comparacao por chamada nas funcoes de estado que se chamam centenas de vezes por frame e um contrato por decidir ("NULL e erro
-  do programa", a documentar em `platform.h`, ou "NULL e inofensivo"). Provar e trivial (uma chamada), por isso nao se pos teste: o teste
-  seria um crash.
-- **Janela destruida dentro do gancho de eventos da propria janela** (`window_set_event_hook`). O gancho corre dentro de `core_push_event`,
-  que depois de o gancho voltar ainda usa o `Core` (`frame_event_add`, o `switch` do tipo); destruir a janela no gancho liberta esse `Core`.
-  `platform.h` so proibe `window_begin_frame` e `poll_event` no gancho. O teste `test_core_edge_x11` (secao "destroy during events") destroi a
-  janela de dentro do seu proprio ciclo `poll_event` (que para a seguir), que e seguro; o do gancho nao se escreveu por ser um uso depois de
-  libertar. A correccao seria um contador de "dentro do bombeamento" em `PlatformWindow` e libertar quando o bombeamento acaba, ou escrever a
-  proibicao no cabecalho.
-- **Titulo maior do que um pedido do servidor.** Um servidor sem BIG-REQUESTS aceita 256 KB num pedido; `XChangeProperty` com mais da
-  `BadLength` e o Xlib acaba o processo. O Xvfb daqui tem BIG-REQUESTS (um titulo de 8 MB passa, secao "titles"), por isso nao se
-  provou. Cortar o titulo (por exemplo a 32 KB, numa fronteira UTF-8) em `set_title` resolveria.
+- **O metodo de entrada interno do Xlib (a tabela de compose) paga-se no arranque quando `XMODIFIERS` esta vazio e nao ha servidor de
+  metodo, e na primeira tecla quando `XMODIFIERS` aponta para um servidor que nao corre.** Com o servidor parado o arranque custa 5,0 M
+  de instrucoes (era 52,5 M; GLFW 13,9 M) e a primeira tecla, de qualquer janela, 47,6 M (10 a 30 ms, uma vez): o custo mudou de sitio,
+  nao desapareceu. Um jogo que nao leia teclas nao o paga; um que as leia tem um soluco de uma ou duas frames na primeira. Sem
+  `XMODIFIERS` a biblioteca continua a abrir o metodo no arranque (53 M, igual ao GLFW e ao SDL2): o `XOpenIM` e quem decide se ha
+  servidor e nao se pode pedir "so se houver servidor". Faltava ler a propriedade `XIM_SERVERS` da raiz e o dono de `@server=<nome>` (tres
+  idas ao servidor) para saber se vale a pena abrir; nao se fez porque duplica a logica do Xlib e um servidor que se registe de outra
+  forma ficava sem metodo de entrada.
+- **Um `XCreateIC` por janela e metade de criar e destruir uma janela** (cerca de 56 mil das 111 mil instrucoes), a funcao do Xlib que
+  prepara o contexto de entrada com a tabela de compose. E o preco das teclas mortas desde a primeira tecla. Com a abertura tardia
+  do metodo ja nao se paga antes da primeira tecla quando o servidor esta parado; com o metodo aberto no arranque continua a pagar-se
+  por janela. Criar o contexto so no `FocusIn` poupava as janelas que nunca o tem, com o risco de ainda nao existir quando chega a
+  primeira tecla de uma janela com o foco do servidor.
 - **A lista de eventos da frame (256) perde o que chega depois de cheia** (`FRAME_EVENT_MAX`): o estado (`key_down`, botoes, roda,
   posicao) e as filas de teclas (15) e de texto (31) ficam exactos, a lista fica com os primeiros 256 e so deixa entrar, cheia, um
   evento de ponteiro, tamanho ou posicao ao tirar outro destes. Um programa que siga so o fluxo de eventos (um editor de texto) e passe
-  mais de 256 eventos numa frame perde as teclas do fim, e as filas de teclas e de texto enchem muito antes. Esta documentado e fixado
-  em `tests/test_core_edge.c`; nao se mudou porque 256 eventos numa frame ja sao seis segundos de escrita a 40 teclas por segundo.
-- **O metodo de entrada abre-se no arranque e faz o fallback.** `backend_init` chama `XOpenIM`; com `XMODIFIERS=@im=ibus` e o ibus em
-  baixo (o Xvfb, uma sessao sem o servico) falha e repete com `@im=none`, que e o metodo de entrada interno do Xlib e le a tabela de compose
-  (47 M de instrucoes, 10 a 30 ms no arranque). O GLFW e o SDL, na mesma situacao, ficam sem metodo de entrada (sem teclas mortas) e nao
-  pagam. Quando o servidor do metodo esta de pe, o `XOpenIM` e barato. Adiar o `XOpenIM` para a primeira janela nao poupa nada a um
-  programa que abre uma; adia-lo para a primeira tecla perde a primeira tecla morta (o filtro tem de existir antes de ela chegar). Nao se
-  mexeu.
-- **Um `XCreateIC` por janela e metade de criar e destruir uma janela** (cerca de 56 mil das 111 mil instrucoes), a funcao do Xlib que
-  prepara o contexto de entrada com a tabela de compose. E o preco das teclas mortas desde a primeira tecla; criar o contexto so quando
-  a janela recebe o foco (o `FocusIn`) pouparia as janelas que nunca o tem (um dialogo que se abre e fecha), com o risco de ainda nao existir
-  quando chega a primeira tecla de uma janela que ja tinha o foco do servidor (a de um servidor sem gestor de janelas).
-- **Teclas: `XLookupKeysym` por evento.** 580 instrucoes por tecla (da ordem de 15 % do caminho de uma tecla); uma tabela
-  keycode -> tecla poupava-as, mas tem de se invalidar com `MappingNotify` e `XkbMapNotify` (o Xlib actualiza o seu mapa sozinho com o XKB;
-  a zen_platform nao escolhe esses eventos), por isso nao se fez sem um teste que mude o teclado a meio.
+  mais de 256 eventos numa frame perde as teclas do fim. Esta documentado e fixado em `tests/test_core_edge.c`.
+- **Destruir a janela dentro de um gancho: so se provou no X11 e no Wayland.** A destruicao fica adiada ate `window_begin_frame` ou
+  `app_run` voltar (`g_depth` em `core.c`); o ponteiro da janela deixa de valer nessa altura, por isso um programa que destrua a sua
+  janela no gancho e depois chame `poll_event` na mesma frame le memoria libertada (o teste do Wayland tem de ter cuidado com isso).
+  No Windows o gancho e a chamada de volta de "tempo real" correm dentro do ciclo do sistema, fora destes dois pontos: a destruicao
+  fica para o proximo `window_begin_frame`, `window_create` ou `platform_shutdown`; nao se correu (sem wine). No web e no Android o
+  `app_run` volta logo e as frames correm depois, fora do ambito: ai um `window_destroy` dentro da frame nao fica adiado.
+- **Windows: so se compila.** Tudo o que mudou em `core.c`, `clipboard.c`, `png.c` e `gamepad.c` compila no MinGW sem avisos
+  (`tools/check.sh mingw`); o que e do X11 e do Wayland nao se compilou no Windows e o resto nao se correu (nao ha wine aqui).
+- **O dono morto do clipboard lembra-se pelo id da janela.** Um cliente novo pode receber o id de janela de um cliente que morreu
+  (o servidor reaproveita a base dos ids); se o anterior estava marcado como morto, os pedidos ao novo falham durante 10 s. Um dono
+  parado de verdade ainda tem os seus ids e o servidor larga a seleccao quando o cliente morre, por isso nao se viu fora de um teste
+  que mata e recria clientes depressa. A defesa seria juntar o numero de serie da seleccao.
+- **Wayland: nao se mediu contra o GLFW e o SDL2.** O GLFW 3.3.10 do pacote Ubuntu so tem X11 e nao ha compositor sem janela (o weston
+  nao esta instalado); o SDL2 em Wayland nao se tentou sem um. As seccoes do X11 correm no Wayland contra o compositor de teste
+  (`tests/test_core_edge_wayland.c`), que nao tem dispositivo de dados nem o resto do que um compositor a serio tem: o clipboard do
+  Wayland, o arrastar e largar e as decoracoes do lado do compositor continuam sem teste de bordas.
+- **Os fuzzers correram minutos, nao horas.** `fuzz_images` (PNG e BMP), `fuzz_paths`, `fuzz_x11_events` e `fuzz_clipboard_x11` correram de
+  100 a 150 s cada, com semente fixa, depois de corrigidos os defeitos que acharam; o X11 de baixo nivel (XInput2, o metodo de entrada
+  de um servidor ibus), o Wayland (o que um compositor hostil manda), o arrastar e largar fora do X11 e a copia do `stb_image` do `zen_ui`
+  (fora do ambito, e com os mesmos problemas do PNG que se corrigiram em `png.c`) nao tem fuzzer. Para os fechar: correr
+  `tools/fuzz.sh` com `ZP_FUZZ_SECONDS` de horas, e um alvo por protocolo que falta.
+- **`process_spawn` apos `fork` usa `fprintf`.** Nao se reproduziu um bloqueio com o lock do `stderr` tomado por outro fio (o glibc 2.39
+  reinicia os locks do stdio no filho); com outra libc podia haver. Trocar o `fprintf` por um `write` e trivial; nao se fez sem prova.

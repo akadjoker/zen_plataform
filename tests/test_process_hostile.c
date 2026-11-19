@@ -126,9 +126,9 @@ static void test_children_that_die(void)
 
 static void *hold_stderr(void *arg)
 {
-    volatile int *go = arg;
+    int *go = arg;
     flockfile(stderr);
-    *go = 1;
+    __atomic_store_n(go, 1, __ATOMIC_SEQ_CST);
     sleep_ms(2500);
     funlockfile(stderr);
     return NULL;
@@ -137,10 +137,10 @@ static void *hold_stderr(void *arg)
 /* fork copies the lock of stderr as it is: held by a thread the child does not have */
 static void test_exec_failure_with_stderr_locked(void)
 {
-    volatile int go = 0;
+    int go = 0;
     pthread_t t;
-    pthread_create(&t, NULL, hold_stderr, (void *)&go);
-    while (!go)
+    pthread_create(&t, NULL, hold_stderr, &go);
+    while (!__atomic_load_n(&go, __ATOMIC_SEQ_CST))
         sleep_ms(1);
     int64_t id = process_spawn("/nonexistent/program", NULL, 0, false);
     CHECK(id > 0);
