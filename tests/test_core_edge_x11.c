@@ -421,6 +421,100 @@ static void test_held_across_destroy(void)
 }
 #endif
 
+#ifdef HAVE_XTEST
+/* Hundreds of wheel notches reach the application in one frame, more than the event list holds: the sum is exact
+   (vertical and horizontal), and a notch is not a button press. */
+static void test_wheel_burst(void)
+{
+    PlatformWindow *w = make(RENDER_PIXELS, 300, 200);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    int rx = 0, ry = 0;
+    window_get_position(w, &rx, &ry);
+    settle(w);
+    XTestFakeMotionEvent(d, -1, rx + 100, ry + 100, 0);
+    XSync(d, False);
+    time_sleep(20);
+    window_begin_frame(w);
+    const int up = 700, down = 200, left = 90, right = 30;
+    for (int i = 0; i < up; i++)
+    {
+        XTestFakeButtonEvent(d, 4, True, 0);
+        XTestFakeButtonEvent(d, 4, False, 0);
+    }
+    for (int i = 0; i < down; i++)
+    {
+        XTestFakeButtonEvent(d, 5, True, 0);
+        XTestFakeButtonEvent(d, 5, False, 0);
+    }
+    for (int i = 0; i < left; i++)
+    {
+        XTestFakeButtonEvent(d, 6, True, 0);
+        XTestFakeButtonEvent(d, 6, False, 0);
+    }
+    for (int i = 0; i < right; i++)
+    {
+        XTestFakeButtonEvent(d, 7, True, 0);
+        XTestFakeButtonEvent(d, 7, False, 0);
+    }
+    XSync(d, False);
+    time_sleep(100);
+    window_begin_frame(w);
+    float wx = 0, wy = 0;
+    mouse_wheel_v(w, &wx, &wy);
+    CHECK(wy == (float)(up - down));
+    CHECK(wx == (float)(right - left));
+    for (int b = 0; b < MOUSE_BUTTON_MAX; b++)
+        CHECK(!mouse_button_down(w, b));
+    window_destroy(w);
+}
+#endif
+
+/* The pointer mode, the shape and the grab switched in any order, a shape changed ten thousand times, and the window
+   destroyed in the middle of a capture: the server's pointer is free afterwards (a second connection can grab it). */
+static void test_cursors_and_grabs(void)
+{
+    PlatformWindow *w = make(RENDER_PIXELS, 300, 200);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    settle(w);
+    for (int i = 0; i < 10000; i++)
+        mouse_set_cursor(w, i % (CURSOR_COUNT + 2) - 1); /* -1 and CURSOR_COUNT are not shapes */
+    unsigned seed = 7;
+    for (int i = 0; i < 400; i++)
+    {
+        seed = seed * 1103515245u + 12345u;
+        switch ((seed >> 16) % 5)
+        {
+        case 0: mouse_set_mode(w, MOUSE_MODE_NORMAL); break;
+        case 1: mouse_set_mode(w, MOUSE_MODE_HIDDEN); break;
+        case 2: mouse_set_mode(w, MOUSE_MODE_CAPTURED); break;
+        case 3: mouse_capture(w, (seed >> 20) & 1); break;
+        default: mouse_set_cursor(w, (int)((seed >> 20) % CURSOR_COUNT)); break;
+        }
+        if (i % 5 == 0)
+            window_begin_frame(w);
+    }
+    mouse_set_mode(w, MOUSE_MODE_CAPTURED);
+    window_begin_frame(w);
+    window_destroy(w); /* captured */
+    Display *probe = XOpenDisplay(NULL);
+    CHECK(probe != NULL);
+    if (probe)
+    {
+        XSync(probe, False);
+        CHECK(XGrabPointer(probe, DefaultRootWindow(probe), False, ButtonPressMask, GrabModeAsync, GrabModeAsync, None, None,
+                           CurrentTime) == GrabSuccess);
+        XUngrabPointer(probe, CurrentTime);
+        XCloseDisplay(probe);
+    }
+    (void)d;
+}
+
 static void test_clipboard_extremes(void)
 {
     static const struct
@@ -514,7 +608,9 @@ int main(void)
         {"destroy during events", test_destroy_during_events},
 #ifdef HAVE_XTEST
         {"held across destroy", test_held_across_destroy},
+        {"wheel burst", test_wheel_burst},
 #endif
+        {"cursors and grabs", test_cursors_and_grabs},
         {"clipboard extremes", test_clipboard_extremes},
         {"clocks", test_clocks},
     };
