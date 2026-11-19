@@ -8,10 +8,13 @@
  *   vsync on a window of pixels                           another window's swap interval is left alone
  *   WM_DROPFILES                                          the paths outlive the message; a handle that is not a drop is not read nor freed
  *   the clipboard                                         an unterminated text, a DIB larger than its block, an HDROP whose list does not end
+ *   child processes                                       ids that are no process id; process_kill_tree reaches a grandchild, also one that outlives the leader;
+ *                                                         a finished process keeps its own exit code through process_kill and process_kill_tree
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <GL/gl.h>
 
 /* the DROPFILES of <shlobj.h> */
@@ -368,6 +371,109 @@ static void test_clipboard(void)
     window_destroy(w);
 }
 
+/* ---- child processes (src/process_win32.c) ---- */
+
+/* the process id of a ping.exe whose parent was process `parent` (the parent may be gone: the snapshot keeps the number),
+   0 if none, within about 10 s */
+static DWORD find_ping(DWORD parent)
+{
+    for (int tries = 0; tries < 200; tries++)
+    {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE)
+        {
+            PROCESSENTRY32 pe;
+            pe.dwSize = sizeof pe;
+            for (BOOL more = Process32First(snap, &pe); more; more = Process32Next(snap, &pe))
+            {
+                if (pe.th32ParentProcessID == parent && _stricmp(pe.szExeFile, "ping.exe") == 0)
+                {
+                    CloseHandle(snap);
+                    return pe.th32ProcessID;
+                }
+            }
+            CloseHandle(snap);
+        }
+        Sleep(50);
+    }
+    return 0;
+}
+
+/* the process behind `pid` ends within 10 s (a handle opened while it runs: a process id is reused once it is gone) */
+static bool ends_within_10s(HANDLE h)
+{
+    return h && WaitForSingleObject(h, 10000) == WAIT_OBJECT_0;
+}
+
+static bool wait_finished(int64_t id)
+{
+    for (int i = 0; i < 1000; i++)
+    {
+        if (!process_is_running(id))
+            return true;
+        Sleep(10);
+    }
+    return false;
+}
+
+static void test_process(void)
+{
+    /* ids that are no process id are refused whatever the number: one with a bit above the 32 of a DWORD would be read as
+       the process id that is left of it, and end a child nobody named */
+    const char *slow[] = {"/c", "ping -n 60 127.0.0.1 > nul"};
+    int64_t id = process_spawn("cmd.exe", slow, 2, false);
+    CHECK(id > 0);
+    if (id <= 0)
+        return;
+    const int64_t bad[] = {0, -1, INT64_MIN, INT64_MAX, id + (1LL << 32), id | (1LL << 62), 4};
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    {
+        CHECK(!process_is_running(bad[i]));
+        CHECK(process_exit_code(bad[i]) == -1);
+        CHECK(!process_kill(bad[i]));
+        CHECK(!process_kill_tree(bad[i]));
+    }
+    CHECK(process_is_running(id));
+
+    /* cmd runs ping as its child, in the job process_spawn made: process_kill_tree ends both */
+    DWORD ping = find_ping((DWORD)id);
+    CHECK(ping != 0);
+    HANDLE ping_handle = ping ? OpenProcess(SYNCHRONIZE, FALSE, ping) : NULL;
+    CHECK(process_kill_tree(id));
+    CHECK(!process_is_running(id));
+    CHECK(process_exit_code(id) != -1);
+    CHECK(ends_within_10s(ping_handle));
+    if (ping_handle)
+        CloseHandle(ping_handle);
+    CHECK(process_kill_tree(id)); /* again: nothing left, not an error */
+    CHECK(process_kill(id));
+
+    /* the leader ends, the grandchild does not (start /b): the job still holds it, and a finished record still reaches it */
+    const char *orphan[] = {"/c", "start /b ping -n 60 127.0.0.1 > nul"};
+    int64_t leader = process_spawn("cmd.exe", orphan, 2, false);
+    CHECK(leader > 0);
+    CHECK(wait_finished(leader));
+    DWORD orphan_ping = find_ping((DWORD)leader);
+    CHECK(orphan_ping != 0);
+    HANDLE orphan_handle = orphan_ping ? OpenProcess(SYNCHRONIZE, FALSE, orphan_ping) : NULL;
+    CHECK(orphan_handle && WaitForSingleObject(orphan_handle, 0) == WAIT_TIMEOUT); /* outlived the leader */
+    CHECK(process_kill_tree(leader));
+    CHECK(ends_within_10s(orphan_handle));
+    if (orphan_handle)
+        CloseHandle(orphan_handle);
+
+    /* a process that ended by itself keeps its own code: neither kill call invents one */
+    const char *five[] = {"/c", "exit 5"};
+    int64_t done = process_spawn("cmd.exe", five, 2, false);
+    CHECK(done > 0);
+    CHECK(wait_finished(done));
+    CHECK(process_exit_code(done) == 5);
+    CHECK(process_kill(done));
+    CHECK(process_exit_code(done) == 5);
+    CHECK(process_kill_tree(done));
+    CHECK(process_exit_code(done) == 5);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -380,6 +486,7 @@ int main(void)
     test_vsync_of_pixel_window();
     test_drop();
     test_clipboard();
+    test_process();
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
