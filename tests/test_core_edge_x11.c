@@ -774,6 +774,63 @@ static void pre_no_modifiers(void)
     compose_env(NULL);
 }
 
+/* key_mods used to ask the server for the lock state (XkbGetState: a round trip and an allocation) on every call. It reads what
+   the XkbStateNotify events last said now, so: no request goes out however often it is called, a lock toggled while no window
+   has the focus is seen at the next frame, and one toggled before the focus came is right after the focus-in. */
+static void toggle_key(Display *d, KeyCode kc)
+{
+    XTestFakeKeyEvent(d, kc, True, 0);
+    XTestFakeKeyEvent(d, kc, False, 0);
+    XSync(d, False);
+    time_sleep(30);
+}
+
+static void test_lock_state_cached(void)
+{
+    PlatformWindow *w = make(RENDER_PIXELS, 200, 150);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    Display *d = dpy_of(w);
+    settle(w);
+    int first = key_mods(w) & (KEYMOD_CAPS_LOCK | KEYMOD_NUM_LOCK); /* may ask once */
+    unsigned long before = NextRequest(d);
+    for (int i = 0; i < 5000; i++)
+        (void)key_mods(w);
+    CHECK(NextRequest(d) == before); /* it used to be 5000 requests */
+
+    KeyCode caps = XKeysymToKeycode(d, XK_Caps_Lock), num = XKeysymToKeycode(d, XK_Num_Lock);
+    CHECK(caps != 0);
+    /* no window has the focus: the change is seen all the same */
+    toggle_key(d, caps);
+    window_begin_frame(w);
+    CHECK((key_mods(w) & KEYMOD_CAPS_LOCK) == (first & KEYMOD_CAPS_LOCK ? 0 : KEYMOD_CAPS_LOCK));
+    if (num)
+    {
+        toggle_key(d, num);
+        window_begin_frame(w);
+        CHECK((key_mods(w) & KEYMOD_NUM_LOCK) == (first & KEYMOD_NUM_LOCK ? 0 : KEYMOD_NUM_LOCK));
+        toggle_key(d, num);
+        window_begin_frame(w);
+        CHECK((key_mods(w) & KEYMOD_NUM_LOCK) == (first & KEYMOD_NUM_LOCK));
+    }
+    toggle_key(d, caps);
+    window_begin_frame(w);
+    CHECK((key_mods(w) & KEYMOD_CAPS_LOCK) == (first & KEYMOD_CAPS_LOCK));
+
+    /* toggled while the window is unfocused, then the focus comes: right at the next frame */
+    toggle_key(d, caps);
+    XSetInputFocus(d, xwin(w), RevertToParent, CurrentTime);
+    XSync(d, False);
+    time_sleep(30);
+    window_begin_frame(w);
+    CHECK((key_mods(w) & KEYMOD_CAPS_LOCK) == (first & KEYMOD_CAPS_LOCK ? 0 : KEYMOD_CAPS_LOCK));
+    toggle_key(d, caps); /* the window has the focus now, the lock goes back */
+    window_begin_frame(w);
+    CHECK((key_mods(w) & KEYMOD_CAPS_LOCK) == (first & KEYMOD_CAPS_LOCK));
+    window_destroy(w);
+}
+
 /* A real input method server: ibus-daemon -x (its XIM server) on a session bus of its own, in a throw-away HOME, started by
    the section before platform_init. Skipped (the section prints why) when ibus or dbus-run-session is not installed or the
    server does not come up. XMODIFIERS=@im=ibus must reach it: the dead key is composed by ibus ("a with an acute"), not by
@@ -1719,6 +1776,7 @@ int main(void)
         {"events from a hostile client", test_hostile_client},
         {"shutdown inside a hook", test_shutdown_in_hook},
         {"the server goes away", test_server_goes_away, pre_own_server},
+        {"lock state is cached", test_lock_state_cached},
         {"first dead key, input method opened late", test_first_dead_key_late_method, pre_dead_server},
         {"first dead key, no XMODIFIERS", test_first_dead_key_late_method, pre_no_modifiers},
         {"first dead key, a real input method server, named", test_dead_key_ibus_named, pre_ibus_named, post_ibus},

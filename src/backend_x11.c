@@ -111,6 +111,11 @@ static struct
     bool io_lost;           /* the connection to the server broke (it was killed, the socket cut) */
     XIOErrorHandler prev_io; /* the handler that was set before ours: another connection of the program goes to it */
     int xkb_event_base;     /* XKB events (XkbMapNotify, XkbNewKeyboardNotify) arrive as this event type, 0 without XKB */
+    /* Caps Lock and Num Lock as KEYMOD_* flags, kept from the XkbStateNotify events (the server tells every client when a
+       lock changes, focused or not) so that key_mods reads memory instead of asking the server. Not valid until the first
+       call asks once, and again after a keymap change; a focus-in asks again. */
+    int lock_state;
+    bool lock_valid;
     /* keycode -> Key, filled on first use from the keysym of the first group and level, dropped when the keyboard
        mapping changes (MappingNotify, XkbMapNotify, XkbNewKeyboardNotify). Stored as key + 1: 0 is "not looked up". */
     short keytab[256];
@@ -622,8 +627,12 @@ bool backend_init(void)
     {
         int opcode, error, major = XkbMajorVersion, minor = XkbMinorVersion;
         if (XkbQueryExtension(g.dpy, &opcode, &g.xkb_event_base, &error, &major, &minor))
-            XkbSelectEvents(g.dpy, XkbUseCoreKbd, XkbMapNotifyMask | XkbNewKeyboardNotifyMask,
-                            XkbMapNotifyMask | XkbNewKeyboardNotifyMask);
+        {
+            XkbSelectEvents(g.dpy, XkbUseCoreKbd, XkbMapNotifyMask | XkbNewKeyboardNotifyMask | XkbStateNotifyMask,
+                            XkbMapNotifyMask | XkbNewKeyboardNotifyMask | XkbStateNotifyMask);
+            /* of the state notifications only the locked modifiers: a Shift pressed in another program is not news here */
+            XkbSelectEventDetails(g.dpy, XkbUseCoreKbd, XkbStateNotify, XkbAllStateComponentsMask, XkbModifierLockMask);
+        }
         else
             g.xkb_event_base = 0;
     }
@@ -1305,6 +1314,23 @@ static int key_of(unsigned keycode)
 static void keymap_changed(void)
 {
     memset(g.keytab, 0, sizeof g.keytab);
+    g.lock_valid = false; /* a keymap that is loaded may move the lock modifiers: ask again */
+}
+
+static int lock_flags(unsigned locked_mods)
+{
+    return ((locked_mods & LockMask) ? KEYMOD_CAPS_LOCK : 0) | ((locked_mods & Mod2Mask) ? KEYMOD_NUM_LOCK : 0);
+}
+
+/* One round trip: the locks as the server has them now. */
+static void lock_refresh(void)
+{
+    XkbStateRec st;
+    if (XkbGetState(g.dpy, XkbUseCoreKbd, &st) == Success)
+    {
+        g.lock_state = lock_flags(st.locked_mods);
+        g.lock_valid = true;
+    }
 }
 
 /* Keys already down when the window gets the focus send no press of their own: they are
@@ -2112,6 +2138,8 @@ static void process_event(BackendWindow *b, XEvent *ev)
         if (ev->type == FocusOut && ev->xfocus.detail == NotifyInferior)
             break;
         b->focused = ev->type == FocusIn;
+        if (b->focused && g.lock_valid)
+            lock_refresh(); /* a lock changed while no window had the focus is read again: belt and braces over the events */
         if (!b->focused)
             memset(b->kc_down, 0, sizeof b->kc_down); /* the core drops every key on focus loss too */
         if (b->cursor_mode == MOUSE_MODE_CAPTURED)
@@ -2516,7 +2544,7 @@ static void key_taken_by_im(BackendWindow *b, XEvent *ev)
 
 #define WAIT_PADS 40 /* the descriptors of the gamepads and joysticks, and the one that watches /dev/input */
 
-static bool handle_global_event(XEvent *ev);
+static inline bool handle_global_event(XEvent *ev) __attribute__((always_inline));
 
 /* How long the pump can wait for work that is not an event: -1 for none. A key held in a focused window is looked at (the
    server is asked whether it really is down) every STUCK_KEY_INTERVAL; a drop that waits for its files gives up
@@ -2632,7 +2660,7 @@ static void wake_if_queued(void)
 
 /* The events that belong to no window: the keyboard mapping changing, and the clipboard (the selection is owned through
    the helper window, which no pump of a window has to be told about). True when the event was one of them. */
-static bool handle_global_event(XEvent *ev)
+static inline bool handle_global_event(XEvent *ev)
 {
     if (ev->type == MappingNotify)
     {
@@ -2648,6 +2676,12 @@ static bool handle_global_event(XEvent *ev)
         int t = ((const XkbAnyEvent *)ev)->xkb_type;
         if (t == XkbMapNotify || t == XkbNewKeyboardNotify)
             keymap_changed();
+        else if (t == XkbStateNotify)
+        {
+            const XkbStateNotifyEvent *sn = (const XkbStateNotifyEvent *)ev;
+            g.lock_state = lock_flags(sn->locked_mods);
+            g.lock_valid = true;
+        }
         return true;
     }
     if (ev->type == SelectionRequest)
@@ -3337,10 +3371,11 @@ void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallbac
 
 int backend_lock_state(void)
 {
-    XkbStateRec st;
-    if (XkbGetState(g.dpy, XkbUseCoreKbd, &st) != Success)
+    if (!g.dpy || g.io_lost)
         return 0;
-    return ((st.locked_mods & LockMask) ? KEYMOD_CAPS_LOCK : 0) | ((st.locked_mods & Mod2Mask) ? KEYMOD_NUM_LOCK : 0);
+    if (!g.lock_valid)
+        lock_refresh(); /* the first call, or after a keymap change: one round trip, then it is memory */
+    return g.lock_valid ? g.lock_state : 0;
 }
 
 bool backend_mouse_capture(BackendWindow *b, bool on)
