@@ -710,9 +710,26 @@ static void set_title(BackendWindow *b, const char *title)
 {
     if (!title)
         title = "";
+    /* One request carries what XMaxRequestSize says (256 KB on a server without BIG-REQUESTS) and a longer property is a
+       BadLength, which Xlib answers by ending the process. A title is cut below that, on a character boundary. */
+    size_t len = strlen(title), most = (size_t)XMaxRequestSize(g.dpy) * 4 - 256;
+    char *cut = NULL;
+    if (len > most)
+    {
+        len = most;
+        while (len > 0 && ((unsigned char)title[len] & 0xC0) == 0x80)
+            len--;
+        cut = malloc(len + 1);
+        if (!cut)
+            return;
+        memcpy(cut, title, len);
+        cut[len] = 0;
+        title = cut;
+    }
     XStoreName(g.dpy, b->win, title);
     XChangeProperty(g.dpy, b->win, g.NET_WM_NAME, g.UTF8_STRING, 8,
-                    PropModeReplace, (const unsigned char *)title, (int)strlen(title));
+                    PropModeReplace, (const unsigned char *)title, (int)len);
+    free(cut);
 }
 
 /* ---- input method: on-the-spot composition through the XIM preedit callbacks ---- */

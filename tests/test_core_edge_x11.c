@@ -281,6 +281,18 @@ static void test_titles(void)
     huge[(8u << 20) - 1] = 0;
     window_set_title(w, huge); /* more than a server without BIG-REQUESTS takes in one request */
     XSync(d, False);
+    got = read_name(d, xwin(w));
+    CHECK(got && strlen(got) >= 4096 && strlen(got) <= (size_t)XMaxRequestSize(d) * 4); /* cut to what one request holds */
+    free(got);
+    /* a multi-byte character straddling the cut is dropped whole, not cut in two */
+    size_t most = (size_t)XMaxRequestSize(d) * 4 - 256;
+    memset(huge, 'h', (8u << 20) - 1);
+    memcpy(huge + most - 1, "\xe2\x82\xac", 3); /* a euro sign with its first byte one before the cut */
+    window_set_title(w, huge);
+    XSync(d, False);
+    got = read_name(d, xwin(w));
+    CHECK(got && strlen(got) == most - 1 && (unsigned char)got[strlen(got) - 1] == 'h');
+    free(got);
     free(huge);
     window_set_title(w, "after");
     XSync(d, False);
