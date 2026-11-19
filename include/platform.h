@@ -134,8 +134,10 @@ extern "C"
         EVENT_WINDOW_RESTORE,
         EVENT_WINDOW_ENTER,         /* pointer entered or left the window */
         EVENT_WINDOW_SCALE_CHANGED, /* moved to a monitor with a different scale */
-        EVENT_WINDOW_DROP,          /* paths are valid only during this event; on the web the files are in
-                                       the MEMFS under /drop/<name> (see platform_web_fetch_file) */
+        EVENT_WINDOW_DROP,          /* the paths stay valid until the next drop on the window or its destruction (the
+                                       poll_event that reads the event comes after the message was handled): copy what
+                                       you keep; on the web the files are in the MEMFS under /drop/<name> (see
+                                       platform_web_fetch_file) */
 
         EVENT_KEY,  /* a physical key changed state */
         EVENT_CHAR, /* text input, one Unicode codepoint */
