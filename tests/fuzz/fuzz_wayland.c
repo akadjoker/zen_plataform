@@ -48,6 +48,14 @@ static int32_t odd(Cur *c)
     }
 }
 
+/* wl_fixed_t holds 24 bits of integer part (the relative motion is doubled before that): the test compositor builds its pointer values with wl_fixed_from_int, which is a
+   multiplication by 256 that overflows an int for what odd() may give (the signed overflow is in the compositor, not in the
+   library). Pointer coordinates and axis values are kept inside what a fixed-point number can say; sizes are not. */
+static int32_t fixed(int32_t v)
+{
+    return v > 4000000 ? 4000000 : v < -4000000 ? -4000000 : v;
+}
+
 static PlatformWindow *g_win;
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
@@ -85,18 +93,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         case 2: cmd(CMD_KB_LEAVE, 0, 0, 0, 0); break;
         case 3:
         case 4: cmd(CMD_KEY, (int)((uint32_t)i32(&c) % 70000), u8(&c) & 1, 0, 0); break;
-        case 5: cmd(CMD_PTR_ENTER, odd(&c), odd(&c), 0, 0); break;
+        case 5: cmd(CMD_PTR_ENTER, fixed(odd(&c)), fixed(odd(&c)), 0, 0); break;
         case 6: cmd(CMD_PTR_LEAVE, 0, 0, 0, 0); break;
         case 7:
-        case 8: cmd(CMD_PTR_MOVE, odd(&c), odd(&c), 0, 0); break;
+        case 8: cmd(CMD_PTR_MOVE, fixed(odd(&c)), fixed(odd(&c)), 0, 0); break;
         case 9: cmd(CMD_PTR_BUTTON, i32(&c), u8(&c) & 1, 0, 0); break;
-        case 10: cmd(CMD_PTR_AXIS, u8(&c) % 3, odd(&c), 0, 0); break;
-        case 11: cmd(CMD_PTR_V120, u8(&c) % 3, odd(&c), 0, 0); break;
+        case 10: cmd(CMD_PTR_AXIS, u8(&c) % 3, fixed(odd(&c)), 0, 0); break;
+        case 11: cmd(CMD_PTR_V120, u8(&c) % 3, fixed(odd(&c)), 0, 0); break;
         case 12: cmd(CMD_PTR_FRAME, 0, 0, 0, 0); break;
         case 13: cmd(CMD_CONFIGURE, odd(&c), odd(&c), (int)(u8(&c) & 7), 0); break;
 #ifdef ZEN_WL_POINTER_LOCK
         case 14: cmd(u8(&c) & 1 ? CMD_LOCK : CMD_UNLOCK, 0, 0, 0, 0); break;
-        case 15: cmd(CMD_REL_MOTION, odd(&c), odd(&c), 0, 0); break;
+        case 15: cmd(CMD_REL_MOTION, fixed(odd(&c)), fixed(odd(&c)), 0, 0); break;
 #else
         default: break;
 #endif
