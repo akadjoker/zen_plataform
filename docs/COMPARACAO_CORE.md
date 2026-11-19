@@ -292,7 +292,7 @@ O que mudou e porque (um commit por coisa, com a medicao na mensagem):
   entrada em todos os eventos (396 instrucoes; agora so se percorre quando ha uma entrada viva, e as entradas com mais de 10 s de
   idade do servidor saem), o `XLookupKeysym` (cerca de 190 com o que chama; agora uma tabela keycode -> tecla, invalidada por
   `MappingNotify`, `XkbMapNotify` e `XkbNewKeyboardNotify`) e um `XPending` por evento (160; o ciclo olha para a fila com `XQLength` e so
-  chama o `XPending` quando ela esvazia). Com o servidor sem BIG-REQUESTS desligavel (ver abaixo) o teste do teclado muda o mapa a meio
+  chama o `XPending` quando ela esvazia). O teste do teclado muda o mapa a meio
   de duas maneiras (`XChangeKeyboardMapping` e `setxkbmap`) e confere que as teclas o seguem; desligando uma a uma as invalidacoes ve-se que
   o `MappingNotify` sozinho falha na troca de disposicao (o servidor nao o manda para `setxkbmap`) e que os eventos do XKB sozinhos chegam
   para as duas, por isso ficam os dois (o `MappingNotify` serve a servidores sem XKB).
@@ -338,31 +338,31 @@ um PNG por cima, o que nunca responde).
 
 ## Onde a zen_platform perde e porque
 
-1. **Arranque com `XMODIFIERS=@im=ibus` e o servidor em baixo** (52,5 M de instrucoes contra 13,9 M do GLFW). `backend_init` abre o metodo de
-   entrada; o configurado falha e repete com `@im=none`, o metodo interno do Xlib, que le a tabela de compose (`_XimParseStringFile`: 47 M,
-   o perfil do callgrind di-lo). O GLFW e o SDL, no mesmo caso, ficam sem metodo de entrada (nao ha teclas mortas) e nao pagam. Provado
-   com a outra tabela: sem `XMODIFIERS` as tres abrem o mesmo metodo e a zen_platform fica com menos (53,0 M contra 61,8 M do GLFW e 57,5 M do
-   SDL); com `LC_ALL=C` (sem compose) 10,0 M contra 18,9 M e 14,7 M. Num desktop com o ibus de pe o `XOpenIM` e barato e isto nao acontece.
-   Nao se mexeu: abrir o metodo mais tarde perde a primeira tecla morta. Ver `docs/SUSPEITAS.md`.
-2. **Uma tecla custa 16 a 20 % mais instrucoes do que no GLFW** (4023 contra 3350 por evento; o SDL 4260). Por evento, no perfil: o
-   `XFilterEvent` custa 1260 instrucoes (1070 em `_XimLocalFilter`) contra 175 no GLFW, o `XLookupKeysym` 580, o `Xutf8LookupString` 285 (igual
-   no GLFW). `ZEN_NO_IME=1` (contexto de entrada sem as chamadas de volta da pre-edicao) da o mesmo custo, por isso nao e a pre-edicao; nao
-   se investigou porque o filtro do contexto da zen_platform custa mais do que o do GLFW. No tempo a diferenca e de 9 % (38,2 contra 35,0 ms
-   para 20 000 teclas, dentro do ruido da maquina). Uma tabela keycode -> tecla poupava as 580 do `XLookupKeysym`; ver `docs/SUSPEITAS.md`.
-3. **A biblioteca partilhada e maior** (`libplatform.so` 340 kB contra `libglfw.so` 276 kB; o SDL2 tem 1881 kB), porque a zen_platform
-   inclui o que o GLFW nao tem (dialogos, PNG, o rasterizador por software, ficheiros, processos, gamepad evdev, fios). Em estatico, que e
-   como se usa, o programa minimo fica em 126 kB (o do GLFW e 22 + 276 = 298 kB, o do SDL2 18 + 1881 kB).
-4. **RSS sem GL**: 5508 kB contra 5376 kB do GLFW (2,5 %, empate: o PSS e menor e ha menos bibliotecas, 15 contra 19; o SDL2 tem 9228 kB).
+1. **A tabela de compose do Xlib paga-se uma vez, e nao ha como a evitar sem perder teclas.** Com `XMODIFIERS=@im=ibus` e o servidor parado o
+   arranque custa 4,99 M (o GLFW 13,89 M) e a primeira tecla, de qualquer janela, 47,6 M (10 a 30 ms, uma vez). Com `XMODIFIERS` vazio o
+   arranque custa 52,8 M (o GLFW 61,75 M, o SDL2 57,51 M: as tres abrem o mesmo metodo interno) e com `LC_ALL=C` (sem compose) 10,06 M (18,90 M e
+   14,78 M). O GLFW e o SDL2 com o servidor parado ficam sem metodo de entrada (nao ha teclas mortas) e nao pagam nunca; a zen_platform tem teclas
+   mortas desde a primeira tecla e paga o preco quando a primeira tecla chega. Um jogo que nao le teclas nao o paga; um que as le tem um soluco
+   de uma ou duas frames na primeira. Detalhes e o que faltou em `docs/SUSPEITAS.md`.
+2. **A biblioteca partilhada e maior** (`libplatform.so` 345 kB contra `libglfw.so` 276 kB; o SDL2 tem 1881 kB), porque a zen_platform
+   inclui o que o GLFW nao tem (dialogos, PNG, o rasterizador por software, ficheiros, processos, gamepad evdev, fios). Esta ronda juntou 5 kB
+   (340 antes: o registo de janelas, a tabela de teclas, o tratamento da ligacao perdida, a verificacao dos PNG). Em estatico, que e
+   como se usa, o programa minimo fica em 130 kB (o do GLFW e 22 + 276 = 298 kB, o do SDL2 18 + 1881 kB).
+3. **RSS sem GL**: 5616 kB contra 5408 kB do GLFW (3,8 %: o PSS e menor, 1562 contra 1585 kB, e ha menos bibliotecas, 15 contra 19; o SDL2 tem
+   9096 kB). Tres corridas da `main` anterior e desta dao 5488 a 5612 e 5492 a 5580 kB: a diferenca para o GLFW e a mesma antes e depois.
+
+A tecla, que a primeira ronda dava como perdida (16 a 20 % acima do GLFW), esta empatada (3351 contra 3351; ver "Segunda ronda").
 
 ## Onde ganha e porque
 
-- **Esperas ao servidor no arranque**: 21 contra 78 (GLFW) e 122 (SDL2); uma janela nova custa cerca de 2 (120 esperas em 50 ciclos, com o arranque, contra 432 antes: os
-  atomos em lote, sem a procura do monitor). E o que se ve nos tempos de criar e destruir uma janela (124 us contra 928 e 1002 na
-  corrida completa), menos nos de arranque, que a maquina ocupada tapa.
-- **Instrucoes**: arranque com e sem compose, poll parado (1746 contra 2243 e 2955 por volta, 22 % menos que o GLFW), criar e destruir uma
-  janela (108 k contra 149 k e 263 k; com GL 64,5 M contra 70,7 M e 128 M).
-- **Movimento do rato**: empate com o GLFW (1947 contra 1938 por evento; 167,5 contra 168,4 ms para 100 000), o SDL2 gasta 3,9x.
-- **Memoria com GL**: igual (RSS 79,8 MB contra 81,4 e 89,7: e o Mesa que domina nas tres).
+- **Esperas ao servidor no arranque**: 21 contra 79 (GLFW) e 122 (SDL2); uma janela nova custa cerca de 2.
+- **Instrucoes**: arranque com `XMODIFIERS` vazio, com `LC_ALL=C` e com o servidor parado (52,8 M, 10,1 M e 5,0 M contra 61,8 M, 18,9 M e 13,9 M do
+  GLFW), poll parado (1481 contra 2243 e 2955 por volta, 34 % menos do que o GLFW), criar e destruir uma janela (109 k contra 169 k e 261 k; com
+  GL 64,5 M contra 70,7 M e 128 M), movimento do rato (1803 contra 1938 e 7596 por evento; 2276 contra 2422 com a lista cheia) e teclas com a
+  lista cheia (3782 contra 3845). Empata nas teclas a 100 por volta (3351 nos dois).
+- **Memoria com GL**: igual (RSS 79,7 MB contra 81,5 e 89,6: e o Mesa que domina nas tres).
+- Os tempos (ms) das tabelas sairam com carga de 8 a 36 e a ordem entre bibliotecas oscila: valem pela ordem de grandeza; as instrucoes
+  e as esperas nao oscilam.
 
 ## Defeitos do nucleo que a ronda encontrou (todos em `tests/test_core_edge_x11.c`, cada seccao num processo filho)
 
@@ -384,10 +384,10 @@ destruida em captura (o ponteiro do servidor fica livre), clipboard de 0 bytes a
 
 ## O que ficou por fazer
 
-- Tudo o que esta em `docs/SUSPEITAS.md` na secao do nucleo: o ponteiro de janela `NULL`, destruir a janela dentro do seu gancho de eventos,
-  titulos acima do pedido maximo do servidor, a lista de eventos de 256, o metodo de entrada no arranque, o `XCreateIC` por janela e a
-  tabela de teclas.
-- Nao se mediu o backend Wayland, o Windows, nem o SDL3; nem a latencia (do evento do servidor ate a aplicacao), so o custo de os tirar da ligacao.
-- Os tempos pedem uma maquina sossegada (aqui a carga era 11 a 14); as instrucoes e as esperas ao servidor nao.
-- Nao se testaram as teclas mortas e o compose na primeira tecla de uma janela com o foco do servidor, que e onde adiar o metodo de entrada
-  podia falhar.
+- Tudo o que esta em `docs/SUSPEITAS.md` na secao do nucleo: o metodo de entrada no arranque (com `XMODIFIERS` vazio), o `XCreateIC` por janela,
+  a lista de eventos de 256, a destruicao dentro de gancho no web, no Android e no Windows (nao se correu), o dono de clipboard morto
+  lembrado pelo id da janela, e os fuzzers (minutos, nao horas; sem alvos para o XInput2, o ibus, o Wayland hostil).
+- Wayland: nao se mediu contra o GLFW e o SDL2 (o GLFW do pacote so tem X11, nao ha compositor sem janela instalado; as seccoes de bordas do
+  X11 correm no Wayland contra o compositor de teste, `tests/test_core_edge_wayland.c`, e acharam dois defeitos). Windows: so se compila
+  (`tools/check.sh mingw`). Nem o SDL3, nem a latencia (do evento do servidor ate a aplicacao), so o custo de os tirar da ligacao.
+- Os tempos pedem uma maquina sossegada; as instrucoes e as esperas ao servidor nao.
