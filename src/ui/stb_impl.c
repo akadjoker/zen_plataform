@@ -74,10 +74,10 @@ static bool zen_png_check(const uint8_t *d, size_t n, size_t *cap)
     size_t pos = 8;
     bool header = false, data = false;
     uint64_t idat_total = 0, raw_least = 0;
-    while (pos + 12 <= n)
+    while (pos + 8 <= n) /* the header of a chunk: stb reads an IDAT's data before its CRC, which a truncated file may lack */
     {
         uint32_t len = zen_be32(d + pos);
-        if (len > n - pos - 12)
+        if (len > n - pos - 8)
             return false; /* the chunk says it is longer than what is left of the buffer */
         if (!header)
         {

@@ -116,7 +116,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             float a, b;
             gesture_drag_vector(w, &a, &b);
             gesture_pinch_vector(w, &a, &b);
-            acc += (unsigned)gesture_drag_angle(w) + (unsigned)gesture_pinch_angle(w) + (unsigned)gesture_hold_duration(w);
+            /* the angles and the hold time can be NaN for a finger at NaN (garbage in): read the bits, a float to unsigned
+               conversion of a NaN is undefined, and it is the harness that would do it */
+            float vals[3] = {gesture_drag_angle(w), gesture_pinch_angle(w), gesture_hold_duration(w)};
+            for (int i = 0; i < 3; i++)
+            {
+                unsigned bits;
+                memcpy(&bits, &vals[i], sizeof bits);
+                acc += bits;
+            }
             (void)acc;
             break;
         }
