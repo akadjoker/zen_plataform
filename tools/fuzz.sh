@@ -5,6 +5,7 @@
 #   fuzz_images       png_decode (clipboard images), stbi_load_from_memory of zen_ui's stb_image, and framebuffer_load_bmp
 #   fuzz_paths        path_* and the fs_* / io_* calls on odd names (in a sandbox under /dev/shm)
 #   fuzz_touch        the touch path that XInput 2, WM_TOUCH and the touch backends feed (finger ids and coordinates of any value, NaN too)
+#   fuzz_wayland      a hostile compositor (the test compositor, driven by the script: any key, focus, pointer, axis and configure)
 #   fuzz_x11_events   what another X client sends a window: ClientMessage, SelectionNotify, ConfigureNotify, XDND drops
 #   fuzz_clipboard_x11  the clipboard against a hostile owner of the selection (any property, INCR of any shape)
 # Needs clang with libFuzzer (compiler-rt) and, for fuzz_x11_events, xvfb-run (started through tools/xvfb_run.sh).
@@ -24,7 +25,7 @@ DIR=${ZP_FUZZ_DIR:-${TMPDIR:-/tmp}/zp-fuzz-$(id -un)}
 SECS=${ZP_FUZZ_SECONDS:-120}
 SEED=${ZP_FUZZ_SEED:-1}
 JOBS=${ZP_JOBS:-$(($(nproc) / 2 > 0 ? $(nproc) / 2 : 1))}
-TARGETS=${*:-fuzz_images fuzz_paths fuzz_touch fuzz_x11_events fuzz_clipboard_x11}
+TARGETS=${*:-fuzz_images fuzz_paths fuzz_touch fuzz_x11_events fuzz_clipboard_x11 fuzz_wayland}
 command -v clang > /dev/null || { echo "fuzz.sh: clang not found" >&2; exit 2; }
 SAN="-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined"
 CFLAGS="-g -O1 -fno-omit-frame-pointer -DPLATFORM_STATIC -I$ROOT/include -I$ROOT/src"
@@ -46,6 +47,23 @@ for t in $TARGETS; do
                     cmake --build "$DIR/clang" -j "$JOBS" --target platform >> "$DIR/clang.log" 2>&1 || { echo "FAIL $t: the library did not build, see $DIR/clang.log"; FAILED=1; continue; }
             fi
             srcs="$DIR/clang/libplatform.a -lX11 -lXrandr -lGL -ldl -lpthread" ;;
+        fuzz_wayland)
+            # the Wayland build of the library with the sanitizers, and the compositor of the tests (wayland-server)
+            corpus=wayland; run="env -u DISPLAY -u WAYLAND_DISPLAY"
+            CC=clang cmake -S "$ROOT" -B "$DIR/clang-wl" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPLATFORM_LINUX_BACKEND=wayland -DPLATFORM_BUILD_EXAMPLES=OFF \
+                -DZP_FUZZ_LIBFUZZER=ON "-DCMAKE_C_FLAGS=-g -O1 -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined" \
+                "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined" > "$DIR/clang-wl.log" 2>&1 &&
+                cmake --build "$DIR/clang-wl" -j "$JOBS" --target fuzz_wayland >> "$DIR/clang-wl.log" 2>&1 || { echo "FAIL $t: did not build, see $DIR/clang-wl.log"; FAILED=1; continue; }
+            work=$DIR/work_$t; mkdir -p "$work/corpus"
+            echo "== $t: ${SECS}s, seed $SEED"
+            (cd "$work" && $run "$DIR/clang-wl/tests/fuzz_wayland" -seed="$SEED" -max_total_time="$SECS" -max_len=4096 -rss_limit_mb=1500 -timeout=20 \
+                -artifact_prefix="$work/" "$work/corpus" "$ROOT/tests/fuzz/corpus/$corpus" > "$work/log" 2>&1)
+            if grep -q "^SUMMARY: \|ERROR: " "$work/log"; then
+                echo "FAIL $t: $(grep -m1 'SUMMARY: ' "$work/log" | cut -c1-200)"; echo "     inputs in $work"; FAILED=1
+            else
+                echo "PASS $t: $(grep -E '^Done|DONE' "$work/log" | tail -n 1 | cut -c1-120)"
+            fi
+            continue ;;
         *) echo "fuzz.sh: unknown target $t" >&2; exit 2 ;;
     esac
     # shellcheck disable=SC2086
