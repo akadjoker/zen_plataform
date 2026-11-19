@@ -15,10 +15,24 @@
 
 #define FAKE_PENDING_MAX 256
 
+/* What the builders (fake_key, fake_mouse_button, ...) leave for the moment the event is delivered, because it depends on
+   what the events before it did (the keys held, where the pointer is): the real X11 backend fills these from the server's
+   state at the event. A raw item (fake_inject_event) is delivered as it is. */
+enum
+{
+    FILL_KEY = 1,       /* mods: the modifiers held before this event; scancode */
+    FILL_BUTTON = 2,    /* x, y: where the pointer is */
+    FILL_BUTTON_AT = 4, /* the pointer goes to x, y first (a move, when it is not there already) */
+    FILL_MOVE = 8,      /* dx, dy while the mouse is captured: the step from where the pointer was */
+    FILL_SIZE = 16,     /* the window has this size (screen coordinates) once the event is delivered */
+    FILL_FB_SIZE = 32   /* the framebuffer has this size once the event is delivered */
+};
+
 typedef struct
 {
     bool is_char;
     bool real_touch; /* goes through core_push_touch, like a desktop touch screen */
+    unsigned char fill;
     Event ev;
     uint32_t cp;
 } FakeItem;
@@ -104,6 +118,36 @@ void backend_destroy(BackendWindow *b)
     free(b);
 }
 
+/* The modifier keys held now, as the X11 backend reads them from the state of an event (no locks there) */
+static int held_mods(const Core *core)
+{
+    const bool *k = core->in.key_down;
+    int mods = 0;
+    if (k[KEY_LEFT_SHIFT] || k[KEY_RIGHT_SHIFT])
+        mods |= KEYMOD_SHIFT;
+    if (k[KEY_LEFT_CONTROL] || k[KEY_RIGHT_CONTROL])
+        mods |= KEYMOD_CTRL;
+    if (k[KEY_LEFT_ALT] || k[KEY_RIGHT_ALT])
+        mods |= KEYMOD_ALT;
+    if (k[KEY_LEFT_SUPER] || k[KEY_RIGHT_SUPER])
+        mods |= KEYMOD_SUPER;
+    return mods;
+}
+
+/* A pointer move to x, y: captured, the X11 backend says by how much the pointer moved (a free pointer's events carry no step) */
+static Event move_event(const BackendWindow *b, const Core *core, int x, int y)
+{
+    Event e = {.type = EVENT_MOUSE_MOVE};
+    e.data.mouse.x = x;
+    e.data.mouse.y = y;
+    if (b->mouse_mode == MOUSE_MODE_CAPTURED)
+    {
+        e.data.mouse.dx = x - core->in.mouse_x;
+        e.data.mouse.dy = y - core->in.mouse_y;
+    }
+    return e;
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     for (int i = 0; i < b->pending_count; i++)
@@ -115,7 +159,37 @@ void backend_pump_events(BackendWindow *b, Core *core)
             core_push_touch(core, it->ev.data.touch.phase, it->ev.data.touch.id, it->ev.data.touch.x,
                             it->ev.data.touch.y, it->ev.data.touch.pressure);
         else
-            core_push_event(core, &it->ev);
+        {
+            Event ev = it->ev;
+            if (it->fill & FILL_KEY)
+                ev.data.key.mods = held_mods(core); /* the state before the key: Ctrl going down is not in its own mods */
+            if (it->fill & FILL_BUTTON_AT)
+            {
+                if (ev.data.mouse.x != core->in.mouse_x || ev.data.mouse.y != core->in.mouse_y)
+                {
+                    Event m = move_event(b, core, ev.data.mouse.x, ev.data.mouse.y);
+                    core_push_event(core, &m);
+                }
+            }
+            if (it->fill & FILL_BUTTON)
+            {
+                ev.data.mouse.x = core->in.mouse_x;
+                ev.data.mouse.y = core->in.mouse_y;
+            }
+            if (it->fill & FILL_MOVE)
+                ev = move_event(b, core, ev.data.mouse.x, ev.data.mouse.y);
+            if ((it->fill & FILL_SIZE) && ev.data.resize.w > 0 && ev.data.resize.h > 0)
+            {
+                b->w = ev.data.resize.w;
+                b->h = ev.data.resize.h;
+            }
+            if ((it->fill & FILL_FB_SIZE) && ev.data.resize.w > 0 && ev.data.resize.h > 0)
+            {
+                b->fb_w = ev.data.resize.w;
+                b->fb_h = ev.data.resize.h;
+            }
+            core_push_event(core, &ev);
+        }
     }
     g_pending_total -= b->pending_count;
     b->pending_count = 0;
@@ -522,9 +596,11 @@ void fake_key(PlatformWindow *w, int key, bool down, bool repeat)
 {
     Event e = {.type = EVENT_KEY};
     e.data.key.key = key;
+    e.data.key.scancode = key; /* the fake has no keyboard: a scancode is never 0, and it is the key's own number */
     e.data.key.down = down;
     e.data.key.repeat = repeat;
-    fake_inject_event(w, &e);
+    FakeItem it = {.fill = FILL_KEY, .ev = e};
+    enqueue(w->b, &it);
 }
 
 void fake_mouse_move(PlatformWindow *w, int x, int y)
@@ -532,7 +608,8 @@ void fake_mouse_move(PlatformWindow *w, int x, int y)
     Event e = {.type = EVENT_MOUSE_MOVE};
     e.data.mouse.x = x;
     e.data.mouse.y = y;
-    fake_inject_event(w, &e);
+    FakeItem it = {.fill = FILL_MOVE, .ev = e};
+    enqueue(w->b, &it);
 }
 
 void fake_mouse_button(PlatformWindow *w, int button, bool down)
@@ -540,7 +617,19 @@ void fake_mouse_button(PlatformWindow *w, int button, bool down)
     Event e = {.type = EVENT_MOUSE_BUTTON};
     e.data.mouse.button = button;
     e.data.mouse.down = down;
-    fake_inject_event(w, &e);
+    FakeItem it = {.fill = FILL_BUTTON, .ev = e};
+    enqueue(w->b, &it);
+}
+
+void fake_mouse_button_at(PlatformWindow *w, int x, int y, int button, bool down)
+{
+    Event e = {.type = EVENT_MOUSE_BUTTON};
+    e.data.mouse.button = button;
+    e.data.mouse.down = down;
+    e.data.mouse.x = x;
+    e.data.mouse.y = y;
+    FakeItem it = {.fill = FILL_BUTTON_AT, .ev = e};
+    enqueue(w->b, &it);
 }
 
 void fake_wheel(PlatformWindow *w, float x, float y)
@@ -569,6 +658,7 @@ void fake_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase)
     e.data.touch.id = id;
     e.data.touch.x = x;
     e.data.touch.y = y;
+    e.data.touch.pressure = phase == TOUCH_UP ? 0.0f : 1.0f; /* as the backends say it */
     e.data.touch.phase = phase;
     fake_inject_event(w, &e);
 }
@@ -578,7 +668,8 @@ void fake_resize(PlatformWindow *w, int width, int height)
     Event e = {.type = EVENT_WINDOW_RESIZE};
     e.data.resize.w = width;
     e.data.resize.h = height;
-    fake_inject_event(w, &e);
+    FakeItem it = {.fill = FILL_SIZE, .ev = e};
+    enqueue(w->b, &it);
 }
 
 void fake_fb_resize(PlatformWindow *w, int width, int height)
@@ -586,7 +677,8 @@ void fake_fb_resize(PlatformWindow *w, int width, int height)
     Event e = {.type = EVENT_WINDOW_FB_RESIZE};
     e.data.resize.w = width;
     e.data.resize.h = height;
-    fake_inject_event(w, &e);
+    FakeItem it = {.fill = FILL_FB_SIZE, .ev = e};
+    enqueue(w->b, &it);
 }
 
 int fake_swap_count(PlatformWindow *w)

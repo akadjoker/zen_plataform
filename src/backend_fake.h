@@ -16,6 +16,9 @@ void fake_inject_char(PlatformWindow *w, uint32_t codepoint);
 void fake_key(PlatformWindow *w, int key, bool down, bool repeat);
 void fake_mouse_move(PlatformWindow *w, int x, int y);
 void fake_mouse_button(PlatformWindow *w, int button, bool down);
+/* A button at x, y: the pointer goes there first (an EVENT_MOUSE_MOVE, unless it is there already), as a real pointer must,
+   and the event carries x, y. The click of a script that never moved the pointer. */
+void fake_mouse_button_at(PlatformWindow *w, int x, int y, int button, bool down);
 void fake_wheel(PlatformWindow *w, float x, float y);
 void fake_touch(PlatformWindow *w, int id, float x, float y, TouchPhase phase);
 void fake_set_lock_state(int mask); /* KEYMOD_CAPS_LOCK | KEYMOD_NUM_LOCK, read back by key_mods */
