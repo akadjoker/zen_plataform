@@ -11,11 +11,13 @@
 #include "backend.h"
 #include "error_internal.h"
 #include "clipboard_mem.h"
+#include "web_key_rules.h"
 
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <emscripten/html5_webgl.h>
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -49,7 +51,34 @@ struct BackendWindow
 /* The browser hands a single canvas, so a single backend window is in play. */
 static BackendWindow *g_active;
 
-static void enqueue_event(BackendWindow *b, const Event *ev)
+/* Everything that touches the page (Module.canvas, the document) is MAIN_THREAD_EM_ASM and not EM_ASM: the same thing in a build
+   without threads, and in one with the program on a worker (PROXY_TO_PTHREAD) the call goes to the browser's main thread,
+   where the page is (a worker has no document, and its Module.canvas is an OffscreenCanvas). */
+
+/* Which thread runs what. In a build without threads, or with them but main() on the browser's main thread, everything below
+   is one thread. With PROXY_TO_PTHREAD main() and the frame run on a worker, while the browser's events (JS) only exist on the
+   main browser thread: the callbacks of mouse, wheel, touch and focus are called back on the worker (html5.h: the thread
+   that registered them), but the keyboard callbacks are registered to run on the browser's main thread (on_key: a worker cannot
+   answer preventDefault, and the paste and copy events are there too), and so are the functions the JS side calls
+   (pf_web_paste, pf_web_copy_text, pf_web_flush_held and the drop ones). So the event queue, the held key and the clipboard
+   store are shared between two threads, and one spin lock covers them; what is done under it is a copy of an event or of a
+   string, never a call into the application. Without threads the lock is a plain flag that is never contended. */
+static volatile int g_lock;
+
+static void web_lock(void)
+{
+    while (__sync_lock_test_and_set(&g_lock, 1))
+    {
+    }
+}
+
+static void web_unlock(void)
+{
+    __sync_lock_release(&g_lock);
+}
+
+/* the queue, with the lock held */
+static void enqueue_event_locked(BackendWindow *b, const Event *ev)
 {
     if (b->pending_count < WEB_PENDING_MAX)
     {
@@ -59,7 +88,7 @@ static void enqueue_event(BackendWindow *b, const Event *ev)
     }
 }
 
-static void enqueue_char(BackendWindow *b, uint32_t cp)
+static void enqueue_char_locked(BackendWindow *b, uint32_t cp)
 {
     if (b->pending_count < WEB_PENDING_MAX)
     {
@@ -67,6 +96,13 @@ static void enqueue_char(BackendWindow *b, uint32_t cp)
         b->pending[b->pending_count].cp = cp;
         b->pending_count++;
     }
+}
+
+static void enqueue_event(BackendWindow *b, const Event *ev)
+{
+    web_lock();
+    enqueue_event_locked(b, ev);
+    web_unlock();
 }
 
 /* ========================================================================== */
@@ -202,25 +238,187 @@ static uint32_t decode_one_codepoint(const char *s)
 /*  html5 event callbacks                                                     */
 /* ========================================================================== */
 
+/* ---- the clipboard keys and the browser's paste, copy and cut events ----
+ *
+ * A page reads the clipboard only inside a `paste` event, and writes it reliably only inside a `copy` or `cut` event (the
+ * async clipboard API does not exist on a page opened over plain http), and the browser fires those only when the key that
+ * asked for them was not prevented. So Ctrl or Meta with V, C, X and Shift+Insert, Ctrl+Insert, Shift+Delete are left to the
+ * browser (on_key does not preventDefault them), and web/pf_web.js listens to the three events and calls the functions below.
+ * The order the application sees is the one a native backend gives: the text is the clipboard's before the paste key reaches
+ * it, and the clipboard is what it set in answer to the copy or cut key before the browser takes the text.
+ *
+ *  paste   keydown: the key is held, not queued. paste event: the text becomes the clipboard content (clipboard_get returns
+ *          it), then the key is queued. No paste event (the browser refused it, nothing was there): a timer of the page
+ *          queues the held key at the end of the task. A paste from the browser's menu has no key: Ctrl+V (Meta+V on a Mac)
+ *          is queued for it.
+ *  copy    keydown: the key is queued and the copy is armed. copy event (the same task, right after): the application has not
+ *          run yet, so one frame runs now, on this very call, inside the browser's handler (where the text can still be
+ *          handed to the browser), and what the application set with clipboard_set during it is given to the browser. The
+ *          application that sets nothing (nothing selected) leaves the browser's clipboard as it is. When the application
+ *          runs on another thread (PROXY_TO_PTHREAD) this thread cannot run its frame, and waiting for the worker's does not
+ *          work (measured: the worker's frame is driven by the page's frame scheduler, which does not run while this thread
+ *          waits): the event gets what the application had already answered, if anything, and otherwise it is left to the
+ *          browser; the text the application sets a frame later goes out through the write below (navigator.clipboard,
+ *          inside the user activation the key started, which lasts a few seconds). A build with threads needs
+ *          SharedArrayBuffer, and so a secure context, where that API exists.
+ */
+static unsigned g_clip_seq;    /* every clipboard_set and every paste: what a copy compares to see that the application answered */
+static bool g_held_valid;      /* a paste key waits for its paste event */
+static WebItem g_held;
+static double g_paste_flush_ms; /* when a paste key last went to the application without its paste event: one a moment later is its */
+static bool g_copy_armed;
+static unsigned g_copy_seq;    /* g_clip_seq when the copy key came */
+static bool g_in_tick;
+static pthread_t g_loop_thread; /* the thread that runs the loop (app_run): the program's frame, in a build with PROXY_TO_PTHREAD a
+                                   worker; not emscripten_is_main_runtime_thread(), which in such a build is the browser's thread */
+static char *g_copy_out;       /* what pf_web_copy_text last returned */
+
+/* the held paste key goes to the queue, behind what was queued before it; with the lock held */
+static void held_flush_locked(void)
+{
+    if (g_held_valid && g_active)
+        enqueue_event_locked(g_active, &g_held.ev);
+    g_held_valid = false;
+}
+
+/* a key and its release, as a keyboard shortcut that came from the browser's menu and not from the keyboard; lock held */
+static void synth_key_locked(int key, int mods)
+{
+    if (!g_active)
+        return;
+    Event ev = {.type = EVENT_KEY};
+    ev.data.key.key = key;
+    ev.data.key.mods = mods;
+    ev.data.key.down = true;
+    enqueue_event_locked(g_active, &ev);
+    ev.data.key.down = false;
+    enqueue_event_locked(g_active, &ev);
+}
+
+/* Implemented in web/pf_web.js */
+extern void pf_web_defer_flush(void);
+extern int pf_web_altgr(void);
+
 static EM_BOOL on_key(int type, const EmscriptenKeyboardEvent *e, void *user)
 {
-    BackendWindow *b = user;
-    bool down = type == EMSCRIPTEN_EVENT_KEYDOWN;
+    (void)user;
+    BackendWindow *b = g_active;
+    if (!b)
+        return EM_TRUE;
+    const bool down = type == EMSCRIPTEN_EVENT_KEYDOWN;
 
     Event ev = {.type = EVENT_KEY};
     ev.data.key.key = translate_code(e->code);
     ev.data.key.down = down;
     ev.data.key.repeat = e->repeat;
     ev.data.key.mods = translate_kb_mods(e);
-    enqueue_event(b, &ev);
 
-    if (down)
+    const WebClipCommand cmd =
+        down ? webkey_clip_command(e->key, e->code, e->ctrlKey, e->shiftKey, e->altKey, e->metaKey) : WEBKEY_NONE;
+
+    /* A key that types its character, but not with Ctrl or Meta held (a shortcut; the rule in platform.h): Ctrl+A in a field
+       is a select-all, not an "a". AltGr on a Windows layout is Ctrl+Alt, and the browser says it is AltGr. */
+    uint32_t cp = 0;
+    if (down && webkey_types_text(e->ctrlKey, e->altKey, e->metaKey, e->ctrlKey && e->altKey && pf_web_altgr() != 0))
     {
-        uint32_t cp = decode_one_codepoint(e->key);
-        if (cp >= 0x20 && cp != 0x7F)
-            enqueue_char(b, cp);
+        cp = decode_one_codepoint(e->key);
+        if (cp < 0x20 || cp == 0x7F)
+            cp = 0;
+    }
+
+    web_lock();
+    held_flush_locked(); /* a held paste key goes before any later key */
+    if (cmd == WEBKEY_PASTE)
+    {
+        g_held.is_char = false;
+        g_held.ev = ev;
+        g_held_valid = true;
+    }
+    else
+        enqueue_event_locked(b, &ev);
+    if (cmd == WEBKEY_COPY || cmd == WEBKEY_CUT)
+    {
+        g_copy_armed = true;
+        g_copy_seq = g_clip_seq;
+    }
+    if (cp)
+        enqueue_char_locked(b, cp);
+    web_unlock();
+
+    if (cmd != WEBKEY_NONE)
+    {
+        pf_web_defer_flush(); /* the end of this task: a paste or copy event that did not come must not hold the key */
+        return EM_FALSE;      /* the browser does what the key asks: paste, copy, cut (fires the event) */
     }
     return EM_TRUE; /* preventDefault: keep Tab/arrows/Space from scrolling */
+}
+
+/* JS: the timer after a clipboard key. A held paste key whose paste event never came goes to the application now, and a
+   copy that was armed is over. */
+EMSCRIPTEN_KEEPALIVE void pf_web_flush_held(void)
+{
+    web_lock();
+    if (g_held_valid)
+        g_paste_flush_ms = emscripten_get_now();
+    held_flush_locked();
+    g_copy_armed = false;
+    web_unlock();
+}
+
+/* JS: the paste event. text is a malloc'd UTF-8 string (taken over here), or NULL when the clipboard holds no text. */
+EMSCRIPTEN_KEEPALIVE void pf_web_paste(char *text, int mac)
+{
+    web_lock();
+    if (text)
+    {
+        const ClipboardItem it = {CLIPBOARD_TEXT, text, strlen(text)};
+        clipmem_set(&it, 1);
+        g_clip_seq++;
+    }
+    if (g_held_valid)
+        held_flush_locked(); /* the key that asked for this paste: the text is the clipboard's before it is queued */
+    else if (emscripten_get_now() - g_paste_flush_ms > 50.0)
+        synth_key_locked(KEY_V, mac ? KEYMOD_SUPER : KEYMOD_CTRL); /* from the browser's menu: no key was pressed */
+    web_unlock();
+    free(text);
+}
+
+static void main_tick(void);
+
+/* One frame now, from inside a browser event handler. Not when a frame is already running (a loop that yields). */
+static bool web_tick_now(void);
+
+/* JS: the copy or cut event. Returns the text the application put on the clipboard in answer to the key, in a buffer that
+   stays valid until the next call, or NULL when it put none (the browser's clipboard is left alone). */
+EMSCRIPTEN_KEEPALIVE const char *pf_web_copy_text(int cut, int mac)
+{
+    web_lock();
+    if (!g_copy_armed) /* from the browser's menu: no key was pressed, the application is asked as if it was */
+    {
+        g_copy_armed = true;
+        g_copy_seq = g_clip_seq;
+        synth_key_locked(cut ? KEY_X : KEY_C, mac ? KEYMOD_SUPER : KEYMOD_CTRL);
+    }
+    bool answered = g_clip_seq != g_copy_seq;
+    web_unlock();
+
+    if (!answered && pthread_equal(pthread_self(), g_loop_thread))
+        web_tick_now(); /* the application's thread is this one: its frame, here, inside the event */
+    /* (on another thread: see above; nothing to wait for) */
+
+    web_lock();
+    g_copy_armed = false;
+    free(g_copy_out);
+    g_copy_out = NULL;
+    if (g_clip_seq != g_copy_seq)
+    {
+        const ClipMemItem *t = clipmem_find(CLIPBOARD_TEXT);
+        if (t)
+            g_copy_out = strdup((const char *)t->data);
+    }
+    const char *out = g_copy_out;
+    web_unlock();
+    return out;
 }
 
 static EM_BOOL on_mouse(int type, const EmscriptenMouseEvent *e, void *user)
@@ -386,6 +584,8 @@ EMSCRIPTEN_KEEPALIVE void pf_web_drop_end(void)
 
 /* Implemented in web/pf_web.js (a --js-library the platform target adds to the link). */
 extern void pf_web_install_drop(void);
+extern void pf_web_install_clipboard(void);
+extern void pf_web_clipboard_write(char *text);
 extern void pf_web_fetch_js(const char *url, const char *path);
 extern int pf_web_download_js(const char *path, const char *name);
 
@@ -438,7 +638,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     /* The page's stylesheet sizes the canvas, and resizes follow it: when no size was asked for, or when the canvas carries
        data-fill-window (the page makes it the whole window, whatever size the config says). */
     const bool page_sized = cfg->width <= 0 || cfg->height <= 0 ||
-                            EM_ASM_INT({ var c = Module['canvas']; return c && c.hasAttribute('data-fill-window') ? 1 : 0; });
+                            MAIN_THREAD_EM_ASM_INT({ var c = Module['canvas']; return c && c.hasAttribute('data-fill-window') ? 1 : 0; });
     if (page_sized)
     {
         double css_w, css_h;
@@ -456,7 +656,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         if (!page_sized)
             emscripten_set_element_css_size(CANVAS_TARGET, b->css_w, b->css_h);
         emscripten_set_canvas_element_size(CANVAS_TARGET, b->css_w, b->css_h);
-        EM_ASM({ Module._pf_ctx = Module['canvas'].getContext('2d'); });
+        MAIN_THREAD_EM_ASM({ Module._pf_ctx = Module['canvas'].getContext('2d'); });
     }
     else
     {
@@ -494,8 +694,14 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->visible = true;
     b->cursor_mode = MOUSE_MODE_NORMAL;
 
-    emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, b, EM_TRUE, on_key);
-    emscripten_set_keyup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, b, EM_TRUE, on_key);
+    /* The clipboard listeners go first: the AltGr mark and the focus guard they install must see an event before the
+       callbacks below. The key callbacks are called on the browser's main thread, as the event happens, and their answer
+       (preventDefault or not) is the browser's: a callback called back on another thread could not give it. */
+    pf_web_install_clipboard();
+    emscripten_set_keydown_callback_on_thread(EMSCRIPTEN_EVENT_TARGET_WINDOW, b, EM_TRUE, on_key,
+                                              EM_CALLBACK_THREAD_CONTEXT_MAIN_RUNTIME_THREAD);
+    emscripten_set_keyup_callback_on_thread(EMSCRIPTEN_EVENT_TARGET_WINDOW, b, EM_TRUE, on_key,
+                                            EM_CALLBACK_THREAD_CONTEXT_MAIN_RUNTIME_THREAD);
     emscripten_set_mousemove_callback(CANVAS_TARGET, b, EM_TRUE, on_mouse);
     emscripten_set_mousedown_callback(CANVAS_TARGET, b, EM_TRUE, on_mouse);
     emscripten_set_mouseup_callback(CANVAS_TARGET, b, EM_TRUE, on_mouse);
@@ -520,8 +726,12 @@ void backend_destroy(BackendWindow *b)
     if (b->gl > 0)
         emscripten_webgl_destroy_context(b->gl);
     free(b->px);
+    web_lock();
     if (g_active == b)
         g_active = NULL;
+    g_held_valid = false;
+    g_copy_armed = false;
+    web_unlock();
     free(b);
 }
 
@@ -539,15 +749,20 @@ void backend_wake(void)
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
-    for (int i = 0; i < b->pending_count; i++)
-    {
-        WebItem *it = &b->pending[i];
-        if (it->is_char)
-            core_push_char(core, it->cp);
-        else
-            core_push_event(core, &it->ev);
-    }
+    /* what the browser's threads queued, taken under the lock; the core is called without it */
+    static WebItem work[WEB_PENDING_MAX]; /* not on the stack: the stack of a wasm module is small (64 KB by default) */
+    web_lock();
+    const int n = b->pending_count;
+    memcpy(work, b->pending, (size_t)n * sizeof work[0]);
     b->pending_count = 0;
+    web_unlock();
+    for (int i = 0; i < n; i++)
+    {
+        if (work[i].is_char)
+            core_push_char(core, work[i].cp);
+        else
+            core_push_event(core, &work[i].ev);
+    }
 }
 
 /* ========================================================================== */
@@ -599,14 +814,24 @@ static LoopCtx g_loop;
    the tick leaves the scope; it is not touched after that, and the loop ends if it asked to close. */
 static void main_tick(void)
 {
+    g_in_tick = true;
     core_scope_enter();
     window_begin_frame(g_loop.w);
     g_loop.frame(g_loop.w, g_loop.user);
     window_swap(g_loop.w);
     bool done = window_should_close(g_loop.w);
     core_scope_leave();
+    g_in_tick = false;
     if (done)
         emscripten_cancel_main_loop();
+}
+
+static bool web_tick_now(void)
+{
+    if (g_in_tick || !g_loop.frame || !g_loop.w)
+        return false;
+    main_tick();
+    return true;
 }
 
 void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void *user)
@@ -615,6 +840,7 @@ void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void 
     g_loop.w = w;
     g_loop.frame = frame;
     g_loop.user = user;
+    g_loop_thread = pthread_self();
     /* fps 0 = requestAnimationFrame; simulate_infinite_loop 1 = never returns */
     emscripten_set_main_loop(main_tick, 0, 1);
 }
@@ -685,7 +911,7 @@ void backend_present_pixels(BackendWindow *b)
     if (b->render != RENDER_PIXELS || !b->px)
         return;
     /* Swizzle 0xAARRGGBB -> RGBA bytes and blit through the 2D context. */
-    EM_ASM(
+    MAIN_THREAD_EM_ASM(
         {
             var ctx = Module._pf_ctx;
             if (!ctx)
@@ -903,7 +1129,7 @@ void backend_set_cursor(BackendWindow *b, int cursor)
         css = "default";
         break;
     }
-    EM_ASM({ if (Module['canvas']) Module['canvas'].style.cursor = UTF8ToString($0); }, css);
+    MAIN_THREAD_EM_ASM({ if (Module['canvas']) Module['canvas'].style.cursor = UTF8ToString($0); }, css);
 }
 
 void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallback cb, void *user)
@@ -966,7 +1192,7 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
         emscripten_request_pointerlock(CANVAS_TARGET, EM_TRUE);
     else
         emscripten_exit_pointerlock();
-    EM_ASM({ if (Module['canvas']) Module['canvas'].style.cursor = ($0 == 0) ? 'default' : 'none'; }, mode == MOUSE_MODE_NORMAL ? 0 : 1);
+    MAIN_THREAD_EM_ASM({ if (Module['canvas']) Module['canvas'].style.cursor = ($0 == 0) ? 'default' : 'none'; }, mode == MOUSE_MODE_NORMAL ? 0 : 1);
 }
 
 /* ========================================================================== */
@@ -992,29 +1218,44 @@ void *backend_primary_get(size_t *size)
     return NULL;
 }
 
-/* The async, permission-gated browser clipboard cannot be read synchronously
-   from wasm, so the content round-trips within the page. Text writes are mirrored
-   out to the system clipboard best-effort. */
+/* The browser's clipboard cannot be read synchronously from wasm (the async API asks permission, and does not exist over
+   plain http), so what the application reads is what it put there, or what a paste event brought (pf_web_paste, above: the
+   text of the browser's clipboard, handed over inside the event). Text writes are mirrored out to the browser's clipboard
+   (web/pf_web.js: the async API when there is one, else a hidden textarea and execCommand("copy")); a copy or cut key hands
+   the text over inside the event (pf_web_copy_text). */
 bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
-    if (!clipmem_set(items, count))
-        return false;
+    bool has_text = false;
     for (int i = 0; i < count; i++)
-        if (clip_mime_equal(items[i].mime, CLIPBOARD_TEXT))
-        {
-            const ClipMemItem *t = clipmem_find(CLIPBOARD_TEXT); /* NUL-terminated copy */
-            if (t)
-                EM_ASM({ if (navigator.clipboard) navigator.clipboard.writeText(UTF8ToString($0)); }, t->data);
-        }
-    return true;
+        has_text |= clip_mime_equal(items[i].mime, CLIPBOARD_TEXT);
+    char *copy = NULL;
+    web_lock();
+    bool ok = clipmem_set(items, count);
+    if (ok)
+    {
+        g_clip_seq++;
+        const ClipMemItem *t = has_text ? clipmem_find(CLIPBOARD_TEXT) : NULL; /* NUL-terminated copy */
+        if (t)
+            copy = strdup((const char *)t->data);
+    }
+    web_unlock();
+    if (copy)
+        pf_web_clipboard_write(copy); /* the JS side takes the string over */
+    return ok;
 }
 bool backend_clipboard_has(const char *mime)
 {
-    return clipmem_has(mime);
+    web_lock();
+    bool has = clipmem_has(mime);
+    web_unlock();
+    return has;
 }
 void *backend_clipboard_get(const char *mime, size_t *size)
 {
-    return clipmem_get(mime, size);
+    web_lock();
+    void *data = clipmem_get(mime, size);
+    web_unlock();
+    return data;
 }
 
 /* ========================================================================== */

@@ -40,7 +40,7 @@ bool message_box(PlatformWindow *parent, MessageKind kind, const char *title, co
 {
     (void)parent, (void)kind;
     platform_clear_error();
-    EM_ASM({ alert(UTF8ToString($0) + "\n\n" + UTF8ToString($1)); }, title ? title : "", message ? message : "");
+    MAIN_THREAD_EM_ASM({ alert(UTF8ToString($0) + "\n\n" + UTF8ToString($1)); }, title ? title : "", message ? message : "");
     return true;
 }
 
@@ -48,7 +48,7 @@ int confirm_box(PlatformWindow *parent, const char *title, const char *message)
 {
     (void)parent;
     platform_clear_error();
-    return EM_ASM_INT({ return confirm(UTF8ToString($0) + "\n\n" + UTF8ToString($1)) ? 1 : 0; }, title ? title : "",
+    return MAIN_THREAD_EM_ASM_INT({ return confirm(UTF8ToString($0) + "\n\n" + UTF8ToString($1)) ? 1 : 0; }, title ? title : "",
                       message ? message : "");
 }
 
@@ -82,7 +82,7 @@ bool open_url(const char *url)
 {
     if (bad_url(url))
         return error_set("invalid URL");
-    EM_ASM({ window.open(UTF8ToString($0), "_blank"); }, url);
+    MAIN_THREAD_EM_ASM({ window.open(UTF8ToString($0), "_blank"); }, url);
     return true;
 }
 

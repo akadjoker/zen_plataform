@@ -23,6 +23,11 @@ add_fake_test(test_gestures)
 add_fake_test(test_log)
 add_fake_test(test_events)
 add_fake_test(test_core_edge)
+# the web backend's key rules (src/web_key_rules.h has nothing of Emscripten in it), run on the host
+add_executable(test_web_keys test_web_keys.c)
+target_include_directories(test_web_keys PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(test_web_keys PRIVATE c_std_11)
+add_test(NAME test_web_keys COMMAND test_web_keys)
 if(NOT WIN32) # forks a child per function, and uses the POSIX sources
     add_fake_test(test_null_handles)
     target_sources(test_null_handles PRIVATE ${CMAKE_SOURCE_DIR}/src/clipboard.c ${CMAKE_SOURCE_DIR}/src/png.c ${CMAKE_SOURCE_DIR}/src/vulkan.c
