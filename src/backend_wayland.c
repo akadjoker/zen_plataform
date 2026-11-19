@@ -428,8 +428,22 @@ static void set_opaque_region(BackendWindow *b)
     wl_region_destroy(r);
 }
 
+/* A window is at most WL_SIZE_MAX pixels wide or high: a wl_shm pool is sized in an int (a buffer of w * h * 4 bytes, and
+   the stride, have to fit it) and a size past that is a protocol error, which the compositor answers by closing the
+   connection (error 71, and every window of the program with it). 16384 x 16384 is a gigabyte of pixels. */
+#define WL_SIZE_MAX 16384
+
+static char *title_copy(const char *title);
+
+static int clamp_dim(int v)
+{
+    return v < 1 ? 1 : v > WL_SIZE_MAX ? WL_SIZE_MAX : v;
+}
+
 static void apply_size(BackendWindow *b, int w, int h)
 {
+    w = clamp_dim(w); /* what the application asks and what the compositor configures alike */
+    h = clamp_dim(h);
     if (w == b->width && h == b->height)
         return;
     b->width = w;
@@ -2391,9 +2405,9 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->render = cfg->render;
     b->mode = cfg->mode;
     b->visible = true;
-    b->width = cfg->width > 0 ? cfg->width : 640;
-    b->height = cfg->height > 0 ? cfg->height : 480;
-    b->title = strdup(cfg->title ? cfg->title : "");
+    b->width = clamp_dim(cfg->width > 0 ? cfg->width : 640);
+    b->height = clamp_dim(cfg->height > 0 ? cfg->height : 480);
+    b->title = title_copy(cfg->title);
     b->hover_button = b->press_button = TB_NONE;
     b->hit_cursor = -1;
     b->decorated = !cfg->undecorated && cfg->kind != WINDOW_KIND_POPUP && cfg->kind != WINDOW_KIND_TOOLTIP;
@@ -2652,9 +2666,34 @@ float backend_content_scale(BackendWindow *b)
     return 1.0f;
 }
 
+/* A copy of the title cut to what one Wayland message holds: the connection carries 4096 bytes a message, and a longer one
+   (a title of 4 KB) is not sent, it breaks the connection (error 7, E2BIG) and every window of the program with it. The
+   cut is made on a character boundary. */
+#define WL_TITLE_MAX 4000
+
+static char *title_copy(const char *title)
+{
+    if (!title)
+        title = "";
+    size_t n = strlen(title);
+    if (n > WL_TITLE_MAX)
+    {
+        n = WL_TITLE_MAX;
+        while (n > 0 && ((unsigned char)title[n] & 0xC0) == 0x80)
+            n--;
+    }
+    char *copy = malloc(n + 1);
+    if (copy)
+    {
+        memcpy(copy, title, n);
+        copy[n] = 0;
+    }
+    return copy;
+}
+
 void backend_set_title(BackendWindow *b, const char *title)
 {
-    char *copy = strdup(title ? title : "");
+    char *copy = title_copy(title);
     if (!copy)
         return;
     if (b->title && strcmp(b->title, copy) != 0)
