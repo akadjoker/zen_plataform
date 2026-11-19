@@ -1,8 +1,10 @@
 /* bench_glfw.c - GLFW 3 side of the comparison. glfwPollEvents is the turn of the event loop. */
 #include "bench.h"
 #include <GLFW/glfw3.h>
+#ifndef BENCH_WAYLAND
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3native.h>
+#endif
 
 static Counts *g_c;
 
@@ -94,6 +96,7 @@ void lib_wake(void)
     glfwPostEmptyEvent();
 }
 
+#ifndef BENCH_WAYLAND
 Display *lib_display(void *win)
 {
     (void)win;
@@ -104,3 +107,4 @@ unsigned long lib_xwin(void *win)
 {
     return glfwGetX11Window(win);
 }
+#endif

@@ -72,6 +72,7 @@ void lib_wake(void)
     platform_wake();
 }
 
+#ifndef BENCH_WAYLAND
 Display *lib_display(void *win)
 {
     return window_native_handle(win, NATIVE_DISPLAY);
@@ -81,3 +82,4 @@ unsigned long lib_xwin(void *win)
 {
     return (unsigned long)(uintptr_t)window_native_handle(win, NATIVE_WINDOW);
 }
+#endif

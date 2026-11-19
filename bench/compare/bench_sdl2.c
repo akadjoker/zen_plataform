@@ -118,6 +118,7 @@ void lib_wake(void)
     SDL_PushEvent(&e);
 }
 
+#ifndef BENCH_WAYLAND
 static int info(void *p, SDL_SysWMinfo *i)
 {
     Win *w = p;
@@ -136,3 +137,4 @@ unsigned long lib_xwin(void *p)
     SDL_SysWMinfo i;
     return info(p, &i) ? i.info.x11.window : 0;
 }
+#endif

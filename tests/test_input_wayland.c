@@ -679,6 +679,9 @@ static bool start_compositor(void)
     wl_global_create(S.display, &zwp_pointer_constraints_v1_interface, 1, NULL, constraints_bind);
     wl_global_create(S.display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, manager_bind);
 #endif
+#ifdef ZEN_WL_EXTRA_GLOBALS
+    ZEN_WL_EXTRA_GLOBALS(S.display); /* bench/compare/wl_compositor.c adds a wl_output, which SDL2 needs */
+#endif
 
     if (pipe2(S.cmd, O_NONBLOCK | O_CLOEXEC) != 0)
         return false;

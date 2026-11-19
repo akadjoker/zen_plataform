@@ -24,7 +24,9 @@
 #include <poll.h>
 #include <pthread.h>
 #include <unistd.h>
+#ifndef BENCH_WAYLAND
 #include <X11/Xutil.h>
+#endif
 
 static long long now_ns(void)
 {
@@ -48,8 +50,16 @@ static void nap_ms(int ms)
 
 static int viewable(void *win)
 {
+#ifdef BENCH_WAYLAND
+    /* No map state to ask for: a Wayland window is there once its first configure has been seen, and each library's
+       window creation (zen_platform's window_create, SDL_CreateWindow and glfwCreateWindow with the window shown) waits
+       for that before it returns. */
+    (void)win;
+    return 1;
+#else
     XWindowAttributes a;
     return XGetWindowAttributes(lib_display(win), lib_xwin(win), &a) && a.map_state == IsViewable;
+#endif
 }
 
 /* poll until the window is mapped on the server (bounded: a library that never maps fails the run) */
@@ -294,6 +304,7 @@ int main(int argc, char **argv)
         lib_exit();
         return 0;
     }
+#ifndef BENCH_WAYLAND /* the events are injected with XTest */
     if (strcmp(mode, "events") == 0)
     {
         n = argc > 3 ? atoll(argv[3]) : 0;
@@ -381,5 +392,6 @@ int main(int argc, char **argv)
         lib_exit();
         return 0;
     }
+#endif
     return 2;
 }

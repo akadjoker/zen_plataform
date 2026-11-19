@@ -3,7 +3,9 @@
 #ifndef BENCH_H
 #define BENCH_H
 
+#ifndef BENCH_WAYLAND /* a Wayland build has no X11 at all */
 #include <X11/Xlib.h>
+#endif
 
 typedef struct
 {
@@ -28,7 +30,9 @@ void lib_poll(void *win, Counts *c);
 int lib_wait(void *win, double seconds, Counts *c);
 /* Wake a lib_wait, from any thread (zen_platform: platform_wake, GLFW: glfwPostEmptyEvent, SDL: SDL_PushEvent of a user event) */
 void lib_wake(void);
+#ifndef BENCH_WAYLAND
 Display *lib_display(void *win);
 unsigned long lib_xwin(void *win);
+#endif
 
 #endif
