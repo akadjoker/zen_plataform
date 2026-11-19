@@ -109,6 +109,7 @@ static struct
     Atom XdndAware, XdndEnter, XdndPosition, XdndStatus, XdndLeave, XdndDrop, XdndFinished,
         XdndSelection, XdndTypeList, XdndActionCopy, XDND_DATA, TEXT_URI_LIST;
 
+    bool glx_loaded; /* glx_load has run */
     glXCreateContextAttribsARBProc create_context;
     bool has_es_profile;
     glXSwapIntervalEXTProc swap_ext;
@@ -401,6 +402,9 @@ static void refresh_wm_state(BackendWindow *b)
     XFree(data);
 }
 
+/* A window is at most 65535 pixels wide or high: the size is 16 bits in the protocol. */
+#define X_SIZE_MAX 65535
+
 /* ========================================================================== */
 /*  GL context                                                                */
 /* ========================================================================== */
@@ -420,8 +424,24 @@ static bool glx_has_extension(const char *name)
     return false;
 }
 
+/* The GLX entry points and extensions are looked up when the first GL window is made, not in backend_init: the
+   first call into libGLX makes it load the vendor's driver (Mesa and its LLVM, tens of megabytes), and a program
+   that opens only pixel or Vulkan windows has no use for it. */
+static void glx_load(void)
+{
+    if (g.glx_loaded)
+        return;
+    g.glx_loaded = true;
+    g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
+    g.has_es_profile = glx_has_extension("GLX_EXT_create_context_es2_profile");
+    g.swap_ext = (glXSwapIntervalEXTProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
+    g.swap_mesa = (glXSwapIntervalMESAProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalMESA");
+    g.swap_sgi = (glXSwapIntervalSGIProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalSGI");
+}
+
 static GLXFBConfig choose_fbconfig(const GLConfig *gl)
 {
+    glx_load();
     int attribs[] = {
         GLX_X_RENDERABLE, True,
         GLX_DRAWABLE_TYPE, GLX_WINDOW_BIT,
@@ -633,12 +653,6 @@ bool backend_init(void)
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
     if (!g.xim && XSupportsLocale() && XSetLocaleModifiers("@im=none"))
         g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
-
-    g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
-    g.has_es_profile = glx_has_extension("GLX_EXT_create_context_es2_profile");
-    g.swap_ext = (glXSwapIntervalEXTProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
-    g.swap_mesa = (glXSwapIntervalMESAProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalMESA");
-    g.swap_sgi = (glXSwapIntervalSGIProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalSGI");
     return true;
 }
 
@@ -912,6 +926,10 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     int y = (cfg->y == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_UNDEFINED) ? 0 : cfg->y;
     int w = cfg->width > 0 ? cfg->width : 640;
     int h = cfg->height > 0 ? cfg->height : 480;
+    if (w > X_SIZE_MAX)
+        w = X_SIZE_MAX;
+    if (h > X_SIZE_MAX)
+        h = X_SIZE_MAX;
 
     /* On a chosen monitor the window is placed before it is mapped, as a user position: a
        compositor (XWayland under mutter) places a new window by itself and a move made right
@@ -1108,6 +1126,8 @@ void backend_destroy(BackendWindow *b)
         XFreeCursor(g.dpy, b->hidden_cursor);
     XDestroyWindow(g.dpy, b->win);
     XFreeColormap(g.dpy, b->colormap);
+    /* Without this the window stays on screen until something else flushes the connection. */
+    XFlush(g.dpy);
     free(b);
 }
 
@@ -2443,6 +2463,8 @@ void backend_make_current_on(BackendWindow *target, BackendWindow *context)
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     int interval = on ? 1 : 0;
+    if (b->render != RENDER_GL)
+        return;
     if (g.swap_ext)
         g.swap_ext(g.dpy, b->win, interval);
     else if (g.swap_mesa)
@@ -2559,6 +2581,9 @@ void backend_get_size(BackendWindow *b, int *w, int *h)
 
 void backend_set_size(BackendWindow *b, int w, int h)
 {
+    /* The server refuses 0 and anything over 16 bits with BadValue, and Xlib's answer to an error is to end the program. */
+    w = w < 1 ? 1 : w > X_SIZE_MAX ? X_SIZE_MAX : w;
+    h = h < 1 ? 1 : h > X_SIZE_MAX ? X_SIZE_MAX : h;
     XResizeWindow(g.dpy, b->win, (unsigned)w, (unsigned)h);
 }
 

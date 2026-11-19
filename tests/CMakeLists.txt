@@ -171,6 +171,11 @@ if(PLATFORM_BACKEND_X11)
     add_test(NAME test_x11_lifecycle COMMAND test_x11_lifecycle)
     set_tests_properties(test_x11_lifecycle PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 
+    add_executable(test_core_edge_x11 test_core_edge_x11.c)
+    target_link_libraries(test_core_edge_x11 PRIVATE platform)
+    add_test(NAME test_core_edge_x11 COMMAND test_core_edge_x11)
+    set_tests_properties(test_core_edge_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
     add_executable(test_input_x11 test_input_x11.c)
     target_link_libraries(test_input_x11 PRIVATE platform)
     # Real key events through XTest, when the development files are there.
@@ -181,6 +186,10 @@ if(PLATFORM_BACKEND_X11)
         target_link_libraries(test_input_x11 PRIVATE ${XTEST_LIB})
     endif()
     add_test(NAME test_input_x11 COMMAND test_input_x11)
+    if(XTEST_LIB AND XTEST_INCLUDE)
+        target_compile_definitions(test_core_edge_x11 PRIVATE HAVE_XTEST=1)
+        target_link_libraries(test_core_edge_x11 PRIVATE ${XTEST_LIB})
+    endif()
     set_tests_properties(test_input_x11 PROPERTIES SKIP_RETURN_CODE 77)
 
     # Buttons and drags with the pointer moved by XTest (the server's own pointer).
