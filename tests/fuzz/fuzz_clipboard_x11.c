@@ -3,7 +3,8 @@
  * property of any type, format and size, with a different property than the one asked for, with INCR transfers of chunks
  * of any size (or never ending), with an empty TARGETS. The owner is a thread with a connection of its own; the program
  * asks (clipboard_get, clipboard_get_data of a few MIME types, clipboard_has_data, clipboard_get_image, which also
- * decodes whatever comes as a PNG) and what the owner does comes from the input: the first half of the bytes picks what
+ * decodes whatever comes as a PNG, and clipboard_get_primary / clipboard_set_primary for the PRIMARY selection, which the owner
+ * holds too and answers the same way) and what the owner does comes from the input: the first half of the bytes picks what
  * the program asks, the second half is the owner's script. Needs a server (tools/fuzz.sh starts one).
  */
 #include "platform.h"
@@ -160,6 +161,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     g_utf8 = XInternAtom(g_hd, "UTF8_STRING", False);
     g_png = XInternAtom(g_hd, "image/png", False);
     XSetSelectionOwner(g_hd, g_clipboard, g_hw, CurrentTime);
+    XSetSelectionOwner(g_hd, XA_PRIMARY, g_hw, CurrentTime);
     XSelectInput(g_hd, DefaultRootWindow(g_hd), 0);
     XFlush(g_hd);
     pthread_t t;
@@ -182,7 +184,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     static const char *const mimes[] = {"text/plain", "text/plain;charset=utf-8", "image/png", "text/uri-list", "x/y"};
     for (size_t i = 0; i < half && i < 6; i++)
     {
-        switch (data[i] % 5)
+        switch (data[i] % 8)
         {
         case 0:
             (void)clipboard_get();
@@ -190,7 +192,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         case 1:
         {
             size_t n = 0;
-            void *d = clipboard_get_data(mimes[data[i] / 5 % 5], &n);
+            void *d = clipboard_get_data(mimes[data[i] / 8 % 5], &n);
             if (d)
             {
                 if (n)
@@ -200,7 +202,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             break;
         }
         case 2:
-            (void)clipboard_has_data(mimes[data[i] / 5 % 5]);
+            (void)clipboard_has_data(mimes[data[i] / 8 % 5]);
             break;
         case 3:
         {
@@ -210,6 +212,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 framebuffer_free(&fb);
             break;
         }
+        case 4:
+        {
+            const char *t = clipboard_get_primary(); /* the same reader, the other selection */
+            if (t[0])
+                ((volatile const char *)t)[strlen(t) - 1];
+            break;
+        }
+        case 5:
+            clipboard_set_primary("fuzz"); /* takes PRIMARY from the hostile owner, which then asks for it back */
+            XSetSelectionOwner(g_hd, XA_PRIMARY, g_hw, CurrentTime);
+            XFlush(g_hd);
+            break;
+        case 6:
+            clipboard_set_primary(NULL);
+            (void)clipboard_get_primary();
+            break;
         default:
             clipboard_set("fuzz"); /* takes the selection from the hostile owner, which then asks for it back */
             XSetSelectionOwner(g_hd, g_clipboard, g_hw, CurrentTime);
