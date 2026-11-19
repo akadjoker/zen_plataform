@@ -276,17 +276,14 @@ static void test_more_children_than_slots(void)
     }
     CHECK(failed == 0);
     CHECK(g_bad_refusals == 0);
-    for (int i = total - PROCESS_CAP; i < total; i++) /* the children that can still have a record */
-        if (ids[i] > 0)
-            finished(ids[i]);
     int wrong = 0, remembered = 0;
+    for (int i = 0; i < total; i++) /* every child, the oldest too: a record that was never dropped may still be running */
+        if (ids[i] > 0 && !finished(ids[i]))
+            wrong++;
     for (int i = 0; i < total; i++)
     {
-        if (ids[i] <= 0 || process_is_running(ids[i]))
-        {
-            wrong += ids[i] > 0;
+        if (ids[i] <= 0)
             continue;
-        }
         int code = process_exit_code(ids[i]);
         if (code == i % 200)
             remembered++;
