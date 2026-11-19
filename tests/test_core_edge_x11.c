@@ -15,6 +15,8 @@
 #endif
 
 #include <dirent.h>
+#include <locale.h>
+#include <sys/inotify.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdint.h>
@@ -685,6 +687,131 @@ static void test_keymap_follows(void)
     window_destroy(w);
 }
 
+/* XMODIFIERS names an input method server that is not running (ibus, down). The built-in method of Xlib is the
+   fallback; opening it parses the compose table, which backend_init used to do at once. It is now opened by the first
+   key, before that key is filtered, so the first dead key still composes. The compose table here is a file of the
+   test (XCOMPOSEFILE), watched with inotify: it must not be opened by platform_init and window_create, and must be
+   by the first key. */
+static char g_compose_path[256];
+
+static void pre_dead_server(void)
+{
+    snprintf(g_compose_path, sizeof g_compose_path, "/tmp/zp-compose-%d", (int)getpid());
+    FILE *f = fopen(g_compose_path, "w");
+    if (f)
+    {
+        fputs("<dead_acute> <a> : \"\xce\xa9\" Greek_OMEGA\n", f); /* a table of one line: dead acute, a -> omega */
+        fclose(f);
+    }
+    setenv("XCOMPOSEFILE", g_compose_path, 1);
+    setenv("XMODIFIERS", "@im=ibus", 1);
+    static const char *const locales[] = {"pt_PT.UTF-8", "en_US.UTF-8", "C.UTF-8"};
+    for (unsigned i = 0; i < sizeof locales / sizeof locales[0]; i++)
+        if (setlocale(LC_CTYPE, locales[i]))
+        {
+            setenv("LC_ALL", locales[i], 1);
+            break;
+        }
+}
+
+/* The key goes to the window under the pointer, which is whichever of the windows is on top: every window of the
+   process is pumped (one pump reads the shared queue and hands the others their events to take at their own pump). */
+static void drain_chars(PlatformWindow *const *ws, int nw, uint32_t *out, int *n, int cap)
+{
+    for (int i = 0; i < 4; i++)
+    {
+        for (int k = 0; k < nw; k++)
+        {
+            window_begin_frame(ws[k]);
+            Event e;
+            while (poll_event(ws[k], &e))
+                if (e.type == EVENT_CHAR && *n < cap)
+                    out[(*n)++] = e.data.codepoint;
+        }
+        time_sleep(5);
+    }
+}
+
+static void test_first_dead_key_late_method(void)
+{
+    if (!getenv("ZP_PRIVATE_X"))
+    {
+        printf("  skipped: changes the keyboard mapping of the server, which is not a private one\n");
+        return;
+    }
+    int ino = inotify_init1(IN_NONBLOCK);
+    CHECK(ino >= 0);
+    if (ino < 0)
+        return;
+    /* the watch comes after platform_init (main ran it), so what it sees is what came after: nothing yet */
+    CHECK(inotify_add_watch(ino, g_compose_path, IN_OPEN | IN_ACCESS) >= 0);
+    PlatformWindow *w = make(RENDER_PIXELS, 300, 200);
+    CHECK(w != NULL);
+    if (!w)
+        return;
+    PlatformWindow *w2 = make(RENDER_PIXELS, 200, 100); /* a second one, made before the method opens */
+    CHECK(w2 != NULL);
+    Display *d = dpy_of(w);
+    int rx = 0, ry = 0;
+    window_get_position(w, &rx, &ry);
+    settle(w);
+    char ev[512];
+    CHECK(read(ino, ev, sizeof ev) < 0); /* nothing opened the compose table: no key yet */
+
+    KeyCode dead = XKeysymToKeycode(d, 'q'), a = XKeysymToKeycode(d, 'a');
+    int per = 0;
+    KeySym *orig = XGetKeyboardMapping(d, dead, 1, &per);
+    KeySym *mine = calloc((size_t)per, sizeof *mine);
+    mine[0] = XK_dead_acute;
+    XChangeKeyboardMapping(d, dead, per, mine, 1);
+    XTestFakeMotionEvent(d, -1, rx + 100, ry + 100, 0);
+    XSync(d, False);
+
+    /* the first key this process ever gets is the dead key */
+    XTestFakeKeyEvent(d, dead, True, 0);
+    XTestFakeKeyEvent(d, dead, False, 0);
+    XTestFakeKeyEvent(d, a, True, 0);
+    XTestFakeKeyEvent(d, a, False, 0);
+    XSync(d, False);
+    time_sleep(40);
+    uint32_t chars[16];
+    int n = 0;
+    PlatformWindow *two[2] = {w, w2};
+    drain_chars(two, 2, chars, &n, 16);
+    CHECK(n == 1 && chars[0] == 0x3A9); /* omega, from the test's table: composed, with no plain 'a' beside it */
+    CHECK(read(ino, ev, sizeof ev) > 0); /* and the table was read by now */
+
+    /* a window made after the method opened composes too */
+    PlatformWindow *w3 = make(RENDER_PIXELS, 300, 200);
+    CHECK(w3 != NULL);
+    if (w3)
+    {
+        int x3 = 0, y3 = 0;
+        window_get_position(w3, &x3, &y3);
+        settle(w3);
+        XTestFakeMotionEvent(d, -1, x3 + 100, y3 + 100, 0);
+        XTestFakeKeyEvent(d, dead, True, 0);
+        XTestFakeKeyEvent(d, dead, False, 0);
+        XTestFakeKeyEvent(d, a, True, 0);
+        XTestFakeKeyEvent(d, a, False, 0);
+        XSync(d, False);
+        time_sleep(40);
+        n = 0;
+        PlatformWindow *three[3] = {w, w2, w3};
+        drain_chars(three, 3, chars, &n, 16);
+        CHECK(n == 1 && chars[0] == 0x3A9);
+        window_destroy(w3);
+    }
+    XChangeKeyboardMapping(d, dead, per, orig, 1);
+    XSync(d, False);
+    free(mine);
+    XFree(orig);
+    window_destroy(w2);
+    window_destroy(w);
+    close(ino);
+    unlink(g_compose_path);
+}
+
 static void test_clocks(void)
 {
     uint64_t prev = time_nanos();
@@ -723,6 +850,7 @@ typedef struct
 {
     const char *name;
     void (*fn)(void);
+    void (*pre)(void); /* runs in the child before platform_init: the environment the section needs */
 } Section;
 
 int main(void)
@@ -739,6 +867,7 @@ int main(void)
         {"held across destroy", test_held_across_destroy},
         {"wheel burst", test_wheel_burst},
         {"keymap follows", test_keymap_follows},
+        {"first dead key, input method opened late", test_first_dead_key_late_method, pre_dead_server},
 #endif
         {"cursors and grabs", test_cursors_and_grabs},
         {"clipboard extremes", test_clipboard_extremes},
@@ -752,6 +881,8 @@ int main(void)
         if (pid == 0)
         {
             alarm(90);
+            if (sections[i].pre)
+                sections[i].pre();
             if (!platform_init())
                 _exit(77);
             sections[i].fn();

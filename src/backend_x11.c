@@ -98,6 +98,8 @@ static struct
     Window root;
     XContext ctx; /* xid -> BackendWindow* */
     XIM xim;
+    bool im_lazy;              /* no input method yet: the built-in one is opened by the first key (im_open_local) */
+    BackendWindow *windows;    /* every window, newest first, to give each an input context when the method opens late */
     bool detectable_repeat; /* a held key sends presses only, no synthetic releases */
     int xkb_event_base;     /* XKB events (XkbMapNotify, XkbNewKeyboardNotify) arrive as this event type, 0 without XKB */
     /* keycode -> Key, filled on first use from the keysym of the first group and level, dropped when the keyboard
@@ -146,6 +148,9 @@ struct BackendWindow
     GLConfig gl_cfg;
     Colormap colormap;
     XIC xic;
+    BackendWindow *next; /* g.windows */
+    bool has_spot;       /* backend_set_text_input_rect was called: kept for a context created later */
+    int spot_x, spot_y;
     /* input method: composing text shown by the application (XIM preedit callbacks) */
     Preedit preedit;
     bool preedit_dirty;           /* an EVENT_TEXT_EDIT is due at the end of the pump */
@@ -667,8 +672,12 @@ bool backend_init(void)
     if (XSupportsLocale())
         XSetLocaleModifiers("");
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
-    if (!g.xim && XSupportsLocale() && XSetLocaleModifiers("@im=none"))
-        g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
+    /* The configured method is not there (XMODIFIERS names a server that is not running). The built-in method of Xlib
+       is the fallback, with dead keys and compose, but opening it reads the locale's compose table: some 40 million
+       instructions (10 to 30 ms), which a program that never gets a key would pay for nothing. It is opened by the
+       first key press instead, before that key is filtered, so the first dead key still works. */
+    if (!g.xim && XSupportsLocale())
+        g.im_lazy = true;
     return true;
 }
 
@@ -786,6 +795,40 @@ static XIC create_ic(BackendWindow *b)
                      b->win, NULL);
 }
 
+static void apply_spot(BackendWindow *b)
+{
+    XPoint spot = {(short)b->spot_x, (short)b->spot_y};
+    XVaNestedList list = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
+    XSetICValues(b->xic, XNPreeditAttributes, list, NULL); /* some methods ignore it */
+    XFree(list);
+}
+
+/* An input context for a window made before the method was open: the state the window has by now goes into it. */
+static void im_attach(BackendWindow *b)
+{
+    b->xic = create_ic(b);
+    if (!b->xic)
+        return;
+    if (b->focused && b->text_input)
+        XSetICFocus(b->xic);
+    if (b->has_spot)
+        apply_spot(b);
+}
+
+/* The built-in input method, opened late (see backend_init): called before the first key event is filtered, so the
+   filter exists when that very key (a dead key, the compose key) is handed to XFilterEvent. */
+static void im_open_local(void)
+{
+    g.im_lazy = false;
+    if (!XSetLocaleModifiers("@im=none"))
+        return;
+    g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
+    if (!g.xim)
+        return;
+    for (BackendWindow *w = g.windows; w; w = w->next)
+        im_attach(w);
+}
+
 /* The composition changed during this pump: tell the application once. */
 static void flush_preedit(BackendWindow *b)
 {
@@ -821,13 +864,13 @@ void backend_set_text_input(BackendWindow *b, bool on)
 void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
 {
     (void)w;
+    /* the spot is where the candidate list goes: just under the caret */
+    b->has_spot = true;
+    b->spot_x = (short)x;
+    b->spot_y = (short)(y + h);
     if (!b->xic)
         return;
-    /* the spot is where the candidate list goes: just under the caret */
-    XPoint spot = {(short)x, (short)(y + h)};
-    XVaNestedList list = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
-    XSetICValues(b->xic, XNPreeditAttributes, list, NULL); /* some methods ignore it */
-    XFree(list);
+    apply_spot(b);
 }
 
 /* ---- decorations and window kinds ---- */
@@ -1035,6 +1078,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
 
     b->text_input = true;
     b->xic = create_ic(b);
+    b->next = g.windows;
+    g.windows = b;
 
     if (cfg->render == RENDER_PIXELS)
     {
@@ -1139,6 +1184,12 @@ void backend_destroy(BackendWindow *b)
             glXDestroyContext(g.dpy, b->glc);
     }
     XDeleteContext(g.dpy, b->win, g.ctx);
+    for (BackendWindow **pp = &g.windows; *pp; pp = &(*pp)->next)
+        if (*pp == b)
+        {
+            *pp = b->next;
+            break;
+        }
     free(b->pending);
     xdnd_free_drop(b);
     if (b->hidden_cursor)
@@ -2399,6 +2450,8 @@ void backend_pump_events(BackendWindow *b, Core *core)
         XNextEvent(g.dpy, &ev);
         if (ev.type == KeyPress || ev.type == KeyRelease)
         {
+            if (g.im_lazy)
+                im_open_local();
             XEvent orig = ev;
             if (XFilterEvent(&ev, None))
             {
