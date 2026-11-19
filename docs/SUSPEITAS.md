@@ -22,6 +22,24 @@ API, em correccoes simples e locais que o MinGW compila com `-Wall -Wextra` sem 
 O que falta para as dar por provadas: largar um ficheiro com um caminho de mais de 260 caracteres numa janela, ler de um pipe
 com nome cujo escritor fecha, abrir `\\.\pipe\x`, e chamar `io_flush` num fluxo `"rb"`.
 
+A ronda 4 leu tambem a metade do job object do `process_kill_tree` (`src/process_win32.c`, vinda de um patch escrito sem compilar) e
+corrigiu o que a leitura mostra errado (compila com o MinGW sem avisos; `tests/test_win32_review.c`, `test_process`, compilado e nunca corrido):
+
+- `ResumeThread` sem ver o resultado: se falhasse, o processo ficava suspenso para sempre e lia-se como a correr; agora termina-o, fecha os
+  handles e devolve 0.
+- `free_slot` fechava e apagava o registo acabado mais antigo antes de o `CreateProcessW` ter corrido: um spawn que falhava fazia a tabela
+  esquecer um registo; agora so sai quando o processo novo existe.
+- `exit_code = 0` inventado depois de `TerminateProcess` / `TerminateJobObject`: um processo que acabou sozinho um instante antes perdia o
+  codigo; agora espera e le o codigo que ele tem. E um `TerminateProcess` num processo que acabou sozinho entre o `refresh` e a chamada falha com
+  `ACCESS_DENIED` e o `process_kill` devolvia false; agora vee-se se ja acabou.
+- um id acima de 32 bits lia-se como o `DWORD` da esquerda (`id + 2^32` acabava o filho), como no POSIX.
+
+Lido e deixado, por estar certo pela leitura: o job so e criado depois do `CreateProcessW` (nenhum handle a vazar se este falha) e fecha-se se o
+`AssignProcessToJobObject` falha (Windows antes do 8, ou um processo ja dentro de um job que nao aninha: corre sem job e o `process_kill_tree`
+so acaba o processo, agora dito em `platform.h`); o PID nao se reutiliza enquanto o registo guarda o handle do processo. Falta numa maquina
+Windows: correr `test_process` (o `cmd` e o `ping` que ele corre acabam juntos; um `ping` lancado com `start /b` de um `cmd` que ja acabou tambem), e ver um
+processo que e lancado de dentro de um job que nao aninha (Windows 7) a correr sem job.
+
 ## Ficou por provar
 
 1. `src/fs_win32.c`, `enum_dir`: um nome de ficheiro com um surrogate sem par (o NTFS deixa). A suspeita da ronda 3 era que
@@ -41,6 +59,24 @@ com nome cujo escritor fecha, abrir `\\.\pipe\x`, e chamar `io_flush` num fluxo 
 5. `src/ui/ui_layout.c`: com mais de 7 contentores aninhados (`UI_MAX_CONTAINERS` 8) `ui_push_container` nao empurra e o
    `ui_pop_container` correspondente tira o contentor de fora; e um `zui_*_end` a mais tira a raiz e o `ui_top` seguinte indexa
    `containers[-1]`. So acontece com uso errado (pares desequilibrados) ou aninhamento absurdo.
+
+## `process_kill_tree` (POSIX): o que resta depois da revisao da ronda 4
+
+Provado por `tests/test_process_pidreuse.c` (um namespace de pids proprio, onde o proximo pid se poe a mao; salta onde o sistema nao deixa criar namespaces
+sem privilegios): com o lider acabado e esperado e um neto vivo o numero continua ocupado (o POSIX: um id de processo nao se reutiliza enquanto
+existir um grupo com esse id), e com o grupo vazio o numero volta a quem o pedir, que pode liderar um grupo dele. O registo sabe agora se o grupo tinha gente
+(`group`, lido quando o filho e esperado e relido em cada entrada na tabela), e um registo acabado com o grupo vazio nao sinaliza nada. Resta:
+
+- **A janela entre duas chamadas.** O ultimo membro do grupo sai, o sistema da o numero a um estranho que lidera o grupo dele, e o programa chama
+  `process_kill_tree` antes de qualquer outra funcao de processos ter relido o registo: o registo ainda diz "tem gente" e o `kill(-pid)` apanha o estranho. So
+  acontece com a volta dos pids (ate `pid_max`, 4 M neste sistema) dentro dessa janela; o unico remedio completo era nao esperar pelo lider enquanto o grupo tiver
+  membros (zombies enquanto durar), o que e pior. Documentado em `platform.h`.
+- **Quem sai do grupo escapa** (`setsid`, `setpgid`: um daemon que se desliga, uma shell com controlo de tarefas): fica fora do alcance. Testado
+  (`test_kill_tree_escaped`) e documentado; uma arvore verdadeira no Linux pedia um cgroup (nao ha privilegios para isso aqui) ou o `PR_SET_CHILD_SUBREAPER` mais
+  uma varredura de `/proc`, que nao e portavel.
+- **Outro `waitpid` do programa** (um `SIGCHLD` ignorado, um `waitpid(-1)`): o filho acaba e o numero fica livre logo; o registo diz `-1` (ja era assim) e o grupo
+  olha-se na hora; se o programa esperar pelos filhos por conta propria a janela acima abre-se mais depressa.
+- O `process_kill_tree` espera pelo lider (como o `process_kill`) com o fecho da tabela; um lider em estado `D` (disco morto) bloqueia as outras funcoes.
 
 ## draw2d: linhas e rectangulos com coordenadas muito grandes
 
@@ -119,7 +155,7 @@ de tempo real), o titulo acima do pedido maximo do servidor, a tabela de teclas,
 dirigido que nao depende do sanitizador), o `key_mods` que ia ao servidor em cada chamada, a espera por eventos que nao havia
 (`platform_wait_events`, `platform_wake`, `app_run_events`), e o que os fuzzers encontraram (`tests/fuzz`, `tools/fuzz.sh`). O que fica:
 
-- **A espera por eventos nao foi medida em Wayland contra o GLFW e o SDL2, nem corrida no Windows, no Android nem no web.** X11 (Xvfb) e
+- **A espera por eventos foi medida em Wayland contra o GLFW e o SDL2 na ronda 4 (ver abaixo), mas nao corrida no Windows, no Android nem no web.** X11 (Xvfb) e
   Wayland (o compositor de teste, em-processo) correm os mesmos testes (`tests/wait_common.h`); o fake corre-os sob o TSan. O Windows
   (`MsgWaitForMultipleObjectsEx`) compila com o MinGW e nunca correu; o Android (`ALooper_pollOnce`) nao se compilou (sem NDK) e o corpo
   foi verificado contra declaracoes das tres funcoes; o web devolve logo. Para fechar: uma maquina Windows, o NDK e o Emscripten.
@@ -157,11 +193,13 @@ dirigido que nao depende do sanitizador), o `key_mods` que ia ao servidor em cad
   (o servidor reaproveita a base dos ids); se o anterior estava marcado como morto, os pedidos ao novo falham durante 10 s. Um dono
   parado de verdade ainda tem os seus ids e o servidor larga a seleccao quando o cliente morre, por isso nao se viu fora de um teste
   que mata e recria clientes depressa. A defesa seria juntar o numero de serie da seleccao.
-- **Wayland: nao se mediu contra o GLFW e o SDL2.** O GLFW 3.3.10 do pacote Ubuntu so tem X11 e nao ha compositor sem janela (o weston
-  nao esta instalado); o SDL2 em Wayland nao se tentou sem um. As seccoes do X11 correm no Wayland contra o compositor de teste
-  (`tests/test_core_edge_wayland.c`), que nao tem dispositivo de dados nem o resto do que um compositor a serio tem: o clipboard do
-  Wayland, o arrastar e largar e as decoracoes do lado do compositor continuam sem teste de bordas. Mil `platform_init` /
-  `platform_shutdown` demoram 17 s a 70 s (compilar o keymap do xkbcommon em cada um).
+- **Wayland: medido contra o GLFW e o SDL2 num compositor de teste (ronda 4), com o que isso nao diz.** `docs/COMPARACAO_CORE.md`, "Quarta ronda". O
+  compositor e o de `tests/test_input_wayland.c` como programa proprio (`bench/compare/wl_compositor`, mais um `wl_output`), nao um compositor a serio: nao tem
+  dispositivo de dados, buffers partilhados (o Mesa renderiza por software e passa pelo `wl_shm`) nem decoracoes; os tempos de um compositor real (que compoe e
+  pede frames) nao sao estes. As seccoes do X11 correm no Wayland contra ele (`tests/test_core_edge_wayland.c`); o clipboard do Wayland, o arrastar e largar e
+  as decoracoes do lado do compositor continuam sem teste de bordas. O backend Wayland so tem janelas `RENDER_GL` (`window_create` com `RENDER_PIXELS` falha:
+  "the Wayland backend has only RENDER_GL windows so far"), por isso as tabelas Wayland sao todas com GL. Mil `platform_init` / `platform_shutdown` demoram 17 s a 70 s
+  (compilar o keymap do xkbcommon em cada um).
 - **Os fuzzers correram 10 minutos cada, com semente fixa, nao horas.** `fuzz_images` (PNG e BMP, e a copia do stb da zen_ui),
   `fuzz_paths`, `fuzz_x11_events`, `fuzz_clipboard_x11`, `fuzz_touch` (o que o XInput 2, o WM_TOUCH e os backends tacteis entregam ao
   nucleo) e `fuzz_wayland` (um compositor hostil). Os eventos XInput 2 em si nao se alcancam por outro cliente (o `XSendEvent` recusa

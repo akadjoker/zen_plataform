@@ -13,7 +13,8 @@ de teclas do script mostra a zen_platform pior (8077 contra 3347 instrucoes por 
 maior do que a do GLFW (276 kB). O que se perde e medido: o tempo de relogio de um ciclo acordar + esperar num fio so contra o SDL2 (7,7 contra 4,6 us) e
 a abertura do metodo na primeira tecla, explicados em "Terceira ronda" e em "Onde perde". O que a primeira ronda tinha corrigido (arranque sem GL,
 memoria, esperas ao servidor) esta em "Antes e depois"; a segunda em "Segunda ronda"; a terceira (esperar por eventos, `key_mods`, o arranque, o
-Windows lido) em "Terceira ronda".
+Windows lido) em "Terceira ronda"; a quarta (um teste intermitente que era do teste, o `process_kill_tree`, o fake e o Wayland contra o GLFW e o SDL2,
+com `tools/bench_wayland.sh`) em "Quarta ronda".
 
 ## Maquina e versoes
 
@@ -71,6 +72,8 @@ tools/bench_compare.sh                 # tudo, as tres bibliotecas que houver, 1
 tools/bench_compare.sh -n 5 startup    # so o arranque, 5 corridas
 tools/bench_compare.sh -n 5 wait       # esperar por eventos: um ciclo acordar + esperar, a latencia de acordar, 10 s parado
 ZP_BENCH_SRC=<outra arvore> ZP_BENCH_LIBS=zp tools/bench_compare.sh   # a zen_platform de outro commit (a coluna "antes")
+ZP_BENCH_GL=gl tools/bench_compare.sh idle wait                      # os estagios idle e wait com janelas GL (as tabelas do Wayland so as tem assim)
+GLFW_ROOT=<libglfw3-wayland e libglfw3-dev desempacotados> tools/bench_wayland.sh   # o Wayland: o compositor de teste sem cabeca, a zen_platform, o SDL2 e o GLFW
 GLFW_ROOT=<pasta com usr/include/GLFW e usr/lib/x86_64-linux-gnu/libglfw.so> VALGRIND=<valgrind> VALGRIND_LIB=<libexec/valgrind> tools/bench_compare.sh
 ```
 
@@ -466,6 +469,142 @@ e o IDAT vazio truncado), `fuzz_touch` 1 633 118 (depois do `(int)inf`; o outro 
 espera pelo compositor; uma entrada de 21 s numa maquina com carga 30 deu "timeout" numa corrida anterior e nao se repete sozinha: `ZP_FUZZ_TIMEOUT`).
 
 
+## Quarta ronda: o teste das posicoes intermitente, `process_kill_tree`, o fake e o Wayland (ramo core-round4)
+
+### `tests/test_process_slots.c` intermitente: era do teste, nao da tabela
+
+Medido na maquina partilhada (carga 40 a 150), o teste antigo falhava em 14 de 40 execucoes seguidas (35 %), em 20 de 40 com os filhos atrasados (o teste a `nice 19` e 12 `yes`
+a correr: 50 %) e em 110 de 200 com dois testes em paralelo e 12 `yes` (55 %): as linhas 171 (`failed == 0`: um `process_spawn` devolveu 0), 190 e 191, e as vezes
+a 148 e a 150 (`test_never_polled`). Para saber de quem era, um programa de diagnostico no sitio da recusa (o `process_posix.c` incluido, como o teste faz) deu, nas execucoes
+que falharam: `too many child processes`, com a tabela com 128 registos a correr e os 128 processos vivos (estado R/S em `/proc`, nenhum zombie, nenhum registo acabado).
+Ou seja, o teste dormia 30 ms por cada 16 spawns e 300 ms no fim e supunha que as shells ja tinham acabado; com carga 50 uma shell demora mais de 200 ms, e uma tabela
+com 128 filhos que correm de verdade recusa o 129o (e o contrato; a recusa com um registo acabado ou um filho por esperar nunca aconteceu).
+
+Corrigido o teste e nao a biblioteca: nenhum passo supoe a velocidade de um filho. Os filhos que tem de viver ate um certo passo esperam num pipe que o teste fecha (`gate_*`), e o
+que precisa de filhos acabados espera por eles (ate 30 s). Novos, deterministas: `test_full_table` (128 a correr: a 129a e recusada com "too many"; um `process_kill` faz sitio e
+esquece-se esse registo; os que acabam sem ninguem perguntar ficam zombies e o spawn seguinte espera por eles, esquece o mais antigo e nao deixa zombie), `test_batches` (tres lotes de
+64 que acabam antes do seguinte: ficam os 128 ultimos com o seu codigo, o primeiro lote esquece-se) e, em `test_more_children_than_slots`, a conferencia em cada recusa de que
+os 128 registos da tabela estavam a correr (uma recusa com um registo acabado la seria o defeito da biblioteca que se procurava: nao houve nenhuma). Depois: **200 de 200** com dois
+testes em paralelo e 12 `yes` (carga 110 a 150; o antigo, no mesmo cenario, 90 de 200) e 20 de 20 com `nice 19` e 12 `yes`. Uma execucao intermedia (4 em paralelo, `nice 10`, 8 `yes`) mostrou
+um segundo defeito, meu e do mesmo tipo (esperava so pelos 128 filhos mais novos, e um mais velho ainda a correr contava como erro): 3 falhas em 41, corrigido.
+
+### `process_kill_tree` (commit dbccc5b) revisto como codigo novo
+
+| defeito | visto |
+|---|---|
+| o registo de um filho acabado ficava na tabela e o `kill_tree` mandava SIGKILL a `-pid` sempre: quando o ultimo membro do grupo sai o numero fica livre, e um registo antigo apontava para o grupo de outro processo se o sistema lho desse: SIGKILL a um estranho | `tests/test_process_pidreuse.c`, com a reutilizacao a serio (namespace de pids proprio, proximo pid posto a mao): antes, o estranho que lidera o grupo `leader` morria ("the stranger that got the number was signalled"); agora fica vivo. Mais `test_kill_tree_recycled_number` (o numero de um registo trocado pelo de um estranho) |
+| `(pid_t)id` (e `(DWORD)id` no Windows): `id + 2^32` lia-se como o pid de um filho, e `process_kill` / `process_kill_tree` matavam-no | `process_contract` em `tests/test_null_handles.c` (antes "process id 4296594538 was not refused", 6 falhas; as quatro funcoes devolvem agora desconhecido para o que nao cabe num pid) |
+
+O que o `process_kill_tree` ja fazia bem, agora fixado por testes (passam antes e depois): lider acabado e esperado com um neto vivo (o numero continua ocupado: medido com o pid
+namespace, um fork a quem se oferece esse numero recebe outro; o POSIX diz-o: um id de processo nao se reutiliza enquanto existir um grupo com esse id), `process_kill` do lider e depois
+`kill_tree` do neto, `kill_tree` enquanto o lider acaba (40 vezes, com um atraso de 0 a 540 us a seguir a saida; 24 a 36 vezes o lider acabou primeiro e 4 a 16 foi morto, 0 erradas), segunda chamada, o
+numero de um registo que ja saiu da tabela (136 filhos depois), um processo do programa que nao e filho do `process_spawn`, o pid do proprio teste, do pai e o 1. O que escapa: um filho que faz `setsid` /
+`setpgid` (`test_kill_tree_escaped`; documentado em `platform.h`). A janela que resta (o ultimo membro sai e o numero volta a um estranho entre duas chamadas) esta em `docs/SUSPEITAS.md`.
+O custo: o registo tem um campo (`group`) que e lido quando o filho e esperado e relido em cada entrada para os registos que ainda o tem; o `reap_children` olha so para esses
+(callgrind, `process_is_running` + `process_exit_code`: 1829 -> 1586 instrucoes com a tabela vazia e 3410 -> 2817 com 100 registos acabados: menos do que antes, porque um registo acabado ja nao paga duas
+comparacoes).
+
+Windows (a metade do job object, escrita sem compilar): lida pelas mesmas classes de defeito, em `src/process_win32.c`. Corrigido por leitura (MinGW compila sem avisos; `tests/test_win32_review.c`
+`test_process`, compilado e **nunca corrido**): `ResumeThread` sem ver o resultado (o processo ficava suspenso para sempre), o `free_slot` que apagava um registo antes de o `CreateProcessW` ter corrido (um
+spawn que falhava fazia a tabela esquecer um), o `exit_code = 0` inventado depois de `TerminateProcess` / `TerminateJobObject`, o `TerminateProcess` que falha com `ACCESS_DENIED` num processo que
+acabou sozinho um instante antes, e o id acima de 32 bits. Sem alteracao por estar certo pela leitura: nenhum handle do job a vazar nos caminhos de falha do spawn nem na reutilizacao do registo, o
+`AssignProcessToJobObject` que falha (Windows antes do 8, processo ja dentro de um job que nao aninha) deixa correr sem job, agora dito em `platform.h`.
+
+### O fake: o que os eventos dos construtores levam
+
+`fake_mouse_button` mandava um botao com x = y = 0 (o X11 poe a posicao do ponteiro, `ev->xbutton`), `fake_key` com `mods` e `scancode` a 0 (o X11 poe os modificadores do estado do servidor e o keycode),
+`fake_mouse_move` sem `dx`/`dy` com o rato capturado (o X11 manda o passo), `fake_touch` sem pressao (os backends mandam 1 e 0 ao levantar) e `fake_resize` sem mudar `window_get_size`. Agora os
+construtores deixam esses campos para o momento da entrega (`backend_pump_events`, na ordem dos eventos): `fake_mouse_button` leva a posicao do ponteiro (o ultimo `fake_mouse_move`);
+**`fake_mouse_button_at(w, x, y, button, down)`** (novo) leva o ponteiro para `x, y` primeiro (um `EVENT_MOUSE_MOVE`, se ainda la nao estava) e o botao leva `x, y`; `fake_key` leva os modificadores premidos
+**antes** da tecla (o Ctrl a descer nao esta nos seus `mods`, a subir esta: o estado do X11 no evento) e `scancode` = o numero da tecla; `fake_mouse_move` leva `dx`, `dy` com o rato capturado; `fake_touch` leva a
+pressao; `fake_resize` / `fake_fb_resize` mudam o que `window_get_size` / `window_get_framebuffer_size` dizem depois de entregues. A roda nao leva posicao em nenhum backend (`data.wheel` e so x, y), por isso
+nao ha o que mudar; `fake_inject_event` entrega o evento como esta. Teste: `test_fake_fidelity` em `tests/test_events.c` (com o fake anterior e um `fake_mouse_button_at` de mover + botao falham 19 verificacoes).
+
+### Wayland contra o GLFW e o SDL2, e ao lado do X11
+
+Para comparar sem instalar nada: o compositor pequeno de `tests/test_input_wayland.c` corre como programa proprio (`bench/compare/wl_compositor`, com um `wl_output`: sem ele o SDL2 recusa-se a arrancar, "The video driver did not add any
+displays"), a mesma bateria de `bench/compare` compila-se sem X11 (`-DPLATFORM_LINUX_BACKEND=wayland`) e `tools/bench_wayland.sh` corre-a (compositor num `XDG_RUNTIME_DIR` proprio, sem `DISPLAY`, parado pelo PID guardado).
+O GLFW e o `libglfw3-wayland` 3.3.10 do Ubuntu, desempacotado numa pasta propria (o `libglfw3`, usado ate aqui, e so X11), o SDL2 2.30.0 do sistema (com Wayland: `libwayland-client` ligado), o valgrind 3.22.0 do pacote, tambem desempacotado.
+Nada instalado no sistema; nao ha weston, so o gnome-shell, que nao se arranca (partilharia o bus da sessao).
+
+O que estas tabelas **nao** sao: um compositor a serio. O de teste nao tem dispositivo de dados, buffers partilhados (o Mesa renderiza por software e passa pelo `wl_shm`; `LIBGL_ALWAYS_SOFTWARE=1`), decoracoes
+nem `xdg-decoration`: por isso o SDL2 e o GLFW caem no libdecor, tentam carregar o plugin GTK ("Could not get required globals") e ficam sem decoracoes, o que lhes custa tempo e bibliotecas (55 e 84 mapeadas contra 44) que a zen_platform nao tem (nao desenha
+decoracoes de cliente); nao se separou quanto do arranque e disso. Todas as janelas levam um contexto GL, porque o backend Wayland da zen_platform so tem janelas `RENDER_GL` (`window_create` com `RENDER_PIXELS` falha: "the Wayland backend has only RENDER_GL
+windows so far"); a "janela visivel" e a janela criada (as tres bibliotecas so a devolvem depois do primeiro `configure`). As medicoes do Wayland sairam com a carga da maquina a descer de 51 (no inicio) a 14 (no fim), as do X11 com 8 a 3 (o GLFW do X11, numa segunda corrida, com 12); os tempos oscilam, as instrucoes e as chamadas ao sistema nao.
+Mesma maquina, mesmo compilador e opcoes das tabelas anteriores; X11 e o Xvfb do resto do documento, com GL (`ZP_BENCH_GL=gl`).
+
+Colunas: o Wayland a esquerda (o compositor de teste, sem cabeca), o X11 a direita (Xvfb); os rotulos das metricas sao os do script, em ingles. O GLFW do X11 e o `libglfw3` 3.3.10 desempacotado numa pasta propria.
+
+### Arranque, com GL
+
+| metrica | zp Wayland | glfw Wayland | sdl2 Wayland | zp X11 | glfw X11 | sdl2 X11 |
+|---|---:|---:|---:|---:|---:|---:|
+| ms to window created (first configure seen) + first loop turn (median) | 154.899 | 207.987 | 246.967 | 57.664 | 95.753 | 97.853 |
+| of which init (ms) | 104.421 | 111.692 | 91.855 | 2.032 | 14.287 | 17.040 |
+| of which window create (ms) | 55.751 | 147.865 | 138.056 | 52.893 | 81.791 | 75.513 |
+| instructions (whole process) | 158 828 004 | 312 240 876 | 235 138 063 | 153 114 606 | 214 627 790 | 294 810 901 |
+| syscalls | 2 240 | 6 668 | 3 238 | 2 536 | 10 104 | 3 725 |
+
+### Memoria depois do arranque, de uma janela e de 1000 voltas paradas, com GL
+
+| metrica | zp Wayland | glfw Wayland | sdl2 Wayland | zp X11 | glfw X11 | sdl2 X11 |
+|---|---:|---:|---:|---:|---:|---:|
+| RSS (kB) | 77 780 | 82 104 | 83 752 | 78 792 | 80 828 | 89 324 |
+| PSS (kB) | 27 240 | 29 812 | 29 155 | 28 932 | 30 249 | 36 964 |
+| PSS anonymous (kB) | 21 724 | 23 388 | 21 992 | 21 688 | 22 332 | 28 368 |
+| shared libraries mapped | 44 | 55 | 84 | 47 | 50 | 77 |
+| heap: malloc calls | 48 612 | 53 996 | 49 792 | 39 048 | 50 067 | 84 104 |
+| heap: peak live bytes (approximate) | 29 810 880 | 30 119 688 | 29 885 584 | 29 706 144 | 30 323 960 | 30 204 232 |
+
+### Volta do ciclo de eventos sem eventos, com GL
+
+| metrica | zp Wayland | glfw Wayland | sdl2 Wayland | zp X11 | glfw X11 | sdl2 X11 |
+|---|---:|---:|---:|---:|---:|---:|
+| ns per turn, 1e6 turns (median of 5) | 1705.08 | 2104.12 | 1707.94 | 2774.22 | 5085.50 | 3013.58 |
+| instructions per turn | 1 115 | 802 | 1 905 | 1 622 | 2 534 | 3 152 |
+
+### Criar e destruir uma janela, com GL (100 ciclos)
+
+| metrica | zp Wayland | glfw Wayland | sdl2 Wayland | zp X11 | glfw X11 | sdl2 X11 |
+|---|---:|---:|---:|---:|---:|---:|
+| us per cycle (median of 5) | 14059.86 | 15798.83 | 34841.64 | 7763.69 | 16549.28 | 14196.01 |
+| CPU us per cycle | 13765.69 | 14232.89 | 32186.47 | 7179.98 | 18881.32 | 14116.94 |
+| instructions per cycle | 64 481 229 | 65 621 664 | 87 246 349 | 64 468 040 | 70 685 312 | 127 982 643 |
+
+### Esperar e acordar num fio so, com GL
+
+| metrica | zp Wayland | glfw Wayland | sdl2 Wayland | zp X11 | glfw X11 | sdl2 X11 |
+|---|---:|---:|---:|---:|---:|---:|
+| ns per cycle, 200000 cycles (median of 5) | 4810.81 | 18360.28 | 2059.86 | 4711.25 | 8674.04 | 2615.57 |
+| instructions per cycle | 2 413 | 8 384 | 2 661 | 3 456 | 4 090 | 3 898 |
+
+### Latencia de acordar (outro fio avisa 2 ms depois de o principal adormecer, 1000 vezes), com GL
+
+| metrica | zp Wayland | glfw Wayland | sdl2 Wayland | zp X11 | glfw X11 | sdl2 X11 |
+|---|---:|---:|---:|---:|---:|---:|
+| median (us, median of 5 runs) | 30.8 | 100.1 | 102.9 | 46.3 | 46.1 | 129.8 |
+| 99th percentile (us, median of 5 runs) | 1003.8 | 6030.0 | 5499.3 | 119.6 | 84.2 | 208.4 |
+| worst of 1000 (us, median of 5 runs) | 5063.8 | 11581.2 | 4029.0 | 596.8 | 489.9 | 323.4 |
+
+### Parado 10 s na espera, sem nada que acorde, com GL
+
+| metrica | zp Wayland | glfw Wayland | sdl2 Wayland | zp X11 | glfw X11 | sdl2 X11 |
+|---|---:|---:|---:|---:|---:|---:|
+| wall s | 10.049 | 10.027 | 10.051 | 10.050 | 10.050 | 10.049 |
+| CPU ms | 0.073 | 0.045 | 0.059 | 0.056 | 0.081 | 0.037 |
+| times the wait returned | 1 | 1 | 1 | 1 | 1 | 1 |
+Quem ganha e quem perde, no Wayland (instrucoes e chamadas ao sistema valem; os tempos oscilam):
+
+- **Arranque**: 158,8 M de instrucoes contra 312,2 M (GLFW) e 235,1 M (SDL2), 2240 chamadas ao sistema contra 6668 e 3238, 155 ms contra 208 e 247. A `window_create` custa 56 ms contra 148 e 138; o `platform_init` da zen_platform
+  custa 104 ms no Wayland (2,0 ms no X11), tanto como o dos outros dois (112 e 92 ms): o que o ocupa no Wayland (o keymap do xkbcommon, de que a "Terceira ronda" ja tinha 17 a 70 ms por `platform_init`, o EGL e as voltas ao compositor) nao se separou.
+- **Memoria**: RSS 77,8 MB contra 82,1 e 83,8, PSS 27,2 contra 29,8 e 29,2; 44 bibliotecas mapeadas contra 55 e 84; o Mesa domina nas tres, como no X11 (RSS com GL 78,8 contra 80,8 e 89,3).
+- **Criar e destruir uma janela**: 14,1 ms contra 15,8 e 34,8; 64,5 M de instrucoes contra 65,6 M e 87,2 M.
+- **Acordar a partir de outro fio**: mediana 30,8 us contra 100,1 e 102,9; percentil 99 de 1,0 ms contra 6,0 e 5,5 ms (o pior de 1000: 5,1 ms contra 11,6 e 4,0: o SDL2 ganha no pior caso).
+- **Parado 10 s na espera**: 0,07 ms de CPU, uma volta, como o GLFW (0,05) e o SDL2 (0,06): empate.
+- **Onde perde**: (1) a volta do ciclo sem eventos custa 1115 instrucoes contra 802 do GLFW (e 1905 do SDL2); em tempo, 1,71 us contra 2,10 (GLFW) e 1,71 (SDL2): empata nos tempos e perde para o GLFW nas instrucoes. (2) Um ciclo acordar + esperar num fio so: 4,81 us contra 2,06 do SDL2
+  (o GLFW 18,4), com menos instrucoes (2413 contra 2661): a diferenca esta no que o nucleo do sistema faz em cada volta, e e a do X11 (4,71 contra 2,62 us); nao se investigou o que se pode tirar. (3) O arranque total no Wayland e quase tres vezes o do X11 (155 contra 58 ms), como o do GLFW (208 contra 96) e o do SDL2 (247 contra 98).
+- Nao se mediu o que depende de um compositor a serio: eventos de entrada (o XTest nao tem equivalente), a latencia desde o evento do compositor ate a aplicacao, nem as decoracoes.
+
 ## Onde a zen_platform perde e porque
 
 1. **A tabela de compose do Xlib paga-se uma vez, na primeira tecla, sem `XMODIFIERS` e com o servidor de metodo parado.** O arranque custa 4,9 M de
@@ -521,6 +660,7 @@ destruida em captura (o ponteiro do servidor fica livre), clipboard de 0 bytes a
   que a espera nao espera (um metodo de entrada por socket proprio, outro fio a ler a ligacao X, o XInput), o acordar a cada 0,1 s com uma tecla premida, a lista
   de eventos de 256, a destruicao num gancho no Windows e no web (por leitura), o `tests/test_win32_review.c` por correr, o dono de clipboard morto lembrado
   pelo id da janela, e os fuzzers (10 minutos cada; faltam o servidor X hostil para o XInput 2, o ibus com bytes de fuzzer e o arrastar e largar fora do X11).
-- Wayland: nao se mediu contra o GLFW e o SDL2 (o GLFW do pacote so tem X11, nao ha compositor sem janela instalado). Windows: so se compila
+- Wayland: medido na quarta ronda contra um compositor de teste (sem cabeca, sem buffers partilhados, sem `xdg-decoration`), nao contra um compositor a serio; faltam a
+  latencia dos eventos de entrada e as decoracoes. O backend Wayland so tem janelas `RENDER_GL`. Windows: so se compila
   (`tools/check.sh mingw`). Nem o SDL3, nem a latencia (do evento do servidor ate a aplicacao), so o custo de os tirar da ligacao e o de acordar.
 - Os tempos pedem uma maquina sossegada; as instrucoes e as esperas ao servidor nao.
