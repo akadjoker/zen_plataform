@@ -63,7 +63,8 @@ XDG_RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zp-wl-XXXXXX") || exit 2
 export XDG_RUNTIME_DIR
 "$B/wl_compositor" > "$XDG_RUNTIME_DIR/name" 2> "$XDG_RUNTIME_DIR/compositor.err" &
 COMPOSITOR=$!
-trap 'kill "$COMPOSITOR" 2> /dev/null; wait "$COMPOSITOR" 2> /dev/null; rm -rf "$XDG_RUNTIME_DIR"' EXIT INT TERM
+trap 'kill "$COMPOSITOR" 2> /dev/null; wait "$COMPOSITOR" 2> /dev/null; rm -rf "$XDG_RUNTIME_DIR"' EXIT
+trap 'exit 130' INT TERM
 i=0
 while [ ! -s "$XDG_RUNTIME_DIR/name" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 [ -s "$XDG_RUNTIME_DIR/name" ] || { echo "bench_wayland.sh: the compositor did not start" >&2; exit 2; }
