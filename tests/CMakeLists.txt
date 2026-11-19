@@ -32,6 +32,12 @@ if(NOT WIN32) # forks a child per function, and uses the POSIX sources
     target_compile_definitions(test_null_handles PRIVATE ZP_HEADER="${CMAKE_SOURCE_DIR}/include/platform.h")
 endif()
 add_fake_test(test_time)
+if(NOT WIN32) # threads, signals and /proc
+    add_fake_test(test_wait_fake)
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_wait_fake PRIVATE Threads::Threads)
+    set_tests_properties(test_wait_fake PROPERTIES TIMEOUT 120)
+endif()
 
 # Portable modules with no window backend: compile just their sources (in ARGN).
 function(add_unit_test name)
@@ -170,6 +176,16 @@ if(PLATFORM_BACKEND_WAYLAND)
         target_link_libraries(test_core_edge_wayland PRIVATE platform PkgConfig::WAYLAND_SERVER)
         add_test(NAME test_core_edge_wayland COMMAND test_core_edge_wayland)
         set_tests_properties(test_core_edge_wayland PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+        # platform_wait_events and platform_wake against the same compositor
+        add_executable(test_wait_wayland test_wait_wayland.c)
+        add_dependencies(test_wait_wayland wayland_server_headers)
+        target_include_directories(test_wait_wayland PRIVATE ${WAYLAND_GEN_DIR})
+        if(WAYLAND_POINTER_LOCK)
+            target_compile_definitions(test_wait_wayland PRIVATE ZEN_WL_POINTER_LOCK)
+        endif()
+        target_link_libraries(test_wait_wayland PRIVATE platform PkgConfig::WAYLAND_SERVER)
+        add_test(NAME test_wait_wayland COMMAND test_wait_wayland)
+        set_tests_properties(test_wait_wayland PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
         add_test(NAME test_wayland_shutdown COMMAND test_wayland_shutdown)
         set_tests_properties(test_wayland_shutdown PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     endif()
@@ -258,6 +274,17 @@ if(PLATFORM_BACKEND_X11)
     endif()
     add_test(NAME test_mouse_x11 COMMAND test_mouse_x11)
     set_tests_properties(test_mouse_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+    # platform_wait_events and platform_wake against the X server; the injection from another process needs XTest.
+    add_executable(test_wait_x11 test_wait_x11.c)
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_wait_x11 PRIVATE platform Threads::Threads)
+    if(XTEST_LIB AND XTEST_INCLUDE)
+        target_compile_definitions(test_wait_x11 PRIVATE HAVE_XTEST=1)
+        target_link_libraries(test_wait_x11 PRIVATE ${XTEST_LIB})
+    endif()
+    add_test(NAME test_wait_x11 COMMAND test_wait_x11)
+    set_tests_properties(test_wait_x11 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
 
 

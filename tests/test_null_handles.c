@@ -80,6 +80,11 @@ static bool c_window_swap(void)
     return (window_swap(NULL), true);
 }
 
+static bool c_app_run_events(void)
+{
+    return (app_run_events(NULL, noop_frame, NULL), true);
+}
+
 static bool c_app_run(void)
 {
     CASE_VARS;
@@ -609,6 +614,7 @@ static const Case cases[] = {
     {"window_begin_frame", c_window_begin_frame},
     {"window_swap", c_window_swap},
     {"app_run", c_app_run},
+    {"app_run_events", c_app_run_events},
     {"poll_event", c_poll_event},
     {"window_set_event_hook", c_window_set_event_hook},
     {"window_set_live_callback", c_window_set_live_callback},
