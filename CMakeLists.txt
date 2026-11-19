@@ -186,6 +186,11 @@ if(PLATFORM_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT ANDROID)
 endif()
 
 option(PLATFORM_BUILD_EXAMPLES "Build examples" ON)
+# The programs that compare the core with GLFW and SDL2 (bench/compare); they need those libraries, so off by default.
+option(PLATFORM_BUILD_COMPARE "Build the GLFW / SDL2 comparison programs" OFF)
+if(PLATFORM_BUILD_COMPARE AND UNIX AND NOT APPLE AND NOT PLATFORM_USE_FAKE AND NOT PLATFORM_BACKEND_WAYLAND)
+    add_subdirectory(bench/compare)
+endif()
 if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_subdirectory(examples)
 endif()
