@@ -21,6 +21,10 @@
 
 static int g_pass, g_fail;
 
+/* Where, inside the window, the source says the pointer is while it drags. */
+enum { DROP_X = 37, DROP_Y = 23 };
+static int g_drop_x = -1, g_drop_y = -1;
+
 #define CHECK(cond)                                                \
     do                                                             \
     {                                                              \
@@ -126,7 +130,11 @@ static void run_source(Window target, int scenario)
 
     send(d, target, atom(d, "XdndEnter"), (long)src, (long)(XDND_VERSION << 24) | 1, (long)types[0],
          (long)types[1], (long)types[2]);
-    send(d, target, atom(d, "XdndPosition"), (long)src, 0, (10 << 16) | 10, CurrentTime,
+    /* The pointer's place, in root coordinates: 37 right and 23 down from the window's corner. */
+    int ox = 0, oy = 0;
+    Window child;
+    XTranslateCoordinates(d, target, DefaultRootWindow(d), 0, 0, &ox, &oy, &child);
+    send(d, target, atom(d, "XdndPosition"), (long)src, 0, (long)(((unsigned)(ox + DROP_X) << 16) | (unsigned)(oy + DROP_Y)), CurrentTime,
          (long)atom(d, "XdndActionCopy"));
 
     XEvent ev;
@@ -193,6 +201,7 @@ static bool pump_for_drop(PlatformWindow *w, double secs, int *frames)
             {
                 got = true;
                 g_n = e.data.drop.count;
+                mouse_position(w, &g_drop_x, &g_drop_y); /* as an application reads it when the event comes */
                 for (int i = 0; i < g_n && i < 8; i++)
                     g_paths[i] = strdup(e.data.drop.paths[i]);
             }
@@ -220,6 +229,11 @@ static void test_files(PlatformWindow *w, Window target)
     CHECK(g_n == 2);
     CHECK(g_n == 2 && strcmp(g_paths[0], "/tmp/zen drop/a\xC3\xA1.txt") == 0);
     CHECK(g_n == 2 && strcmp(g_paths[1], "/tmp/b.png") == 0);
+    /* The drop is where the source said the pointer was: no MotionNotify told the window, the XdndPosition did. */
+    CHECK(g_drop_x == DROP_X && g_drop_y == DROP_Y);
+    int mx = -1, my = -1;
+    mouse_position(w, &mx, &my);
+    CHECK(mx == DROP_X && my == DROP_Y);
     CHECK(wait_child(pid) == 0); /* the source was told it was accepted */
     clear_drop();
 }

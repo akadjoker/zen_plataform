@@ -77,6 +77,12 @@ static struct
     struct wl_resource *cursor_surface;
 
     uint32_t enter_serial;
+
+    /* a drag of files over the window: the client's data device, the offer in hand, and what the client asked of it */
+    struct wl_resource *data_device, *offer;
+    int dnd_accepts, dnd_receives, dnd_finished, dnd_offers_gone;
+    char dnd_accepted[64]; /* the MIME type of the last accept, "" for a refusal */
+    uint32_t dnd_actions, dnd_preferred;
 #ifdef ZEN_WL_POINTER_LOCK
     struct wl_resource *locked, *relative;
     int lock_requests;
@@ -107,6 +113,10 @@ enum
     CMD_LOCK,
     CMD_UNLOCK,
     CMD_REL_MOTION,
+    CMD_DND_ENTER, /* a, b: where; c: the offer has text/uri-list */
+    CMD_DND_MOVE,
+    CMD_DND_DROP,
+    CMD_DND_LEAVE,
     CMD_QUIT
 };
 
@@ -449,6 +459,95 @@ static void seat_bind(struct wl_client *c, void *data, uint32_t version, uint32_
     wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
 }
 
+/* ---- wl_data_device_manager: enough for files dragged into the window ---- */
+
+/* One line of comment, two local files (one escaped) and a web link: only the two local ones are paths. */
+static const char DND_URIS[] = "# a comment\r\n"
+                               "file:///tmp/zen%20drop/a%C3%A1.txt\r\n"
+                               "http://example.com/x\r\n"
+                               "file://localhost/tmp/b.png\r\n";
+
+static void offer_accept(struct wl_client *c, struct wl_resource *r, uint32_t serial, const char *mime)
+{
+    (void)c;
+    (void)r;
+    (void)serial;
+    S.dnd_accepts++;
+    snprintf(S.dnd_accepted, sizeof S.dnd_accepted, "%s", mime ? mime : "");
+}
+
+/* The source's side of a receive: the list goes into the pipe and the pipe is closed. */
+static void offer_receive(struct wl_client *c, struct wl_resource *r, const char *mime, int32_t fd)
+{
+    (void)c;
+    (void)r;
+    S.dnd_receives++;
+    if (mime && strcmp(mime, "text/uri-list") == 0 && write(fd, DND_URIS, strlen(DND_URIS)) != (ssize_t)strlen(DND_URIS))
+        g_fail++;
+    close(fd);
+}
+
+static void offer_finish(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    (void)r;
+    S.dnd_finished++;
+}
+
+static void offer_set_actions(struct wl_client *c, struct wl_resource *r, uint32_t actions, uint32_t preferred)
+{
+    (void)c;
+    (void)r;
+    S.dnd_actions = actions;
+    S.dnd_preferred = preferred;
+}
+
+static const struct wl_data_offer_interface offer_impl = {
+    .accept = offer_accept,
+    .receive = offer_receive,
+    .destroy = release_req,
+    .finish = offer_finish,
+    .set_actions = offer_set_actions,
+};
+
+static void offer_gone(struct wl_resource *r)
+{
+    if (S.offer == r)
+        S.offer = NULL;
+    S.dnd_offers_gone++;
+}
+
+static void data_device_gone(struct wl_resource *r)
+{
+    if (S.data_device == r)
+        S.data_device = NULL;
+}
+
+static const struct wl_data_device_interface data_device_impl = {
+    .start_drag = (void *)unused_request,
+    .set_selection = (void *)unused_request,
+    .release = release_req,
+};
+
+static void data_manager_get_device(struct wl_client *c, struct wl_resource *r, uint32_t id, struct wl_resource *seat)
+{
+    (void)seat;
+    S.data_device = wl_resource_create(c, &wl_data_device_interface, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(S.data_device, &data_device_impl, NULL, data_device_gone);
+}
+
+static const struct wl_data_device_manager_interface data_manager_impl = {
+    .create_data_source = (void *)unused_request,
+    .get_data_device = data_manager_get_device,
+};
+
+static void data_manager_bind(struct wl_client *c, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(c, &wl_data_device_manager_interface, (int)version, id);
+    wl_resource_set_implementation(r, &data_manager_impl, NULL, NULL);
+}
+
 #ifdef ZEN_WL_POINTER_LOCK
 static void locked_destroy(struct wl_client *c, struct wl_resource *r)
 {
@@ -613,6 +712,35 @@ static void run_cmd(const Cmd *c)
                                                          wl_fixed_from_int(c->b));
         break;
 #endif
+    case CMD_DND_ENTER:
+        if (S.data_device && S.surface)
+        {
+            /* A new offer with its types, then the drag enters the window with it. */
+            S.offer = wl_resource_create(wl_resource_get_client(S.data_device), &wl_data_offer_interface,
+                                         wl_resource_get_version(S.data_device), 0);
+            wl_resource_set_implementation(S.offer, &offer_impl, NULL, offer_gone);
+            wl_data_device_send_data_offer(S.data_device, S.offer);
+            wl_data_offer_send_offer(S.offer, "text/plain");
+            if (c->c)
+                wl_data_offer_send_offer(S.offer, "text/uri-list");
+            if (wl_resource_get_version(S.offer) >= WL_DATA_OFFER_SOURCE_ACTIONS_SINCE_VERSION)
+                wl_data_offer_send_source_actions(S.offer, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+            wl_data_device_send_enter(S.data_device, ++S.serial, S.surface->res, wl_fixed_from_int(c->a), wl_fixed_from_int(c->b),
+                                      S.offer);
+        }
+        break;
+    case CMD_DND_MOVE:
+        if (S.data_device)
+            wl_data_device_send_motion(S.data_device, 0, wl_fixed_from_int(c->a), wl_fixed_from_int(c->b));
+        break;
+    case CMD_DND_DROP:
+        if (S.data_device)
+            wl_data_device_send_drop(S.data_device);
+        break;
+    case CMD_DND_LEAVE:
+        if (S.data_device)
+            wl_data_device_send_leave(S.data_device);
+        break;
     case CMD_QUIT:
         wl_display_terminate(S.display);
         break;
@@ -675,6 +803,7 @@ static bool start_compositor(void)
     wl_global_create(S.display, &wl_compositor_interface, 4, NULL, compositor_bind);
     wl_global_create(S.display, &xdg_wm_base_interface, 5, NULL, wm_base_bind);
     wl_global_create(S.display, &wl_seat_interface, 8, NULL, seat_bind);
+    wl_global_create(S.display, &wl_data_device_manager_interface, 3, NULL, data_manager_bind);
 #ifdef ZEN_WL_POINTER_LOCK
     wl_global_create(S.display, &zwp_pointer_constraints_v1_interface, 1, NULL, constraints_bind);
     wl_global_create(S.display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, manager_bind);
@@ -702,6 +831,8 @@ typedef struct
     bool down, repeat, flag;
     uint32_t cp;
     float wx, wy;
+    int n;              /* EVENT_WINDOW_DROP: how many paths, and the first two */
+    char paths[2][96];
 } Rec;
 
 #define REC_MAX 2048
@@ -748,6 +879,12 @@ static void frame(PlatformWindow *w)
             break;
         case EVENT_WINDOW_ENTER:
             r->flag = e.data.enter.entered;
+            break;
+        case EVENT_WINDOW_DROP:
+            r->n = e.data.drop.count;
+            for (int i = 0; i < r->n && i < 2; i++)
+                snprintf(r->paths[i], sizeof r->paths[i], "%s", e.data.drop.paths[i]);
+            mouse_position(w, &r->x, &r->y); /* as an application reads it when the event comes */
             break;
         case EVENT_WINDOW_FOCUS:
             r->flag = e.data.focus.gained;
@@ -1276,6 +1413,68 @@ enum
 };
 
 /* What the compositor says about the window is what the application hears. */
+/* Files dragged in from another client: the offer with text/uri-list is accepted as a copy, the pointer's place comes as
+   pointer moves while it is held over the window, and the drop gives the local paths where the pointer was. */
+static void test_drop(PlatformWindow *w)
+{
+    reset();
+    cmd(CMD_PTR_LEAVE, 0, 0, 0, 0); /* a drag takes the pointer away from the window first */
+    CHECK(settle(w));
+    reset();
+    cmd(CMD_DND_ENTER, 40, 30, 1, 0);
+    cmd(CMD_DND_MOVE, 55, 44, 0, 0);
+    CHECK(settle(w));
+    CHECK(S.dnd_accepts == 1 && strcmp(S.dnd_accepted, "text/uri-list") == 0);
+    CHECK(S.dnd_actions == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY && S.dnd_preferred == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+    const Rec *m0 = nth(EVENT_MOUSE_MOVE, 0);
+    const Rec *m1 = nth(EVENT_MOUSE_MOVE, 1);
+    CHECK(m0 && m0->x == 40 && m0->y == 30);
+    CHECK(m1 && m1->x == 55 && m1->y == 44);
+    CHECK(count(EVENT_WINDOW_DROP) == 0);
+    int mx = -1, my = -1;
+    mouse_position(w, &mx, &my);
+    CHECK(mx == 55 && my == 44);
+
+    reset();
+    cmd(CMD_DND_MOVE, 120, 77, 0, 0);
+    cmd(CMD_DND_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+    const Rec *d = nth(EVENT_WINDOW_DROP, 0);
+    CHECK(d && d->n == 2);
+    CHECK(d && strcmp(d->paths[0], "/tmp/zen drop/a\xC3\xA1.txt") == 0);
+    CHECK(d && strcmp(d->paths[1], "/tmp/b.png") == 0);
+    CHECK(d && d->x == 120 && d->y == 77); /* where the files were let go */
+    CHECK(count(EVENT_WINDOW_DROP) == 1);
+    CHECK(S.dnd_receives == 1 && S.dnd_finished == 1);
+    CHECK(S.dnd_offers_gone == 1 && !S.offer); /* the client let go of the offer */
+
+    /* A drag with no files in it (text from an editor) is refused, and its drop gives nothing. */
+    reset();
+    cmd(CMD_DND_ENTER, 10, 10, 0, 0);
+    cmd(CMD_DND_MOVE, 20, 20, 0, 0);
+    CHECK(settle(w));
+    CHECK(S.dnd_accepts == 2 && S.dnd_accepted[0] == 0);
+    CHECK(S.dnd_actions == WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE);
+    CHECK(count(EVENT_MOUSE_MOVE) == 0);
+    cmd(CMD_DND_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(count(EVENT_WINDOW_DROP) == 0 && S.dnd_receives == 1);
+    CHECK(S.dnd_offers_gone == 2);
+
+    /* A drag that leaves without a drop: the offer is let go, and the next drag works. */
+    reset();
+    cmd(CMD_DND_ENTER, 5, 6, 1, 0);
+    cmd(CMD_DND_LEAVE, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(S.dnd_offers_gone == 3 && count(EVENT_WINDOW_DROP) == 0);
+    cmd(CMD_DND_ENTER, 70, 80, 1, 0);
+    cmd(CMD_DND_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(count(EVENT_WINDOW_DROP) == 1 && S.dnd_receives == 2 && S.dnd_offers_gone == 4);
+    const Rec *d2 = nth(EVENT_WINDOW_DROP, 0);
+    CHECK(d2 && d2->x == 70 && d2->y == 80);
+}
+
 static void test_configure(PlatformWindow *w)
 {
     int w0, h0;
@@ -1365,6 +1564,7 @@ int main(void)
 #ifdef ZEN_WL_POINTER_LOCK
     test_captured(w);
 #endif
+    test_drop(w);
     test_configure(w);
 
     window_destroy(w);
