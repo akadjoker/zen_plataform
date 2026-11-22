@@ -1118,6 +1118,18 @@ static void handle_drop(BackendWindow *b, HDROP drop)
         b->drop_paths = paths;
         b->drop_n = (int)stored;
         paths = NULL;
+        /* Where the files were let go, as a pointer move before the drop (no WM_MOUSEMOVE comes while the shell drags): mouse_position() at the
+           EVENT_WINDOW_DROP is then the place of the drop. Only inside the client area, and not while the pointer is captured. */
+        POINT at;
+        if (DragQueryPoint(drop, &at) && b->cursor_mode != MOUSE_MODE_CAPTURED)
+        {
+            b->virtual_x = at.x;
+            b->virtual_y = at.y;
+            Event move = {.type = EVENT_MOUSE_MOVE};
+            move.data.mouse.x = at.x;
+            move.data.mouse.y = at.y;
+            push(b, &move);
+        }
         Event e = {.type = EVENT_WINDOW_DROP};
         e.data.drop.count = b->drop_n;
         e.data.drop.paths = (const char **)b->drop_paths;

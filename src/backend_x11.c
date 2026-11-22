@@ -10,6 +10,7 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "uri_list.h"
 #include "vulkan_internal.h"
 #include "mime_util.h"
 #include "preedit.h"
@@ -1735,78 +1736,6 @@ static char *xdnd_read_text(Window w, Atom prop)
     return buf;
 }
 
-static int xdnd_hex(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
-/* A URI path with its %XX escapes decoded; NULL when out of memory. */
-static char *xdnd_unescape(const char *s)
-{
-    size_t len = strlen(s);
-    char *out = malloc(len + 1);
-    if (!out)
-        return NULL;
-    size_t o = 0;
-    for (size_t i = 0; i < len; i++)
-    {
-        int hi, lo;
-        if (s[i] == '%' && i + 2 < len && (hi = xdnd_hex(s[i + 1])) >= 0 && (lo = xdnd_hex(s[i + 2])) >= 0)
-        {
-            out[o++] = (char)(hi * 16 + lo);
-            i += 2;
-        }
-        else
-            out[o++] = s[i];
-    }
-    out[o] = 0;
-    return out;
-}
-
-/* text/uri-list: one URI per line, '#' starts a comment. Only local file: URIs are
-   kept. Returns how many paths were stored in out; the strings are the caller's. */
-static int xdnd_parse_uris(char *text, char **out, int max)
-{
-    int n = 0;
-    char *line = text;
-    while (*line && n < max)
-    {
-        char *end = line + strcspn(line, "\r\n");
-        char *next = end + strspn(end, "\r\n");
-        *end = 0;
-        char *p = line;
-        line = next;
-
-        if (!*p || *p == '#' || strncasecmp(p, "file:", 5) != 0)
-            continue;
-        p += 5;
-        if (strncmp(p, "//", 2) == 0)
-        {
-            /* file://host/path: the host has to be this machine */
-            p += 2;
-            char *slash = strchr(p, '/');
-            if (!slash)
-                continue;
-            size_t host = (size_t)(slash - p);
-            if (host != 0 && !(host == 9 && strncasecmp(p, "localhost", 9) == 0))
-                continue;
-            p = slash;
-        }
-        if (*p != '/')
-            continue;
-        char *path = xdnd_unescape(p);
-        if (path)
-            out[n++] = path;
-    }
-    return n;
-}
-
 static void xdnd_free_drop(BackendWindow *b)
 {
     for (int i = 0; i < b->drop_n; i++)
@@ -1829,7 +1758,7 @@ static void xdnd_finish_drop(BackendWindow *b, Atom prop)
     char *text = prop != None ? xdnd_read_text(b->win, prop) : NULL;
     if (text)
     {
-        n = xdnd_parse_uris(text, paths, XDND_MAX_PATHS);
+        n = uri_list_parse(text, paths, XDND_MAX_PATHS);
         free(text);
     }
 
@@ -1880,6 +1809,25 @@ static bool xdnd_client_message(BackendWindow *b, XClientMessageEvent *m)
     {
         if (b->xdnd_converting || src != b->xdnd_src)
             return true;
+        /* While something is dragged over the window the server sends no MotionNotify (the source holds the pointer): the place the source reports, in
+           root coordinates, is the pointer's place. It is handed on as a pointer move, so that mouse_position() at the EVENT_WINDOW_DROP that follows is
+           where the files were let go, and the application can show where they would land while they are still held. */
+        if (b->xdnd_uri && b->cursor_mode != MOUSE_MODE_CAPTURED)
+        {
+            const int rx = (int)(((unsigned long)l[2] >> 16) & 0xffff), ry = (int)((unsigned long)l[2] & 0xffff);
+            int wx = 0, wy = 0;
+            Window child = None;
+            if (XTranslateCoordinates(g.dpy, g.root, b->win, rx, ry, &wx, &wy, &child) && (wx != b->last_x || wy != b->last_y))
+            {
+                b->last_x = wx;
+                b->last_y = wy;
+                hit_motion(b, wx, wy);
+                Event e = {.type = EVENT_MOUSE_MOVE};
+                e.data.mouse.x = wx;
+                e.data.mouse.y = wy;
+                push(b, &e);
+            }
+        }
         /* the drop is copy only: the source gets what it asked for when we take it */
         xdnd_send(src, g.XdndStatus, (long)b->win, b->xdnd_uri ? 1 : 0, 0, 0,
                   b->xdnd_uri ? (long)g.XdndActionCopy : (long)None);

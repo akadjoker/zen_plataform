@@ -12,6 +12,7 @@
 #include "backend.h"
 #include "error_internal.h"
 #include "gamepad_internal.h"
+#include "uri_list.h"
 
 #include <wayland-client.h>
 #include <wayland-cursor.h>
@@ -146,6 +147,17 @@ static struct
     xkb_keycode_t repeat_key;
     double repeat_next; /* ms */
 
+    /* Files dragged into a window (wl_data_device). */
+    struct wl_data_device_manager *data_manager;
+    struct wl_data_device *data_device;
+    struct wl_data_offer *new_offer; /* the offer the compositor introduced last, until an enter or a selection claims it */
+    bool new_offer_uri;              /* it has text/uri-list among its types */
+    struct wl_data_offer *dnd_offer; /* the one being dragged over a window */
+    bool dnd_uri;
+    BackendWindow *dnd_window;
+    char **drop_paths; /* the last drop's paths: kept until the next drop, poll_event reads them later */
+    int drop_n;
+
     int pointer_x, pointer_y;
     double axis_x, axis_y; /* continuous scroll of the current pointer frame */
     int v120_x, v120_y;    /* wheel notches of it, in 1/120 */
@@ -156,6 +168,7 @@ static const struct wl_seat_listener seat_listener;
 static void primary_try_device(void);
 static void primary_teardown(void);
 #endif
+static void data_device_setup(void);
 static void apply_cursor(BackendWindow *b);
 static void set_pointer_cursor(int shape, struct PlatformCursor *image, bool hidden);
 static void apply_limits(BackendWindow *b);
@@ -303,6 +316,11 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name, 
     else if (strcmp(iface, zwp_relative_pointer_manager_v1_interface.name) == 0)
         g.relative_manager = wl_registry_bind(reg, name, &zwp_relative_pointer_manager_v1_interface, 1);
 #endif
+    else if (strcmp(iface, wl_data_device_manager_interface.name) == 0 && !g.data_manager)
+    {
+        g.data_manager = wl_registry_bind(reg, name, &wl_data_device_manager_interface, version < 3 ? version : 3);
+        data_device_setup();
+    }
     else if (strcmp(iface, wl_seat_interface.name) == 0 && !g.seat)
     {
         g.seat = wl_registry_bind(reg, name, &wl_seat_interface, version < 8 ? version : 8);
@@ -310,6 +328,7 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name, 
 #ifdef ZEN_WL_PRIMARY
         primary_try_device();
 #endif
+        data_device_setup();
     }
 #ifdef ZEN_WL_PRIMARY
     else if (strcmp(iface, zwp_primary_selection_device_manager_v1_interface.name) == 0)
@@ -439,6 +458,22 @@ void backend_shutdown(void)
         wl_keyboard_release(g.keyboard);
     if (g.pointer)
         wl_pointer_release(g.pointer);
+    if (g.dnd_offer && g.dnd_offer != g.new_offer)
+        wl_data_offer_destroy(g.dnd_offer);
+    if (g.new_offer)
+        wl_data_offer_destroy(g.new_offer);
+    if (g.data_device)
+    {
+        if (wl_data_device_get_version(g.data_device) >= WL_DATA_DEVICE_RELEASE_SINCE_VERSION)
+            wl_data_device_release(g.data_device);
+        else
+            wl_data_device_destroy(g.data_device);
+    }
+    if (g.data_manager)
+        wl_data_device_manager_destroy(g.data_manager);
+    for (int i = 0; i < g.drop_n; i++)
+        free(g.drop_paths[i]);
+    free(g.drop_paths);
     if (g.seat)
         wl_seat_destroy(g.seat);
     xkb_compose_state_unref(g.compose);
@@ -1302,6 +1337,254 @@ static const struct wl_pointer_listener pointer_listener = {
     .axis_relative_direction = pointer_axis_relative_direction,
 #endif
 };
+
+/* ========================================================================== */
+/*  files dragged into a window (wl_data_device)                              */
+/* ========================================================================== */
+/* The compositor introduces an offer (data_offer, then its MIME types one by one) and then says what it is: the
+   selection, which this backend does not use (the clipboard goes another way: clipboard.c), or a drag that entered one
+   of our surfaces. A drag that has text/uri-list is accepted as a copy; while it is over a window the pointer's place
+   is handed on as pointer moves (the compositor sends no wl_pointer.motion during a drag), so mouse_position() at the
+   EVENT_WINDOW_DROP is where the files were let go. At the drop the list is read from a pipe the source writes into. */
+
+#define DND_MAX_PATHS 4096
+#define DND_READ_MS 2000 /* how long the source has to send its list */
+
+static void dnd_offer_offer(void *data, struct wl_data_offer *offer, const char *mime)
+{
+    (void)data;
+    if (offer == g.new_offer && mime && strcmp(mime, "text/uri-list") == 0)
+        g.new_offer_uri = true;
+}
+
+static void dnd_offer_source_actions(void *data, struct wl_data_offer *offer, uint32_t actions)
+{
+    (void)data;
+    (void)offer;
+    (void)actions;
+}
+
+static void dnd_offer_action(void *data, struct wl_data_offer *offer, uint32_t action)
+{
+    (void)data;
+    (void)offer;
+    (void)action;
+}
+
+static const struct wl_data_offer_listener offer_listener = {
+    .offer = dnd_offer_offer,
+    .source_actions = dnd_offer_source_actions,
+    .action = dnd_offer_action,
+};
+
+static void dnd_forget(void)
+{
+    if (g.dnd_offer)
+    {
+        if (g.dnd_offer == g.new_offer)
+            g.new_offer = NULL;
+        wl_data_offer_destroy(g.dnd_offer);
+    }
+    g.dnd_offer = NULL;
+    g.dnd_uri = false;
+    g.dnd_window = NULL;
+}
+
+static void dnd_pointer(BackendWindow *b, wl_fixed_t sx, wl_fixed_t sy)
+{
+    if (!b || b->locked)
+        return;
+    g.pointer_x = wl_fixed_to_int(sx);
+    g.pointer_y = wl_fixed_to_int(sy);
+    Event e = {.type = EVENT_MOUSE_MOVE};
+    e.data.mouse.x = g.pointer_x;
+    e.data.mouse.y = g.pointer_y;
+    push(b, &e);
+}
+
+static void dnd_device_data_offer(void *data, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+    (void)data;
+    (void)device;
+    /* An offer nobody claimed (the compositor replaced it before saying what it was) is let go. */
+    if (g.new_offer && g.new_offer != g.dnd_offer)
+        wl_data_offer_destroy(g.new_offer);
+    g.new_offer = offer;
+    g.new_offer_uri = false;
+    wl_data_offer_add_listener(offer, &offer_listener, NULL);
+}
+
+static void dnd_device_enter(void *data, struct wl_data_device *device, uint32_t serial, struct wl_surface *surface, wl_fixed_t sx,
+                         wl_fixed_t sy, struct wl_data_offer *offer)
+{
+    (void)data;
+    (void)device;
+    if (g.dnd_offer && g.dnd_offer != offer)
+        dnd_forget();
+    g.dnd_offer = offer;
+    g.dnd_uri = offer && offer == g.new_offer && g.new_offer_uri;
+    if (offer == g.new_offer)
+        g.new_offer = NULL; /* claimed: it is the drag's now */
+    g.dnd_window = surface ? window_for_surface(surface) : NULL; /* (a part of the frame is not the window) */
+    if (!offer)
+        return;
+    const bool take = g.dnd_uri && g.dnd_window;
+    wl_data_offer_accept(offer, serial, take ? "text/uri-list" : NULL);
+    if (wl_data_offer_get_version(offer) >= WL_DATA_OFFER_SET_ACTIONS_SINCE_VERSION)
+        wl_data_offer_set_actions(offer, take ? WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY : WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE,
+                                  take ? WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY : WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE);
+    if (take)
+        dnd_pointer(g.dnd_window, sx, sy);
+}
+
+static void dnd_device_leave(void *data, struct wl_data_device *device)
+{
+    (void)data;
+    (void)device;
+    dnd_forget();
+}
+
+static void dnd_device_motion(void *data, struct wl_data_device *device, uint32_t time, wl_fixed_t sx, wl_fixed_t sy)
+{
+    (void)data;
+    (void)device;
+    (void)time;
+    if (g.dnd_uri && g.dnd_window)
+        dnd_pointer(g.dnd_window, sx, sy);
+}
+
+/* Everything the source writes into the pipe, as a string; NULL when nothing came in time. */
+static char *dnd_read(int fd)
+{
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (buf)
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long left = DND_READ_MS - ((now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000);
+        if (left <= 0)
+            break;
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int r = poll(&pfd, 1, (int)left);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        if (len + 1 >= cap)
+        {
+            if (cap > (size_t)16 * 1024 * 1024)
+                break; /* a list of files is never this long */
+            char *grown = realloc(buf, cap * 2);
+            if (!grown)
+                break;
+            buf = grown;
+            cap *= 2;
+        }
+        ssize_t got = read(fd, buf + len, cap - len - 1);
+        if (got < 0 && (errno == EINTR || errno == EAGAIN))
+            continue;
+        if (got <= 0)
+            break; /* the source closed its end: the list is whole */
+        len += (size_t)got;
+    }
+    if (buf)
+        buf[len] = 0;
+    if (buf && len == 0)
+    {
+        free(buf);
+        buf = NULL;
+    }
+    return buf;
+}
+
+static void dnd_device_drop(void *data, struct wl_data_device *device)
+{
+    (void)data;
+    (void)device;
+    struct wl_data_offer *offer = g.dnd_offer;
+    BackendWindow *b = g.dnd_window;
+    if (!offer || !g.dnd_uri || !b)
+    {
+        dnd_forget();
+        return;
+    }
+    char *text = NULL;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) == 0)
+    {
+        wl_data_offer_receive(offer, "text/uri-list", fds[1]);
+        close(fds[1]);
+        wl_display_flush(g.display); /* the request has to reach the compositor before the source can write */
+        text = dnd_read(fds[0]);
+        close(fds[0]);
+    }
+    char *paths[DND_MAX_PATHS];
+    int n = text ? uri_list_parse(text, paths, DND_MAX_PATHS) : 0;
+    free(text);
+
+    for (int i = 0; i < g.drop_n; i++)
+        free(g.drop_paths[i]);
+    free(g.drop_paths);
+    g.drop_paths = NULL;
+    g.drop_n = 0;
+    if (n)
+    {
+        g.drop_paths = malloc((size_t)n * sizeof *g.drop_paths);
+        if (g.drop_paths)
+        {
+            memcpy(g.drop_paths, paths, (size_t)n * sizeof *paths);
+            g.drop_n = n;
+        }
+        else
+            for (int i = 0; i < n; i++)
+                free(paths[i]);
+    }
+    if (wl_data_offer_get_version(offer) >= WL_DATA_OFFER_FINISH_SINCE_VERSION)
+        wl_data_offer_finish(offer);
+    if (g.drop_n)
+    {
+        Event e = {.type = EVENT_WINDOW_DROP};
+        e.data.drop.count = g.drop_n;
+        e.data.drop.paths = (const char **)g.drop_paths;
+        push(b, &e);
+    }
+    dnd_forget();
+}
+
+static void dnd_device_selection(void *data, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+    (void)data;
+    (void)device;
+    /* The clipboard's offer: not used here, and an offer that is kept is never freed by the compositor. */
+    if (offer && offer != g.dnd_offer)
+    {
+        if (offer == g.new_offer)
+            g.new_offer = NULL;
+        wl_data_offer_destroy(offer);
+    }
+}
+
+static const struct wl_data_device_listener data_device_listener = {
+    .data_offer = dnd_device_data_offer,
+    .enter = dnd_device_enter,
+    .leave = dnd_device_leave,
+    .motion = dnd_device_motion,
+    .drop = dnd_device_drop,
+    .selection = dnd_device_selection,
+};
+
+/* The seat and the manager come in any order: the device is made when both are there. */
+static void data_device_setup(void)
+{
+    if (g.data_device || !g.data_manager || !g.seat)
+        return;
+    g.data_device = wl_data_device_manager_get_data_device(g.data_manager, g.seat);
+    if (g.data_device)
+        wl_data_device_add_listener(g.data_device, &data_device_listener, NULL);
+}
 
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
 {
@@ -2534,6 +2817,8 @@ void backend_destroy(BackendWindow *b)
         g.keyboard_focus = NULL;
         g.repeat_key = 0;
     }
+    if (g.dnd_window == b)
+        g.dnd_window = NULL;
     if (g.pointer_focus == b)
         g.pointer_focus = NULL;
     decor_destroy(b);
