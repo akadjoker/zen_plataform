@@ -2398,6 +2398,14 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         }
         /* the window is ours to release, and a restored-from-last-run window or a tab would only get in the way */
         [b->window setReleasedWhenClosed:NO];
+        /* The colours a program draws are sRGB ones, as on the other systems. A window with no colour space of its own is taken
+           to be in the display's, and on a wide gamut display (Display P3, every Mac panel since 2016) an OpenGL frame came out
+           more saturated than what was drawn (0,122,204 shown as 0,124,210 once brought back to sRGB); the window server now
+           converts. */
+        [b->window setColorSpace:[NSColorSpace sRGBColorSpace]];
+        /* AppKit draws the title bar's separator over the first point of the content (seen on macOS 15 at scale 2: the first
+           pixel row of a white frame came out D9D9D9 and the second F2F2F2). The content is the program's, every row of it. */
+        [b->window setTitlebarSeparatorStyle:NSTitlebarSeparatorStyleNone];
         [b->window setRestorable:NO];
         [b->window setTabbingMode:NSWindowTabbingModeDisallowed];
         /* mouse moves go to the key window's first responder, which is the view; hover with no focus is not reported */
@@ -3162,6 +3170,24 @@ static NSPasteboardType clipboard_type(const char *mime)
     return [NSString stringWithUTF8String:uti];
 }
 
+/* The type of an image the pasteboard holds that is not a PNG, or nil. Most Mac programs copy an image as TIFF (Preview, Safari,
+   the image editors) and some as JPEG; a clipboard that held only one of those said it had no image (seen on a real Mac: a TIFF
+   or a JPEG put there by the system read as "the clipboard has no image"). image/png then stands for it, turned into a PNG when
+   it is read. */
+static NSPasteboardType pasteboard_other_image(NSPasteboard *pb)
+{
+    return [pb availableTypeFromArray:[NSArray arrayWithObjects:NSPasteboardTypeTIFF, @"public.jpeg", @"com.microsoft.bmp",
+                                                                @"com.compuserve.gif", nil]];
+}
+
+static NSData *pasteboard_image_as_png(NSPasteboard *pb)
+{
+    NSPasteboardType type = pasteboard_other_image(pb);
+    NSData *data = type ? [pb dataForType:type] : nil;
+    NSBitmapImageRep *rep = data ? [NSBitmapImageRep imageRepWithData:data] : nil;
+    return rep ? [rep representationUsingType:NSBitmapImageFileTypePNG properties:[NSDictionary dictionary]] : nil;
+}
+
 /* The URLs of a text/uri-list: one per line, comments (#) and empty lines left out. */
 static void add_uri_list(NSMutableArray *urls, const void *data, size_t size)
 {
@@ -3245,6 +3271,8 @@ bool backend_clipboard_has(const char *mime)
         {
             NSPasteboardType type = clipboard_type(mime);
             has = type && [pb availableTypeFromArray:[NSArray arrayWithObject:type]] != nil;
+            if (!has && strcmp(mime, CLIPBOARD_PNG) == 0)
+                has = pasteboard_other_image(pb) != nil;
         }
     }
     return has;
@@ -3279,6 +3307,8 @@ void *backend_clipboard_get(const char *mime, size_t *size)
         {
             NSPasteboardType type = clipboard_type(mime);
             data = type ? [pb dataForType:type] : nil;
+            if (!data && strcmp(mime, CLIPBOARD_PNG) == 0)
+                data = pasteboard_image_as_png(pb);
         }
         if (joined)
         {

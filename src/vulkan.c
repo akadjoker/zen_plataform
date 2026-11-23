@@ -112,7 +112,7 @@ bool vulkan_call_create_surface(void *instance, const char *fn, const void *crea
 {
     ZenPfnGetInstanceProcAddr gipa = (ZenPfnGetInstanceProcAddr)vulkan_get_proc_addr();
     if (!gipa)
-        return false;
+        return error_set("the Vulkan loader was not found"); /* vulkan_get_proc_addr says it only the first time it looks */
     ZenPfnCreateSurface create = (ZenPfnCreateSurface)gipa(instance, fn);
     if (!create)
         return error_set("the instance has no %s (was VK_KHR_surface and the platform extension enabled?)", fn);
