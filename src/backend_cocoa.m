@@ -2010,19 +2010,43 @@ static void modal_end(BackendWindow *b)
 
 /* ---- file drop: the view takes files dragged onto it (NSDraggingDestination) ---- */
 
+/* While another program drags over the window AppKit sends no mouseMoved, so the pointer the program knows stayed where it was
+   before the drag: with files dragged from the Finder by hand, mouse_position() at EVENT_WINDOW_DROP was outside the window in
+   four drops of five (-395,-265 for a drop in the middle of it). The place of the drag is the pointer's, as on the other backends:
+   it comes as pointer movement while files are over the window, and once more just before the drop. */
+- (NSDragOperation)dragOver:(id<NSDraggingInfo>)sender
+{
+    if (!owner || [pasteboard_files([sender draggingPasteboard]) count] == 0)
+        return NSDragOperationNone;
+    if (!owner->mouse_locked && owner->mouse_mode != MOUSE_MODE_CAPTURED)
+    {
+        int x, y;
+        view_point(owner, [sender draggingLocation], &x, &y);
+        if (x != owner->last_x || y != owner->last_y)
+        {
+            owner->last_x = x;
+            owner->last_y = y;
+            push_mouse_move(owner, x, y, 0, 0);
+        }
+    }
+    return NSDragOperationCopy;
+}
+
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
 {
-    return owner && [pasteboard_files([sender draggingPasteboard]) count] ? NSDragOperationCopy : NSDragOperationNone;
+    return [self dragOver:sender];
 }
 
 - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
 {
-    return owner && [pasteboard_files([sender draggingPasteboard]) count] ? NSDragOperationCopy : NSDragOperationNone;
+    return [self dragOver:sender];
 }
 
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender
 {
-    return owner && drop_files(owner, [sender draggingPasteboard]) ? YES : NO;
+    if ([self dragOver:sender] == NSDragOperationNone)
+        return NO;
+    return drop_files(owner, [sender draggingPasteboard]) ? YES : NO;
 }
 
 /* ---- text input: the NSTextInputClient the input context talks to. The view has no text of its own: what the program

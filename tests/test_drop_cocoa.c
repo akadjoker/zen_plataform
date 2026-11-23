@@ -18,6 +18,16 @@ static id fake_dragging_pasteboard(id self, SEL cmd)
     return g_pasteboard;
 }
 
+/* where the drag is, as NSDraggingInfo says it: the window's own coordinates, points from the bottom left corner */
+static CGPoint g_drag_at;
+
+static CGPoint fake_dragging_location(id self, SEL cmd)
+{
+    (void)self;
+    (void)cmd;
+    return g_drag_at;
+}
+
 static id make_dragging_info(void)
 {
     static Class cls;
@@ -25,6 +35,7 @@ static id make_dragging_info(void)
     {
         cls = objc_allocateClassPair((Class)ns_class("NSObject"), "ZenFakeDraggingInfo", 0);
         class_addMethod(cls, sel_registerName("draggingPasteboard"), (IMP)fake_dragging_pasteboard, "@@:");
+        class_addMethod(cls, sel_registerName("draggingLocation"), (IMP)fake_dragging_location, "{CGPoint=dd}@:");
         objc_registerClassPair(cls);
     }
     return msg_id(msg_id((id)cls, "alloc"), "init");
@@ -122,11 +133,24 @@ int main(void)
     /* two files: one event, with both paths, in order */
     static const char *two[] = {"/tmp/zen drop/a b.txt", "/tmp/zen-drop-b.png"};
     fill(two, 2);
+    g_drag_at = CGPointMake(20, 130);
+    seen_reset();
     CHECK(enter(w, info) == 1); /* NSDragOperationCopy */
+    pump_frame(w);
+    /* the drag over the window is the pointer's movement (AppKit sends no mouseMoved while another program drags), and the
+       pointer is where the files are let go when the drop comes: with a person dragging from the Finder it was where the
+       pointer had been before the drag */
+    printf("  drag enters at 20,130 from the bottom left: mouse %d,%d (20,20 expected)\n", mouse_x(w), mouse_y(w));
+    CHECK(mouse_x(w) == 20 && mouse_y(w) == 20);
+    g_drag_at = CGPointMake(50, 110);
     seen_reset();
     CHECK(drop(w, info));
     const Event *e = seen_nth(EVENT_WINDOW_DROP, 0);
     CHECK(seen_count(EVENT_WINDOW_DROP) == 1 && e && e->data.drop.count == 2);
+    printf("  dropped at 50,110 from the bottom left: mouse %d,%d (50,40 expected), %d move event(s) before the drop\n", mouse_x(w),
+           mouse_y(w), seen_count(EVENT_MOUSE_MOVE));
+    CHECK(mouse_x(w) == 50 && mouse_y(w) == 40);
+    CHECK(seen_count(EVENT_MOUSE_MOVE) == 1);
     if (e && e->data.drop.count == 2)
         CHECK(strcmp(e->data.drop.paths[0], two[0]) == 0 && strcmp(e->data.drop.paths[1], two[1]) == 0);
 
