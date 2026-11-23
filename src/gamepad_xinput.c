@@ -271,6 +271,40 @@ void gamepad_backend_poll(void)
     }
 }
 
+/* Neither XInput nor winmm can be waited on: a pad that is plugged in is polled at 125 Hz, and with none the slots are
+   looked at again once a second (RESCAN_NANOS), as a running loop does. Nothing to poll (the DLLs are not there): -1. */
+#define PAD_POLL_NANOS 8000000ll
+
+int gamepad_backend_wait_fds(int *fds, int max)
+{
+    (void)fds, (void)max;
+    return 0;
+}
+
+int64_t gamepad_backend_wait_ns(bool *live)
+{
+    for (int i = 0; i < XINPUT_USERS; i++)
+        if (g_slot[i] >= 0)
+        {
+            *live = true;
+            return PAD_POLL_NANOS;
+        }
+    for (int id = 0; id < WINMM_IDS; id++)
+        if (g_wj[id].slot >= 0)
+        {
+            *live = true;
+            return PAD_POLL_NANOS;
+        }
+    if (!g_get_state && !g_joy_pos)
+        return -1;
+    int64_t now = (int64_t)time_nanos(), due = INT64_MAX;
+    if (g_get_state && (int64_t)g_next_scan - now < due)
+        due = (int64_t)g_next_scan - now;
+    if (g_joy_pos && (int64_t)g_next_joy_scan - now < due)
+        due = (int64_t)g_next_joy_scan - now;
+    return due < 0 ? 0 : due;
+}
+
 void gamepad_backend_shutdown(void)
 {
     for (int i = 0; i < XINPUT_USERS; i++)

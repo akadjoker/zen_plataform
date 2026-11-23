@@ -5,6 +5,12 @@ if(EMSCRIPTEN)
     set_target_properties(hello_web PROPERTIES
         SUFFIX ".html"
         LINK_FLAGS "-sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sFULL_ES3=1")
+    # the clipboard and text keys in a page, driven by a browser script: tests/web/run_clip_web.js
+    add_executable(clipboard_web clipboard_web.c)
+    target_link_libraries(clipboard_web PRIVATE platform)
+    set_target_properties(clipboard_web PROPERTIES
+        SUFFIX ".html"
+        LINK_FLAGS "--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/../tests/web/shell.html")
 elseif(ANDROID)
     add_library(hello_android SHARED hello_android.c)
     target_link_libraries(hello_android PRIVATE platform)

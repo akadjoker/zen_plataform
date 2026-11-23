@@ -484,6 +484,28 @@ void backend_destroy(BackendWindow *b)
     free(b);
 }
 
+/* The looper is what the glue's events (the command pipe, the input queue) and ALooper_wake are on, so the sleep is
+   ALooper_pollOnce, which takes nothing off them: an ident >= 0 says a source has something, and it stays there, level
+   triggered, until backend_pump_events runs its process function. A wake is consumed by pollOnce itself (it returns
+   ALOOPER_POLL_WAKE), also one that was posted before: ALooper_wake is not lost when no poll is running. Not built here
+   (no NDK on this machine): written against the same three calls backend_pump_events makes. */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    int64_t ms = core_wait_ms(timeout_ns);
+    int events = 0;
+    void *data = NULL;
+    int r = ALooper_pollOnce(ms > 0x7fffffff ? 0x7fffffff : (int)ms, NULL, &events, &data);
+    return r != ALOOPER_POLL_TIMEOUT;
+}
+
+/* From any thread. g_app is cleared when android_main ends; the glue frees the struct later than that. */
+void backend_wake(void)
+{
+    struct android_app *app = __atomic_load_n(&g_app, __ATOMIC_ACQUIRE);
+    if (app && app->looper)
+        ALooper_wake(app->looper);
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
@@ -849,6 +871,25 @@ void backend_set_mouse_mode(BackendWindow *b, int mode)
     (void)mode;
 }
 
+/* There is no primary selection here (the middle button pastes nothing): the calls say so (clipboard_has_primary_support). */
+bool backend_primary_supported(void)
+{
+    return false;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    (void)utf8, (void)len;
+    return false;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (size)
+        *size = 0;
+    return NULL;
+}
+
 /* No system clipboard yet: the content stays inside the app. */
 bool backend_clipboard_set(const ClipboardItem *items, int count)
 {
@@ -1014,11 +1055,11 @@ extern int main(void);
 
 void android_main(struct android_app *app)
 {
-    g_app = app;
+    __atomic_store_n(&g_app, app, __ATOMIC_RELEASE);
     app->onAppCmd = handle_cmd;
     app->onInputEvent = handle_input;
 
     main();
 
-    g_app = NULL;
+    __atomic_store_n(&g_app, NULL, __ATOMIC_RELEASE);
 }

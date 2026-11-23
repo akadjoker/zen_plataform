@@ -10,9 +10,11 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "uri_list.h"
 #include "vulkan_internal.h"
 #include "mime_util.h"
 #include "preedit.h"
+#include "gamepad_internal.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -39,6 +41,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <time.h>
 
@@ -73,6 +77,10 @@ typedef int (*glXSwapIntervalSGIProc)(int);
 #define CLIP_TIMEOUT_MS 1000        /* wait for another client, per step */
 #define CLIP_DEAD_MS 10000          /* how long an owner that did not answer is not asked again */
 #define CLIP_READ_LIMIT (512u << 20) /* refuse pastes larger than this */
+/* An INCR transfer may last 10 s and 4 ms for every KB that has arrived (a rate of 256 KB/s is enough to keep it going): an
+   owner that sends one byte every 900 ms never trips the one-second wait of each step, and used to hold the program for as
+   long as it liked. */
+#define CLIP_INCR_BASE_MS 10000
 
 typedef struct
 {
@@ -89,7 +97,27 @@ typedef struct
     Atom property, target;
     const uint8_t *data; /* points into a ClipEntry; transfers are aborted when the entries go */
     size_t size, offset;
+    int sel;             /* which selection the data belongs to (SEL_*) */
 } IncrOut;
+
+/* The two selections of X11 that carry text between programs: CLIPBOARD (copy and paste) and PRIMARY (what is selected, pasted
+   with the middle button). The same code serves, offers and reads both; each has its own entries and its own memory of an
+   owner that did not answer. */
+enum
+{
+    SEL_CLIPBOARD,
+    SEL_PRIMARY,
+    SEL_COUNT
+};
+
+typedef struct
+{
+    Atom atom;              /* CLIPBOARD or XA_PRIMARY */
+    ClipEntry clip[CLIP_MAX]; /* what we offer while we own the selection */
+    int clip_count;
+    Window dead_owner;      /* an owner that did not answer, failed at once until dead_until */
+    long dead_until;        /* monotonic ms */
+} ClipSel;
 
 static struct
 {
@@ -98,7 +126,20 @@ static struct
     Window root;
     XContext ctx; /* xid -> BackendWindow* */
     XIM xim;
+    bool im_lazy;              /* no input method yet: the built-in one is opened by the first key (im_open_local) */
+    BackendWindow *windows;    /* every window, newest first, to give each an input context when the method opens late */
     bool detectable_repeat; /* a held key sends presses only, no synthetic releases */
+    bool io_lost;           /* the connection to the server broke (it was killed, the socket cut) */
+    XIOErrorHandler prev_io; /* the handler that was set before ours: another connection of the program goes to it */
+    int xkb_event_base;     /* XKB events (XkbMapNotify, XkbNewKeyboardNotify) arrive as this event type, 0 without XKB */
+    /* Caps Lock and Num Lock as KEYMOD_* flags, kept from the XkbStateNotify events (the server tells every client when a
+       lock changes, focused or not) so that key_mods reads memory instead of asking the server. Not valid until the first
+       call asks once, and again after a keymap change; a focus-in asks again. */
+    int lock_state;
+    bool lock_valid;
+    /* keycode -> Key, filled on first use from the keysym of the first group and level, dropped when the keyboard
+       mapping changes (MappingNotify, XkbMapNotify, XkbNewKeyboardNotify). Stored as key + 1: 0 is "not looked up". */
+    short keytab[256];
 
     Atom WM_PROTOCOLS, WM_DELETE_WINDOW, NET_WM_NAME, UTF8_STRING;
     Atom NET_WM_STATE, NET_WM_STATE_FULLSCREEN, NET_WM_STATE_MAXIMIZED_VERT,
@@ -109,6 +150,7 @@ static struct
     Atom XdndAware, XdndEnter, XdndPosition, XdndStatus, XdndLeave, XdndDrop, XdndFinished,
         XdndSelection, XdndTypeList, XdndActionCopy, XDND_DATA, TEXT_URI_LIST;
 
+    bool glx_loaded; /* glx_load has run */
     glXCreateContextAttribsARBProc create_context;
     bool has_es_profile;
     glXSwapIntervalEXTProc swap_ext;
@@ -117,18 +159,15 @@ static struct
 
     Cursor cursors[CURSOR_COUNT]; /* created on first use, shared by every window */
 
-    Window helper; /* unmapped window that owns the CLIPBOARD selection */
+    Window helper; /* unmapped window that owns the CLIPBOARD and PRIMARY selections */
     int xi_opcode;   /* XInputExtension, when XInput 2.2 touch is available */
     bool xi_touch;
     int (*xi_select)(Display *, Window, void *mask, int count); /* XISelectEvents */
-    ClipEntry clip[CLIP_MAX]; /* what we offer while we own the selection */
-    int clip_count;
-    Window clip_dead_owner; /* an owner that did not answer, failed at once until clip_dead_until */
-    long clip_dead_until;   /* monotonic ms */
+    ClipSel sel[SEL_COUNT];
     IncrOut incr[CLIP_INCR_MAX]; /* large pastes being sent in chunks */
 } g;
 
-static void clip_free_entries(void);
+static void clip_free_entries(ClipSel *s);
 static void xdnd_free_drop(BackendWindow *b);
 
 #define XDND_VERSION 5 /* the newest XDND version this file speaks */
@@ -141,6 +180,10 @@ struct BackendWindow
     GLConfig gl_cfg;
     Colormap colormap;
     XIC xic;
+    BackendWindow *next; /* g.windows */
+    bool lost_told;      /* EVENT_WINDOW_CLOSE was pushed for the lost connection */
+    bool has_spot;       /* backend_set_text_input_rect was called: kept for a context created later */
+    int spot_x, spot_y;
     /* input method: composing text shown by the application (XIM preedit callbacks) */
     Preedit preedit;
     bool preedit_dirty;           /* an EVENT_TEXT_EDIT is due at the end of the pump */
@@ -161,6 +204,7 @@ struct BackendWindow
         Time time;
     } im_taken[64];
     int im_taken_next;
+    int im_taken_live; /* how many im_taken entries are not yet matched: 0 lets im_copy skip the scan */
     unsigned long kc_serial[256];
     bool key_early;
     struct PendingX *pending; /* events other windows' pumps read off the shared queue for this one */
@@ -401,6 +445,9 @@ static void refresh_wm_state(BackendWindow *b)
     XFree(data);
 }
 
+/* A window is at most 65535 pixels wide or high: the size is 16 bits in the protocol. */
+#define X_SIZE_MAX 65535
+
 /* ========================================================================== */
 /*  GL context                                                                */
 /* ========================================================================== */
@@ -420,8 +467,24 @@ static bool glx_has_extension(const char *name)
     return false;
 }
 
+/* The GLX entry points and extensions are looked up when the first GL window is made, not in backend_init: the
+   first call into libGLX makes it load the vendor's driver (Mesa and its LLVM, tens of megabytes), and a program
+   that opens only pixel or Vulkan windows has no use for it. */
+static void glx_load(void)
+{
+    if (g.glx_loaded)
+        return;
+    g.glx_loaded = true;
+    g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
+    g.has_es_profile = glx_has_extension("GLX_EXT_create_context_es2_profile");
+    g.swap_ext = (glXSwapIntervalEXTProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
+    g.swap_mesa = (glXSwapIntervalMESAProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalMESA");
+    g.swap_sgi = (glXSwapIntervalSGIProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalSGI");
+}
+
 static GLXFBConfig choose_fbconfig(const GLConfig *gl)
 {
+    glx_load();
     int attribs[] = {
         GLX_X_RENDERABLE, True,
         GLX_DRAWABLE_TYPE, GLX_WINDOW_BIT,
@@ -527,6 +590,25 @@ static GLXContext create_context(GLXFBConfig fb, const GLConfig *gl, GLXContext 
 /*  init / shutdown                                                           */
 /* ========================================================================== */
 
+/* The server went away. Xlib's way of dealing with that is to print a message and call exit(): the program would end with
+   no chance to save anything. Two handlers take its place for this connection (the exit handler, XSetIOErrorExitHandler,
+   libX11 1.7, is only reached once the IO error handler has returned, and the default IO error handler is what ends the
+   process): they only note it. From then on every call on the connection fails at once, and the pump tells each window
+   to close. They must not call Xlib. */
+static void io_error_exit(Display *d, void *data)
+{
+    (void)d, (void)data;
+    g.io_lost = true;
+}
+
+static int io_error(Display *d)
+{
+    if (d != g.dpy && g.prev_io)
+        return g.prev_io(d); /* a connection of the program's own: as it was */
+    g.io_lost = true;
+    return 0;
+}
+
 bool backend_init(void)
 {
     /* A GL worker (gl_worker_create) makes its context current on another thread, which is a call on this
@@ -535,6 +617,19 @@ bool backend_init(void)
     g.dpy = XOpenDisplay(NULL);
     if (!g.dpy)
         return error_set("cannot open the X display");
+    {
+        SharedLibrary *x = library_open("libX11.so.6");
+        void (*set_exit)(Display *, void (*)(Display *, void *), void *) = NULL;
+        if (x)
+            *(void **)&set_exit = library_symbol(x, "XSetIOErrorExitHandler");
+        if (set_exit)
+        {
+            set_exit(g.dpy, io_error_exit, NULL);
+            g.prev_io = XSetIOErrorHandler(io_error);
+        }
+        if (x)
+            library_close(x);
+    }
     g.screen = DefaultScreen(g.dpy);
     g.root = RootWindow(g.dpy, g.screen);
     g.ctx = XUniqueContext();
@@ -545,43 +640,77 @@ bool backend_init(void)
     XkbSetDetectableAutoRepeat(g.dpy, True, &detectable);
     g.detectable_repeat = detectable == True;
 
-    g.WM_PROTOCOLS = XInternAtom(g.dpy, "WM_PROTOCOLS", False);
-    g.WM_DELETE_WINDOW = XInternAtom(g.dpy, "WM_DELETE_WINDOW", False);
-    g.NET_WM_NAME = XInternAtom(g.dpy, "_NET_WM_NAME", False);
-    g.UTF8_STRING = XInternAtom(g.dpy, "UTF8_STRING", False);
-    g.NET_WM_STATE = XInternAtom(g.dpy, "_NET_WM_STATE", False);
-    g.NET_WM_STATE_FULLSCREEN = XInternAtom(g.dpy, "_NET_WM_STATE_FULLSCREEN", False);
-    g.NET_WM_STATE_MAXIMIZED_VERT = XInternAtom(g.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
-    g.NET_WM_STATE_MAXIMIZED_HORZ = XInternAtom(g.dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
-    g.NET_WM_STATE_HIDDEN = XInternAtom(g.dpy, "_NET_WM_STATE_HIDDEN", False);
-    g.NET_WM_STATE_ABOVE = XInternAtom(g.dpy, "_NET_WM_STATE_ABOVE", False);
-    g.NET_WM_STATE_DEMANDS_ATTENTION = XInternAtom(g.dpy, "_NET_WM_STATE_DEMANDS_ATTENTION", False);
-    g.NET_ACTIVE_WINDOW = XInternAtom(g.dpy, "_NET_ACTIVE_WINDOW", False);
-    g.NET_WM_ICON = XInternAtom(g.dpy, "_NET_WM_ICON", False);
-    g.NET_WM_WINDOW_OPACITY = XInternAtom(g.dpy, "_NET_WM_WINDOW_OPACITY", False);
-    g.MOTIF_WM_HINTS = XInternAtom(g.dpy, "_MOTIF_WM_HINTS", False);
-    g.CLIPBOARD = XInternAtom(g.dpy, "CLIPBOARD", False);
-    g.TARGETS = XInternAtom(g.dpy, "TARGETS", False);
-    g.XSEL_DATA = XInternAtom(g.dpy, "PLATFORM_CLIPBOARD", False);
-    g.INCR = XInternAtom(g.dpy, "INCR", False);
-    g.TEXT_PLAIN = XInternAtom(g.dpy, "text/plain", False);
-    g.TEXT_PLAIN_UTF8 = XInternAtom(g.dpy, "text/plain;charset=utf-8", False);
-    g.TEXT = XInternAtom(g.dpy, "TEXT", False);
-    g.XdndAware = XInternAtom(g.dpy, "XdndAware", False);
-    g.XdndEnter = XInternAtom(g.dpy, "XdndEnter", False);
-    g.XdndPosition = XInternAtom(g.dpy, "XdndPosition", False);
-    g.XdndStatus = XInternAtom(g.dpy, "XdndStatus", False);
-    g.XdndLeave = XInternAtom(g.dpy, "XdndLeave", False);
-    g.XdndDrop = XInternAtom(g.dpy, "XdndDrop", False);
-    g.XdndFinished = XInternAtom(g.dpy, "XdndFinished", False);
-    g.XdndSelection = XInternAtom(g.dpy, "XdndSelection", False);
-    g.XdndTypeList = XInternAtom(g.dpy, "XdndTypeList", False);
-    g.XdndActionCopy = XInternAtom(g.dpy, "XdndActionCopy", False);
-    g.XDND_DATA = XInternAtom(g.dpy, "PLATFORM_XDND", False);
-    g.TEXT_URI_LIST = XInternAtom(g.dpy, "text/uri-list", False);
+    /* Watch for the keyboard mapping changing, so the keycode table (key_of) is dropped when it does. A MappingNotify
+       comes to every client anyway; the XKB events cover a keymap loaded or a keyboard plugged in without one. */
+    {
+        int opcode, error, major = XkbMajorVersion, minor = XkbMinorVersion;
+        if (XkbQueryExtension(g.dpy, &opcode, &g.xkb_event_base, &error, &major, &minor))
+        {
+            XkbSelectEvents(g.dpy, XkbUseCoreKbd, XkbMapNotifyMask | XkbNewKeyboardNotifyMask | XkbStateNotifyMask,
+                            XkbMapNotifyMask | XkbNewKeyboardNotifyMask | XkbStateNotifyMask);
+            /* of the state notifications only the locked modifiers: a Shift pressed in another program is not news here */
+            XkbSelectEventDetails(g.dpy, XkbUseCoreKbd, XkbStateNotify, XkbAllStateComponentsMask, XkbModifierLockMask);
+        }
+        else
+            g.xkb_event_base = 0;
+    }
 
-    /* A 1x1 unmapped window owns the CLIPBOARD selection and answers conversion
-       requests, so clipboard ownership outlives any single visible window. */
+    /* Every atom in one request: one round trip to the server, not one per atom (34 of them at start-up). */
+    static const struct
+    {
+        const char *name;
+        Atom *atom;
+    } atoms[] = {
+        {"WM_PROTOCOLS", &g.WM_PROTOCOLS},
+        {"WM_DELETE_WINDOW", &g.WM_DELETE_WINDOW},
+        {"_NET_WM_NAME", &g.NET_WM_NAME},
+        {"UTF8_STRING", &g.UTF8_STRING},
+        {"_NET_WM_STATE", &g.NET_WM_STATE},
+        {"_NET_WM_STATE_FULLSCREEN", &g.NET_WM_STATE_FULLSCREEN},
+        {"_NET_WM_STATE_MAXIMIZED_VERT", &g.NET_WM_STATE_MAXIMIZED_VERT},
+        {"_NET_WM_STATE_MAXIMIZED_HORZ", &g.NET_WM_STATE_MAXIMIZED_HORZ},
+        {"_NET_WM_STATE_HIDDEN", &g.NET_WM_STATE_HIDDEN},
+        {"_NET_WM_STATE_ABOVE", &g.NET_WM_STATE_ABOVE},
+        {"_NET_WM_STATE_DEMANDS_ATTENTION", &g.NET_WM_STATE_DEMANDS_ATTENTION},
+        {"_NET_ACTIVE_WINDOW", &g.NET_ACTIVE_WINDOW},
+        {"_NET_WM_ICON", &g.NET_WM_ICON},
+        {"_NET_WM_WINDOW_OPACITY", &g.NET_WM_WINDOW_OPACITY},
+        {"_MOTIF_WM_HINTS", &g.MOTIF_WM_HINTS},
+        {"CLIPBOARD", &g.CLIPBOARD},
+        {"TARGETS", &g.TARGETS},
+        {"PLATFORM_CLIPBOARD", &g.XSEL_DATA},
+        {"INCR", &g.INCR},
+        {"text/plain", &g.TEXT_PLAIN},
+        {"text/plain;charset=utf-8", &g.TEXT_PLAIN_UTF8},
+        {"TEXT", &g.TEXT},
+        {"XdndAware", &g.XdndAware},
+        {"XdndEnter", &g.XdndEnter},
+        {"XdndPosition", &g.XdndPosition},
+        {"XdndStatus", &g.XdndStatus},
+        {"XdndLeave", &g.XdndLeave},
+        {"XdndDrop", &g.XdndDrop},
+        {"XdndFinished", &g.XdndFinished},
+        {"XdndSelection", &g.XdndSelection},
+        {"XdndTypeList", &g.XdndTypeList},
+        {"XdndActionCopy", &g.XdndActionCopy},
+        {"PLATFORM_XDND", &g.XDND_DATA},
+        {"text/uri-list", &g.TEXT_URI_LIST},
+    };
+    enum { ATOM_COUNT = (int)(sizeof atoms / sizeof atoms[0]) };
+    char *names[ATOM_COUNT];
+    Atom found[ATOM_COUNT];
+    for (int i = 0; i < ATOM_COUNT; i++)
+        names[i] = (char *)atoms[i].name;
+    if (XInternAtoms(g.dpy, names, ATOM_COUNT, False, found))
+    {
+        for (int i = 0; i < ATOM_COUNT; i++)
+            *atoms[i].atom = found[i];
+    }
+
+    g.sel[SEL_CLIPBOARD].atom = g.CLIPBOARD;
+    g.sel[SEL_PRIMARY].atom = XA_PRIMARY;
+    /* A 1x1 unmapped window owns the CLIPBOARD and PRIMARY selections and answers conversion
+       requests, so ownership outlives any single visible window. */
     g.helper = XCreateSimpleWindow(g.dpy, g.root, -10, -10, 1, 1, 0, 0, 0);
     XSelectInput(g.dpy, g.helper, PropertyChangeMask);
 
@@ -611,23 +740,33 @@ bool backend_init(void)
        can only give the plain built-in one. Only LC_CTYPE is changed: number
        formatting stays as the application had it. */
     setlocale(LC_CTYPE, "");
-    if (XSupportsLocale())
-        XSetLocaleModifiers("");
+    const bool locale_ok = XSupportsLocale();
+    const char *modifiers = locale_ok ? XSetLocaleModifiers("") : NULL;
+    if (modifiers && !strstr(modifiers, "@im="))
+    {
+        /* XMODIFIERS names no input method: XOpenIM can only open the built-in method of Xlib, whatever servers are
+           running (Xlib looks for a server, in the XIM_SERVERS property, only for a name given with "@im="; measured with
+           a real ibus-daemon -x up, which a program started without XMODIFIERS did not use). Opening it reads the locale's
+           compose table, some 47 million instructions (10 to 30 ms) that a program that never gets a key would pay for
+           nothing. It is opened by the first key instead, before that key is filtered, so the first dead key still
+           composes (the same as below, for a server that is down). */
+        g.im_lazy = true;
+        return true;
+    }
     g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
-    if (!g.xim && XSupportsLocale() && XSetLocaleModifiers("@im=none"))
-        g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
-
-    g.create_context = (glXCreateContextAttribsARBProc)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
-    g.has_es_profile = glx_has_extension("GLX_EXT_create_context_es2_profile");
-    g.swap_ext = (glXSwapIntervalEXTProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
-    g.swap_mesa = (glXSwapIntervalMESAProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalMESA");
-    g.swap_sgi = (glXSwapIntervalSGIProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalSGI");
+    /* The configured method is not there (XMODIFIERS names a server that is not running). The built-in method of Xlib
+       is the fallback, with dead keys and compose, but opening it reads the locale's compose table: some 40 million
+       instructions (10 to 30 ms), which a program that never gets a key would pay for nothing. It is opened by the
+       first key press instead, before that key is filtered, so the first dead key still works. */
+    if (!g.xim && locale_ok)
+        g.im_lazy = true;
     return true;
 }
 
 void backend_shutdown(void)
 {
-    clip_free_entries();
+    for (int i = 0; i < SEL_COUNT; i++)
+        clip_free_entries(&g.sel[i]);
     for (int i = 0; i < CURSOR_COUNT; i++)
     {
         if (g.cursors[i])
@@ -639,6 +778,8 @@ void backend_shutdown(void)
         XCloseIM(g.xim);
     if (g.dpy)
         XCloseDisplay(g.dpy);
+    if (g.prev_io || g.io_lost)
+        XSetIOErrorHandler(g.prev_io);
     memset(&g, 0, sizeof g);
 }
 
@@ -650,9 +791,26 @@ static void set_title(BackendWindow *b, const char *title)
 {
     if (!title)
         title = "";
+    /* One request carries what XMaxRequestSize says (256 KB on a server without BIG-REQUESTS) and a longer property is a
+       BadLength, which Xlib answers by ending the process. A title is cut below that, on a character boundary. */
+    size_t len = strlen(title), most = (size_t)XMaxRequestSize(g.dpy) * 4 - 256;
+    char *cut = NULL;
+    if (len > most)
+    {
+        len = most;
+        while (len > 0 && ((unsigned char)title[len] & 0xC0) == 0x80)
+            len--;
+        cut = malloc(len + 1);
+        if (!cut)
+            return;
+        memcpy(cut, title, len);
+        cut[len] = 0;
+        title = cut;
+    }
     XStoreName(g.dpy, b->win, title);
     XChangeProperty(g.dpy, b->win, g.NET_WM_NAME, g.UTF8_STRING, 8,
-                    PropModeReplace, (const unsigned char *)title, (int)strlen(title));
+                    PropModeReplace, (const unsigned char *)title, (int)len);
+    free(cut);
 }
 
 /* ---- input method: on-the-spot composition through the XIM preedit callbacks ---- */
@@ -739,6 +897,40 @@ static XIC create_ic(BackendWindow *b)
                      b->win, NULL);
 }
 
+static void apply_spot(BackendWindow *b)
+{
+    XPoint spot = {(short)b->spot_x, (short)b->spot_y};
+    XVaNestedList list = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
+    XSetICValues(b->xic, XNPreeditAttributes, list, NULL); /* some methods ignore it */
+    XFree(list);
+}
+
+/* An input context for a window made before the method was open: the state the window has by now goes into it. */
+static void im_attach(BackendWindow *b)
+{
+    b->xic = create_ic(b);
+    if (!b->xic)
+        return;
+    if (b->focused && b->text_input)
+        XSetICFocus(b->xic);
+    if (b->has_spot)
+        apply_spot(b);
+}
+
+/* The built-in input method, opened late (see backend_init): called before the first key event is filtered, so the
+   filter exists when that very key (a dead key, the compose key) is handed to XFilterEvent. */
+static void im_open_local(void)
+{
+    g.im_lazy = false;
+    if (!XSetLocaleModifiers("@im=none"))
+        return;
+    g.xim = XOpenIM(g.dpy, NULL, NULL, NULL);
+    if (!g.xim)
+        return;
+    for (BackendWindow *w = g.windows; w; w = w->next)
+        im_attach(w);
+}
+
 /* The composition changed during this pump: tell the application once. */
 static void flush_preedit(BackendWindow *b)
 {
@@ -774,13 +966,13 @@ void backend_set_text_input(BackendWindow *b, bool on)
 void backend_set_text_input_rect(BackendWindow *b, int x, int y, int w, int h)
 {
     (void)w;
+    /* the spot is where the candidate list goes: just under the caret */
+    b->has_spot = true;
+    b->spot_x = (short)x;
+    b->spot_y = (short)(y + h);
     if (!b->xic)
         return;
-    /* the spot is where the candidate list goes: just under the caret */
-    XPoint spot = {(short)x, (short)(y + h)};
-    XVaNestedList list = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
-    XSetICValues(b->xic, XNPreeditAttributes, list, NULL); /* some methods ignore it */
-    XFree(list);
+    apply_spot(b);
 }
 
 /* ---- decorations and window kinds ---- */
@@ -895,6 +1087,10 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     int y = (cfg->y == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_UNDEFINED) ? 0 : cfg->y;
     int w = cfg->width > 0 ? cfg->width : 640;
     int h = cfg->height > 0 ? cfg->height : 480;
+    if (w > X_SIZE_MAX)
+        w = X_SIZE_MAX;
+    if (h > X_SIZE_MAX)
+        h = X_SIZE_MAX;
 
     /* On a chosen monitor the window is placed before it is mapped, as a user position: a
        compositor (XWayland under mutter) places a new window by itself and a move made right
@@ -932,7 +1128,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->hit_cursor = -1;
 
     XSaveContext(g.dpy, b->win, g.ctx, (XPointer)b);
-    XSetWMProtocols(g.dpy, b->win, &g.WM_DELETE_WINDOW, 1);
+    /* What XSetWMProtocols does, with the atoms already in hand: it asks the server for WM_PROTOCOLS every time. */
+    XChangeProperty(g.dpy, b->win, g.WM_PROTOCOLS, XA_ATOM, 32, PropModeReplace, (unsigned char *)&g.WM_DELETE_WINDOW, 1);
     {
         long xdnd_version = XDND_VERSION;
         XChangeProperty(g.dpy, b->win, g.XdndAware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&xdnd_version, 1);
@@ -983,6 +1180,8 @@ BackendWindow *backend_create(const WindowConfig *cfg)
 
     b->text_input = true;
     b->xic = create_ic(b);
+    b->next = g.windows;
+    g.windows = b;
 
     if (cfg->render == RENDER_PIXELS)
     {
@@ -1022,7 +1221,9 @@ BackendWindow *backend_create(const WindowConfig *cfg)
        monitor < 0 means MONITOR_CURRENT – resolve to whichever monitor
        contains the window now (after XMapWindow placed it). */
     int target_monitor = cfg->monitor;
-    if (target_monitor < 0 && !wm_places)
+    /* Only centering and full screen need it, and finding it costs several round trips to the server. */
+    const bool centering = !wm_places && (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED);
+    if (target_monitor < 0 && !wm_places && (centering || cfg->mode != WINDOW_WINDOWED))
     {
         /* Find which monitor the window landed on. */
         int nmon = backend_monitor_count();
@@ -1043,7 +1244,7 @@ BackendWindow *backend_create(const WindowConfig *cfg)
             target_monitor = 0;
     }
 
-    if (!wm_places && (cfg->x == WINDOW_POS_CENTERED || cfg->y == WINDOW_POS_CENTERED))
+    if (centering)
     {
         MonitorInfo m;
         if (backend_monitor_info(target_monitor, &m))
@@ -1076,7 +1277,7 @@ void backend_destroy(BackendWindow *b)
         XDestroyImage(b->image);
     if (b->gc)
         XFreeGC(g.dpy, b->gc);
-    if (b->render == RENDER_GL)
+    if (b->render == RENDER_GL && !g.io_lost)
     {
         /* Leave another window's context current, unless it draws to this window. */
         if (glXGetCurrentContext() == b->glc || glXGetCurrentDrawable() == b->win)
@@ -1085,12 +1286,20 @@ void backend_destroy(BackendWindow *b)
             glXDestroyContext(g.dpy, b->glc);
     }
     XDeleteContext(g.dpy, b->win, g.ctx);
+    for (BackendWindow **pp = &g.windows; *pp; pp = &(*pp)->next)
+        if (*pp == b)
+        {
+            *pp = b->next;
+            break;
+        }
     free(b->pending);
     xdnd_free_drop(b);
     if (b->hidden_cursor)
         XFreeCursor(g.dpy, b->hidden_cursor);
     XDestroyWindow(g.dpy, b->win);
     XFreeColormap(g.dpy, b->colormap);
+    /* Without this the window stays on screen until something else flushes the connection. */
+    XFlush(g.dpy);
     free(b);
 }
 
@@ -1101,6 +1310,48 @@ void backend_destroy(BackendWindow *b)
 static void push(BackendWindow *b, Event *e)
 {
     core_push_event(b->core, e);
+}
+
+/* The key a keycode stands for, from the table (see g.keytab). XLookupKeysym costs some 190 instructions
+   with what it calls, on every key event; the table costs one load. */
+static int key_of(unsigned keycode)
+{
+    if (keycode >= 256)
+        return translate_keysym(NoSymbol);
+    int k = g.keytab[keycode] - 1;
+    if (k < 0)
+    {
+        XKeyEvent probe;
+        memset(&probe, 0, sizeof probe);
+        probe.display = g.dpy;
+        probe.keycode = keycode;
+        k = translate_keysym(XLookupKeysym(&probe, 0));
+        g.keytab[keycode] = (short)(k + 1);
+    }
+    return k;
+}
+
+/* The keyboard mapping changed (another client, setxkbmap, a layout switch, a keyboard plugged in). */
+static void keymap_changed(void)
+{
+    memset(g.keytab, 0, sizeof g.keytab);
+    g.lock_valid = false; /* a keymap that is loaded may move the lock modifiers: ask again */
+}
+
+static int lock_flags(unsigned locked_mods)
+{
+    return ((locked_mods & LockMask) ? KEYMOD_CAPS_LOCK : 0) | ((locked_mods & Mod2Mask) ? KEYMOD_NUM_LOCK : 0);
+}
+
+/* One round trip: the locks as the server has them now. */
+static void lock_refresh(void)
+{
+    XkbStateRec st;
+    if (XkbGetState(g.dpy, XkbUseCoreKbd, &st) == Success)
+    {
+        g.lock_state = lock_flags(st.locked_mods);
+        g.lock_valid = true;
+    }
 }
 
 /* Keys already down when the window gets the focus send no press of their own: they are
@@ -1117,7 +1368,7 @@ static void press_held_keys(BackendWindow *b)
     {
         if (!(keymap[kc / 8] & (1 << (kc % 8))) || b->kc_down[kc])
             continue;
-        int key = translate_keysym(XkbKeycodeToKeysym(g.dpy, (KeyCode)kc, 0, 0));
+        int key = key_of((unsigned)kc);
         b->kc_down[kc] = true;
         b->kc_gone[kc] = 0;
         b->kc_key[kc] = key;
@@ -1134,9 +1385,8 @@ static void key_text(BackendWindow *b, XEvent *ev);
 
 static void handle_key(BackendWindow *b, XEvent *ev, bool down)
 {
-    KeySym ks = XLookupKeysym(&ev->xkey, 0);
     Event e = {.type = EVENT_KEY};
-    int key = translate_keysym(ks);
+    int key = key_of(ev->xkey.keycode);
     e.data.key.key = key;
     if (ev->xkey.keycode < 256)
     {
@@ -1155,9 +1405,15 @@ static void handle_key(BackendWindow *b, XEvent *ev, bool down)
         key_text(b, ev);
 }
 
-/* text: feed the IM and decode UTF-8 into codepoints */
+/* text: feed the IM and decode UTF-8 into codepoints. A key pressed with Ctrl or Super (Mod4) held is a shortcut and types
+   nothing (the rule in platform.h): Xlib maps Ctrl+letter to a control character, which is dropped below, but it answers
+   Ctrl+1, Ctrl+minus, Ctrl+comma with the plain character and Ctrl+space with a space. AltGr is Mod5, so what a layout
+   puts on it is still text, and keycode 0 is the input method putting back what it composed or committed, which is text
+   whatever the modifiers of the key that finished it. */
 static void key_text(BackendWindow *b, XEvent *ev)
 {
+    if (ev->xkey.keycode != 0 && (ev->xkey.state & (ControlMask | Mod4Mask)))
+        return;
     if (b->xic)
     {
         char buf[64];
@@ -1480,78 +1736,6 @@ static char *xdnd_read_text(Window w, Atom prop)
     return buf;
 }
 
-static int xdnd_hex(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
-/* A URI path with its %XX escapes decoded; NULL when out of memory. */
-static char *xdnd_unescape(const char *s)
-{
-    size_t len = strlen(s);
-    char *out = malloc(len + 1);
-    if (!out)
-        return NULL;
-    size_t o = 0;
-    for (size_t i = 0; i < len; i++)
-    {
-        int hi, lo;
-        if (s[i] == '%' && i + 2 < len && (hi = xdnd_hex(s[i + 1])) >= 0 && (lo = xdnd_hex(s[i + 2])) >= 0)
-        {
-            out[o++] = (char)(hi * 16 + lo);
-            i += 2;
-        }
-        else
-            out[o++] = s[i];
-    }
-    out[o] = 0;
-    return out;
-}
-
-/* text/uri-list: one URI per line, '#' starts a comment. Only local file: URIs are
-   kept. Returns how many paths were stored in out; the strings are the caller's. */
-static int xdnd_parse_uris(char *text, char **out, int max)
-{
-    int n = 0;
-    char *line = text;
-    while (*line && n < max)
-    {
-        char *end = line + strcspn(line, "\r\n");
-        char *next = end + strspn(end, "\r\n");
-        *end = 0;
-        char *p = line;
-        line = next;
-
-        if (!*p || *p == '#' || strncasecmp(p, "file:", 5) != 0)
-            continue;
-        p += 5;
-        if (strncmp(p, "//", 2) == 0)
-        {
-            /* file://host/path: the host has to be this machine */
-            p += 2;
-            char *slash = strchr(p, '/');
-            if (!slash)
-                continue;
-            size_t host = (size_t)(slash - p);
-            if (host != 0 && !(host == 9 && strncasecmp(p, "localhost", 9) == 0))
-                continue;
-            p = slash;
-        }
-        if (*p != '/')
-            continue;
-        char *path = xdnd_unescape(p);
-        if (path)
-            out[n++] = path;
-    }
-    return n;
-}
-
 static void xdnd_free_drop(BackendWindow *b)
 {
     for (int i = 0; i < b->drop_n; i++)
@@ -1574,7 +1758,7 @@ static void xdnd_finish_drop(BackendWindow *b, Atom prop)
     char *text = prop != None ? xdnd_read_text(b->win, prop) : NULL;
     if (text)
     {
-        n = xdnd_parse_uris(text, paths, XDND_MAX_PATHS);
+        n = uri_list_parse(text, paths, XDND_MAX_PATHS);
         free(text);
     }
 
@@ -1608,6 +1792,8 @@ static void xdnd_finish_drop(BackendWindow *b, Atom prop)
 static bool xdnd_client_message(BackendWindow *b, XClientMessageEvent *m)
 {
     Atom t = m->message_type;
+    if (m->format != 32)
+        return false; /* the XDND messages are all of format 32: the words below would be other bytes */
     const long *l = m->data.l;
     Window src = (Window)l[0];
 
@@ -1623,6 +1809,25 @@ static bool xdnd_client_message(BackendWindow *b, XClientMessageEvent *m)
     {
         if (b->xdnd_converting || src != b->xdnd_src)
             return true;
+        /* While something is dragged over the window the server sends no MotionNotify (the source holds the pointer): the place the source reports, in
+           root coordinates, is the pointer's place. It is handed on as a pointer move, so that mouse_position() at the EVENT_WINDOW_DROP that follows is
+           where the files were let go, and the application can show where they would land while they are still held. */
+        if (b->xdnd_uri && b->cursor_mode != MOUSE_MODE_CAPTURED)
+        {
+            const int rx = (int)(((unsigned long)l[2] >> 16) & 0xffff), ry = (int)((unsigned long)l[2] & 0xffff);
+            int wx = 0, wy = 0;
+            Window child = None;
+            if (XTranslateCoordinates(g.dpy, g.root, b->win, rx, ry, &wx, &wy, &child) && (wx != b->last_x || wy != b->last_y))
+            {
+                b->last_x = wx;
+                b->last_y = wy;
+                hit_motion(b, wx, wy);
+                Event e = {.type = EVENT_MOUSE_MOVE};
+                e.data.mouse.x = wx;
+                e.data.mouse.y = wy;
+                push(b, &e);
+            }
+        }
         /* the drop is copy only: the source gets what it asked for when we take it */
         xdnd_send(src, g.XdndStatus, (long)b->win, b->xdnd_uri ? 1 : 0, 0, 0,
                   b->xdnd_uri ? (long)g.XdndActionCopy : (long)None);
@@ -1692,15 +1897,31 @@ static void release_pointer(BackendWindow *b)
     XFlush(g.dpy);
 }
 
+/* An entry the input method never sent back (the local method takes a dead key and composes a new event of its own,
+   keycode 0) stays in im_taken; one older than this, in server milliseconds, is dropped so the scan can be skipped. */
+#define IM_TAKEN_STALE_MS 10000u
+
 static bool im_copy(BackendWindow *b, const XEvent *ev)
 {
-    for (int i = 0; i < (int)(sizeof b->im_taken / sizeof b->im_taken[0]); i++)
+    if (b->im_taken_live)
     {
-        if (b->im_taken[i].type == ev->type && b->im_taken[i].keycode == ev->xkey.keycode &&
-            b->im_taken[i].serial == ev->xany.serial && b->im_taken[i].time == ev->xkey.time)
+        for (int i = 0; i < (int)(sizeof b->im_taken / sizeof b->im_taken[0]); i++)
         {
-            b->im_taken[i].type = 0;
-            return true;
+            if (!b->im_taken[i].type)
+                continue;
+            if (b->im_taken[i].type == ev->type && b->im_taken[i].keycode == ev->xkey.keycode &&
+                b->im_taken[i].serial == ev->xany.serial && b->im_taken[i].time == ev->xkey.time)
+            {
+                b->im_taken[i].type = 0;
+                b->im_taken_live--;
+                return true;
+            }
+            uint32_t age = (uint32_t)ev->xkey.time - (uint32_t)b->im_taken[i].time;
+            if (age > IM_TAKEN_STALE_MS && age < 0x80000000u)
+            {
+                b->im_taken[i].type = 0;
+                b->im_taken_live--;
+            }
         }
     }
     return ev->xkey.keycode < 256 && (long)(ev->xany.serial - b->kc_serial[ev->xkey.keycode]) < 0;
@@ -1714,6 +1935,8 @@ static void key_early(BackendWindow *b, XEvent *ev)
         return;
     int i = b->im_taken_next;
     b->im_taken_next = (i + 1) % (int)(sizeof b->im_taken / sizeof b->im_taken[0]);
+    if (!b->im_taken[i].type)
+        b->im_taken_live++;
     b->im_taken[i].type = ev->type;
     b->im_taken[i].keycode = ev->xkey.keycode;
     b->im_taken[i].serial = ev->xany.serial;
@@ -1730,7 +1953,10 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case ClientMessage:
         if (xdnd_client_message(b, &ev->xclient))
             break;
-        if ((Atom)ev->xclient.data.l[0] == g.WM_DELETE_WINDOW)
+        /* only the window manager's own message closes the window: WM_PROTOCOLS, format 32, the atom first (any other
+           message whose first word happened to be that atom used to) */
+        if (ev->xclient.message_type == g.WM_PROTOCOLS && ev->xclient.format == 32 &&
+            (Atom)ev->xclient.data.l[0] == g.WM_DELETE_WINDOW)
         {
             Event e = {.type = EVENT_WINDOW_CLOSE};
             push(b, &e);
@@ -1738,8 +1964,10 @@ static void process_event(BackendWindow *b, XEvent *ev)
         break;
 
     case SelectionNotify:
+        /* the answer to our XConvertSelection: the property is the one asked for (XDND_DATA) or the drop is refused;
+           another name would make us read, and then delete, any property of the window the sender chose */
         if (ev->xselection.selection == g.XdndSelection && b->xdnd_converting)
-            xdnd_finish_drop(b, ev->xselection.property);
+            xdnd_finish_drop(b, ev->xselection.property == g.XDND_DATA ? g.XDND_DATA : None);
         break;
 
     case ConfigureNotify:
@@ -1773,7 +2001,10 @@ static void process_event(BackendWindow *b, XEvent *ev)
     case KeyPress:
         if (ev->xkey.keycode == 0 || (!b->key_early && im_copy(b, ev)))
         {
-            key_text(b, ev);
+            /* keycode 0 is what the input method puts back once it has composed a character; one sent by another
+               client (XSendEvent) is not that, and Xlib reads a composed string that is not there for it */
+            if (ev->xkey.keycode != 0 || !ev->xkey.send_event)
+                key_text(b, ev);
             break;
         }
         handle_key(b, ev, true);
@@ -1791,7 +2022,7 @@ static void process_event(BackendWindow *b, XEvent *ev)
             {
                 XNextEvent(g.dpy, &next);
                 Event e = {.type = EVENT_KEY};
-                e.data.key.key = translate_keysym(XLookupKeysym(&next.xkey, 0));
+                e.data.key.key = key_of(next.xkey.keycode);
                 e.data.key.scancode = (int)next.xkey.keycode;
                 e.data.key.down = true;
                 e.data.key.repeat = true;
@@ -1881,6 +2112,8 @@ static void process_event(BackendWindow *b, XEvent *ev)
         if (ev->type == FocusOut && ev->xfocus.detail == NotifyInferior)
             break;
         b->focused = ev->type == FocusIn;
+        if (b->focused && g.lock_valid)
+            lock_refresh(); /* a lock changed while no window had the focus is read again: belt and braces over the events */
         if (!b->focused)
             memset(b->kc_down, 0, sizeof b->kc_down); /* the core drops every key on focus loss too */
         if (b->cursor_mode == MOUSE_MODE_CAPTURED)
@@ -1913,18 +2146,26 @@ static void process_event(BackendWindow *b, XEvent *ev)
     }
 }
 
-/* ---- clipboard, serving side: we own the CLIPBOARD selection ---- */
+/* ---- clipboard, serving side: we own the CLIPBOARD or the PRIMARY selection ---- */
+
+static ClipSel *clip_sel_of(Atom selection)
+{
+    for (int i = 0; i < SEL_COUNT; i++)
+        if (g.sel[i].atom == selection)
+            return &g.sel[i];
+    return NULL;
+}
 
 static bool clip_is_text_target(Atom t)
 {
     return t == g.UTF8_STRING || t == XA_STRING || t == g.TEXT_PLAIN || t == g.TEXT_PLAIN_UTF8 || t == g.TEXT;
 }
 
-static const ClipEntry *clip_find_target(Atom target)
+static const ClipEntry *clip_find_target(const ClipSel *s, Atom target)
 {
-    for (int i = 0; i < g.clip_count; i++)
+    for (int i = 0; i < s->clip_count; i++)
     {
-        const ClipEntry *e = &g.clip[i];
+        const ClipEntry *e = &s->clip[i];
         if (clip_mime_equal(e->mime, CLIPBOARD_TEXT) ? clip_is_text_target(target) : e->atom == target)
             return e;
     }
@@ -1939,11 +2180,12 @@ static int clip_swallow_error(Display *d, XErrorEvent *e)
     return 0;
 }
 
-static void clip_incr_abort_all(void)
+/* The transfers whose data is in the entries of `s`: they point into memory that is about to be freed. */
+static void clip_incr_abort(const ClipSel *s)
 {
     XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
     for (int i = 0; i < CLIP_INCR_MAX; i++)
-        if (g.incr[i].active)
+        if (g.incr[i].active && &g.sel[g.incr[i].sel] == s)
         {
             XSelectInput(g.dpy, g.incr[i].requestor, NoEventMask);
             g.incr[i].active = false;
@@ -1952,15 +2194,15 @@ static void clip_incr_abort_all(void)
     XSetErrorHandler(previous);
 }
 
-static void clip_free_entries(void)
+static void clip_free_entries(ClipSel *s)
 {
-    clip_incr_abort_all();
-    for (int i = 0; i < g.clip_count; i++)
+    clip_incr_abort(s);
+    for (int i = 0; i < s->clip_count; i++)
     {
-        free(g.clip[i].mime);
-        free(g.clip[i].data);
+        free(s->clip[i].mime);
+        free(s->clip[i].data);
     }
-    g.clip_count = 0;
+    s->clip_count = 0;
 }
 
 /* Send the next chunk of an INCR transfer when the requestor has read the last one
@@ -1994,9 +2236,10 @@ static bool clip_incr_property_event(const XPropertyEvent *pe)
     return false;
 }
 
-/* Answer a request for our CLIPBOARD selection (we are the owner). */
+/* Answer a request for one of our selections (we are the owner). */
 static void answer_selection_request(XSelectionRequestEvent *req)
 {
+    ClipSel *s = clip_sel_of(req->selection);
     XSelectionEvent resp = {0};
     resp.type = SelectionNotify;
     resp.display = req->display;
@@ -2009,7 +2252,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
     Atom prop = req->property != None ? req->property : req->target; /* old clients */
     XErrorHandler previous = XSetErrorHandler(clip_swallow_error);
 
-    if (req->selection != g.CLIPBOARD)
+    if (!s)
     {
         /* not ours */
     }
@@ -2018,9 +2261,9 @@ static void answer_selection_request(XSelectionRequestEvent *req)
         Atom targets[1 + CLIP_MAX * 4];
         int n = 0;
         targets[n++] = g.TARGETS;
-        for (int i = 0; i < g.clip_count; i++)
+        for (int i = 0; i < s->clip_count; i++)
         {
-            if (clip_mime_equal(g.clip[i].mime, CLIPBOARD_TEXT))
+            if (clip_mime_equal(s->clip[i].mime, CLIPBOARD_TEXT))
             {
                 targets[n++] = g.UTF8_STRING;
                 targets[n++] = g.TEXT_PLAIN_UTF8;
@@ -2028,7 +2271,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
                 targets[n++] = XA_STRING;
             }
             else
-                targets[n++] = g.clip[i].atom;
+                targets[n++] = s->clip[i].atom;
         }
         XChangeProperty(g.dpy, req->requestor, prop, XA_ATOM, 32, PropModeReplace,
                         (unsigned char *)targets, n);
@@ -2036,7 +2279,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
     }
     else
     {
-        const ClipEntry *e = clip_find_target(req->target);
+        const ClipEntry *e = clip_find_target(s, req->target);
         if (e && e->size <= CLIP_CHUNK_MAX)
         {
             XChangeProperty(g.dpy, req->requestor, prop, req->target, 8, PropModeReplace,
@@ -2051,7 +2294,7 @@ static void answer_selection_request(XSelectionRequestEvent *req)
             {
                 if (g.incr[i].active)
                     continue;
-                g.incr[i] = (IncrOut){true, req->requestor, prop, req->target, e->data, e->size, 0};
+                g.incr[i] = (IncrOut){true, req->requestor, prop, req->target, e->data, e->size, 0, (int)(s - g.sel)};
                 XSelectInput(g.dpy, req->requestor, PropertyChangeMask);
                 long total = (long)e->size;
                 XChangeProperty(g.dpy, req->requestor, prop, g.INCR, 32, PropModeReplace,
@@ -2281,9 +2524,183 @@ static void key_taken_by_im(BackendWindow *b, XEvent *ev)
     }
 }
 
+/* ---- sleeping until the server, a gamepad or platform_wake has something (platform_wait_events) ---- */
+
+#define WAIT_PADS 40 /* the descriptors of the gamepads and joysticks, and the one that watches /dev/input */
+
+static inline bool handle_global_event(XEvent *ev) __attribute__((always_inline));
+
+/* How long the pump can wait for work that is not an event: -1 for none. A key held in a focused window is looked at (the
+   server is asked whether it really is down) every STUCK_KEY_INTERVAL; a drop that waits for its files gives up
+   XDND_CONVERT_MS after it began. */
+static int64_t wait_service_ns(void)
+{
+    int64_t ns = -1;
+    for (const BackendWindow *b = g.windows; b; b = b->next)
+    {
+        if (b->xdnd_converting)
+        {
+            long left = XDND_CONVERT_MS + 1 - (xdnd_now_ms() - b->xdnd_since); /* the pump gives up when it is more than that */
+            int64_t d = left > 0 ? (int64_t)left * 1000000 : 0;
+            ns = ns < 0 || d < ns ? d : ns;
+        }
+        if (b->focused)
+        {
+            bool any = false;
+            for (int kc = 0; kc < 256 && !any; kc++)
+                any = b->kc_down[kc];
+            if (any)
+            {
+                int64_t d = (int64_t)(STUCK_KEY_INTERVAL * 1e9);
+                ns = ns < 0 || d < ns ? d : ns;
+            }
+        }
+    }
+    return ns;
+}
+
+/* The order is what makes this free of the lost wake-up: XPending first (it flushes our requests, reads what the server has
+   sent into Xlib's queue, and also sees events that xcb under Xlib has queued, which XQLength does not), and only when it
+   says nothing is there, poll on the socket. Events that something else read off the socket (a reply wait in this
+   thread earlier, say) are in that queue and make XPending return them; the socket itself is quiet then and poll would
+   sleep through them. The other end of the race, a call in another thread of ours that leaves events in the queue while
+   this one is between XPending and poll, is closed where those calls are (the GL worker: wake_if_queued). */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    for (const BackendWindow *b = g.windows; b; b = b->next)
+        if (b->pending_n > 0)
+            return true; /* read by another window's pump, kept for this one: the pump has it */
+    int64_t limit = timeout_ns, service = wait_service_ns();
+    if (service >= 0 && (limit < 0 || service < limit))
+        limit = service;
+    const int64_t start = (int64_t)time_nanos();
+    for (;;)
+    {
+        if (g.io_lost)
+            return true;
+        if (!g.windows)
+        {
+            /* No window is left (the program destroyed them all and sleeps until a wake, or a new window): the events that
+               are still coming (the ones for the windows that went) have no pump to be read by and would end every wait at
+               once, for ever. What is for the clipboard is served, the rest is dropped. */
+            while (XPending(g.dpy) > 0)
+            {
+                XEvent ev;
+                XNextEvent(g.dpy, &ev);
+                if (!XFilterEvent(&ev, None))
+                    handle_global_event(&ev);
+            }
+        }
+        else if (XPending(g.dpy) > 0)
+            return true;
+        int64_t left = -1;
+        if (limit >= 0)
+        {
+            left = limit - ((int64_t)time_nanos() - start);
+            if (left < 0)
+                left = 0;
+        }
+        struct pollfd fds[2 + WAIT_PADS];
+        int pad_fds[WAIT_PADS], n = 0;
+        fds[n++] = (struct pollfd){.fd = ConnectionNumber(g.dpy), .events = POLLIN};
+        int wake = core_wake_fd();
+        if (wake >= 0)
+            fds[n++] = (struct pollfd){.fd = wake, .events = POLLIN};
+        const int first_pad = n;
+        int pads = gamepad_wait_fds(pad_fds, WAIT_PADS);
+        for (int i = 0; i < pads; i++)
+            fds[n++] = (struct pollfd){.fd = pad_fds[i], .events = POLLIN};
+        int r = poll(fds, (nfds_t)n, (int)core_wait_ms(left));
+        if (r < 0)
+            return false; /* EINTR: a signal; the caller may have a flag to look at */
+        if (r > 0)
+        {
+            if (fds[0].revents & POLLNVAL)
+                return true; /* the connection's descriptor is gone: let the pump find out */
+            bool woke = wake >= 0 && (fds[1].revents & POLLIN) && core_wake_take();
+            bool pad = false;
+            for (int i = first_pad; i < n; i++)
+                pad |= fds[i].revents != 0;
+            if (woke || pad)
+                return true;
+        }
+        if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
+            return g.io_lost || (g.windows && XPending(g.dpy) > 0);
+    }
+}
+
+void backend_wake(void)
+{
+}
+
+/* After a call another thread made on the connection (the GL worker's, which waits for replies): the replies it waited for
+   may have been preceded by events, which Xlib then keeps in its queue while the socket is quiet. The main thread's wait
+   would not see them. A wake does. */
+static void wake_if_queued(void)
+{
+    if (XEventsQueued(g.dpy, QueuedAlready) > 0)
+        platform_wake();
+}
+
+/* The events that belong to no window: the keyboard mapping changing, and the clipboard (the selection is owned through
+   the helper window, which no pump of a window has to be told about). True when the event was one of them. */
+static inline bool handle_global_event(XEvent *ev)
+{
+    if (ev->type == MappingNotify)
+    {
+        if (ev->xmapping.request != MappingPointer)
+        {
+            XRefreshKeyboardMapping(&ev->xmapping); /* Xlib's own copy, which XLookupKeysym reads */
+            keymap_changed();
+        }
+        return true;
+    }
+    if (g.xkb_event_base && ev->type == g.xkb_event_base)
+    {
+        int t = ((const XkbAnyEvent *)ev)->xkb_type;
+        if (t == XkbMapNotify || t == XkbNewKeyboardNotify)
+            keymap_changed();
+        else if (t == XkbStateNotify)
+        {
+            const XkbStateNotifyEvent *sn = (const XkbStateNotifyEvent *)ev;
+            g.lock_state = lock_flags(sn->locked_mods);
+            g.lock_valid = true;
+        }
+        return true;
+    }
+    if (ev->type == SelectionRequest)
+    {
+        answer_selection_request(&ev->xselectionrequest);
+        return true;
+    }
+    if (ev->type == SelectionClear)
+    {
+        /* another program took the selection (CLIPBOARD and PRIMARY alike), or we gave it up: what we offered is not wanted
+           any more. The message may be old: the server sent it when the ownership changed, and it waits in the queue until
+           this pump, by when the selection can be ours again (clipboard_set after clipboard_set(NULL), or after another
+           program took it); the server says who owns it now, and what was just set stays. */
+        ClipSel *lost = clip_sel_of(ev->xselectionclear.selection);
+        if (lost && XGetSelectionOwner(g.dpy, lost->atom) != g.helper)
+            clip_free_entries(lost);
+        return true;
+    }
+    return ev->type == PropertyNotify && clip_incr_property_event(&ev->xproperty);
+}
+
 void backend_pump_events(BackendWindow *b, Core *core)
 {
     b->core = core;
+    if (g.io_lost)
+    {
+        /* nothing more will come, nothing can be sent: the window is closed, once, through the usual close path */
+        if (!b->lost_told)
+        {
+            b->lost_told = true;
+            Event e = {.type = EVENT_WINDOW_CLOSE};
+            push(b, &e);
+        }
+        return;
+    }
     if (b->xdnd_converting && xdnd_now_ms() - b->xdnd_since > XDND_CONVERT_MS)
         xdnd_finish_drop(b, None); /* the source never sent the files: answer it as refused */
 
@@ -2293,12 +2710,16 @@ void backend_pump_events(BackendWindow *b, Core *core)
     b->pending_n = 0;
     flush_preedit(b);
 
-    while (XPending(g.dpy))
+    /* XQLength is a read of the queue; XPending (a call that takes the display lock and flushes the output buffer, some
+       160 instructions) is only needed when the queue has run dry, to read what the server sent meanwhile. */
+    while (XQLength(g.dpy) || XPending(g.dpy))
     {
         XEvent ev;
         XNextEvent(g.dpy, &ev);
         if (ev.type == KeyPress || ev.type == KeyRelease)
         {
+            if (g.im_lazy)
+                im_open_local();
             XEvent orig = ev;
             if (XFilterEvent(&ev, None))
             {
@@ -2308,18 +2729,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
         else if (XFilterEvent(&ev, None))
             continue;
-        if (ev.type == SelectionRequest)
-        {
-            answer_selection_request(&ev.xselectionrequest);
-            continue;
-        }
-        if (ev.type == SelectionClear)
-        {
-            if (ev.xselectionclear.selection == g.CLIPBOARD)
-                clip_free_entries();
-            continue;
-        }
-        if (ev.type == PropertyNotify && clip_incr_property_event(&ev.xproperty))
+        if (handle_global_event(&ev))
             continue;
 #if ZEN_HAVE_XI2
         if (ev.type == GenericEvent && g.xi_touch && ev.xcookie.extension == g.xi_opcode)
@@ -2401,9 +2811,11 @@ bool backend_vulkan_create_surface(BackendWindow *b, void *instance, const void 
     return vulkan_call_create_surface(instance, "vkCreateXlibSurfaceKHR", &info, allocator, out_surface);
 }
 
+/* GLX goes to the server through xcb, not through Xlib's checks for a connection that is gone: on a lost connection it
+   makes up an X error, and the default X error handler ends the process. None of these is called then. */
 void backend_swap(BackendWindow *b)
 {
-    if (b->render == RENDER_GL)
+    if (b->render == RENDER_GL && !g.io_lost)
         glXSwapBuffers(g.dpy, b->win);
 }
 
@@ -2413,19 +2825,21 @@ void backend_swap(BackendWindow *b)
 
 void backend_make_current(BackendWindow *b)
 {
-    if (b->render == RENDER_GL)
+    if (b->render == RENDER_GL && !g.io_lost)
         glXMakeCurrent(g.dpy, b->win, b->glc);
 }
 
 void backend_make_current_on(BackendWindow *target, BackendWindow *context)
 {
-    if (target->render == RENDER_GL && context->render == RENDER_GL)
+    if (target->render == RENDER_GL && context->render == RENDER_GL && !g.io_lost)
         glXMakeCurrent(g.dpy, target->win, context->glc);
 }
 
 void backend_set_vsync(BackendWindow *b, bool on)
 {
     int interval = on ? 1 : 0;
+    if (b->render != RENDER_GL || g.io_lost)
+        return;
     if (g.swap_ext)
         g.swap_ext(g.dpy, b->win, interval);
     else if (g.swap_mesa)
@@ -2466,14 +2880,16 @@ BackendGLWorker *backend_gl_worker_create(BackendWindow *b)
         backend_gl_worker_destroy(worker);
         return NULL;
     }
+    wake_if_queued();
     return worker;
 }
 
 bool backend_gl_worker_make_current(BackendGLWorker *worker, bool current)
 {
-    if (!current)
-        return glXMakeContextCurrent(g.dpy, None, None, NULL) == True;
-    return glXMakeContextCurrent(g.dpy, worker->pbuffer, worker->pbuffer, worker->glc) == True;
+    Bool ok = current ? glXMakeContextCurrent(g.dpy, worker->pbuffer, worker->pbuffer, worker->glc)
+                      : glXMakeContextCurrent(g.dpy, None, None, NULL);
+    wake_if_queued();
+    return ok == True;
 }
 
 void backend_gl_worker_destroy(BackendGLWorker *worker)
@@ -2482,6 +2898,7 @@ void backend_gl_worker_destroy(BackendGLWorker *worker)
         glXDestroyPbuffer(g.dpy, worker->pbuffer);
     if (worker->glc)
         glXDestroyContext(g.dpy, worker->glc);
+    wake_if_queued();
     free(worker);
 }
 
@@ -2542,6 +2959,9 @@ void backend_get_size(BackendWindow *b, int *w, int *h)
 
 void backend_set_size(BackendWindow *b, int w, int h)
 {
+    /* The server refuses 0 and anything over 16 bits with BadValue, and Xlib's answer to an error is to end the program. */
+    w = w < 1 ? 1 : w > X_SIZE_MAX ? X_SIZE_MAX : w;
+    h = h < 1 ? 1 : h > X_SIZE_MAX ? X_SIZE_MAX : h;
     XResizeWindow(g.dpy, b->win, (unsigned)w, (unsigned)h);
 }
 
@@ -2940,10 +3360,11 @@ void backend_set_live_callback(BackendWindow *b, PlatformWindow *w, FrameCallbac
 
 int backend_lock_state(void)
 {
-    XkbStateRec st;
-    if (XkbGetState(g.dpy, XkbUseCoreKbd, &st) != Success)
+    if (!g.dpy || g.io_lost)
         return 0;
-    return ((st.locked_mods & LockMask) ? KEYMOD_CAPS_LOCK : 0) | ((st.locked_mods & Mod2Mask) ? KEYMOD_NUM_LOCK : 0);
+    if (!g.lock_valid)
+        lock_refresh(); /* the first call, or after a keymap change: one round trip, then it is memory */
+    return g.lock_valid ? g.lock_state : 0;
 }
 
 bool backend_mouse_capture(BackendWindow *b, bool on)
@@ -2969,24 +3390,25 @@ bool backend_mouse_capture(BackendWindow *b, bool on)
 }
 
 /* ========================================================================== */
-/*  clipboard (CLIPBOARD selection)                                           */
+/*  clipboard (CLIPBOARD) and primary selection (PRIMARY)                     */
 /* ========================================================================== */
 
-bool backend_clipboard_set(const ClipboardItem *items, int count)
+/* Take the selection and offer `items` (copies). count 0 gives the selection up. */
+static bool clip_set(ClipSel *s, const ClipboardItem *items, int count)
 {
-    clip_free_entries();
+    clip_free_entries(s);
     if (count > CLIP_MAX)
         count = CLIP_MAX;
     for (int i = 0; i < count; i++)
     {
-        ClipEntry *e = &g.clip[g.clip_count];
+        ClipEntry *e = &s->clip[s->clip_count];
         e->mime = strdup(items[i].mime);
         e->data = malloc(items[i].size + 1);
         if (!e->mime || !e->data)
         {
             free(e->mime);
             free(e->data);
-            clip_free_entries();
+            clip_free_entries(s);
             return error_set("out of memory");
         }
         e->atom = XInternAtom(g.dpy, items[i].mime, False);
@@ -2994,37 +3416,37 @@ bool backend_clipboard_set(const ClipboardItem *items, int count)
             memcpy(e->data, items[i].data, items[i].size);
         e->data[items[i].size] = 0;
         e->size = items[i].size;
-        g.clip_count++;
+        s->clip_count++;
     }
 
-    if (g.clip_count == 0)
+    if (s->clip_count == 0)
     {
-        if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == g.helper)
-            XSetSelectionOwner(g.dpy, g.CLIPBOARD, None, CurrentTime);
+        if (XGetSelectionOwner(g.dpy, s->atom) == g.helper)
+            XSetSelectionOwner(g.dpy, s->atom, None, CurrentTime);
         XFlush(g.dpy);
         return true;
     }
-    XSetSelectionOwner(g.dpy, g.CLIPBOARD, g.helper, CurrentTime);
+    XSetSelectionOwner(g.dpy, s->atom, g.helper, CurrentTime);
     XFlush(g.dpy);
-    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) != g.helper)
+    if (XGetSelectionOwner(g.dpy, s->atom) != g.helper)
     {
-        clip_free_entries();
-        return error_set("cannot take ownership of the clipboard");
+        clip_free_entries(s);
+        return error_set("cannot take ownership of the %s", s == &g.sel[SEL_PRIMARY] ? "primary selection" : "clipboard");
     }
     return true;
 }
 
-static const ClipEntry *clip_find_mime(const char *mime)
+static const ClipEntry *clip_find_mime(const ClipSel *s, const char *mime)
 {
-    for (int i = 0; i < g.clip_count; i++)
-        if (clip_mime_equal(g.clip[i].mime, mime))
-            return &g.clip[i];
+    for (int i = 0; i < s->clip_count; i++)
+        if (clip_mime_equal(s->clip[i].mime, mime))
+            return &s->clip[i];
     return NULL;
 }
 
-static bool clip_owned(void)
+static bool clip_owned(const ClipSel *s)
 {
-    return XGetSelectionOwner(g.dpy, g.CLIPBOARD) == g.helper;
+    return XGetSelectionOwner(g.dpy, s->atom) == g.helper;
 }
 
 /* Wait for an event of `type` on the helper window, up to the timeout. */
@@ -3094,7 +3516,7 @@ static long clip_now_ms(void)
    does not answer at all (hung, or gone without letting go of the selection) costs
    one timeout; for CLIP_DEAD_MS after that it fails at once, so a paste, a "has
    data" per format and a refresh on focus do not each freeze the loop for a second. */
-static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
+static bool clip_fetch(ClipSel *s, Atom target, Atom *type, uint8_t **out, size_t *size)
 {
     XEvent ev;
     while (XCheckTypedWindowEvent(g.dpy, g.helper, SelectionNotify, &ev))
@@ -3103,16 +3525,16 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
     while (XCheckTypedWindowEvent(g.dpy, g.helper, PropertyNotify, &ev))
     {
     }
-    Window owner = XGetSelectionOwner(g.dpy, g.CLIPBOARD);
-    if (owner != None && owner == g.clip_dead_owner && clip_now_ms() < g.clip_dead_until)
+    Window owner = XGetSelectionOwner(g.dpy, s->atom);
+    if (owner != None && owner == s->dead_owner && clip_now_ms() < s->dead_until)
         return false;
     XDeleteProperty(g.dpy, g.helper, g.XSEL_DATA);
-    XConvertSelection(g.dpy, g.CLIPBOARD, target, g.XSEL_DATA, g.helper, CurrentTime);
+    XConvertSelection(g.dpy, s->atom, target, g.XSEL_DATA, g.helper, CurrentTime);
 
     if (!clip_wait_event(SelectionNotify, &ev))
     {
-        g.clip_dead_owner = owner;
-        g.clip_dead_until = clip_now_ms() + CLIP_DEAD_MS;
+        s->dead_owner = owner;
+        s->dead_until = clip_now_ms() + CLIP_DEAD_MS;
         return false;
     }
     if (ev.xselection.property == None)
@@ -3134,8 +3556,16 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
     size_t have = 0;
     if (!all)
         return false;
+    const long incr_start = clip_now_ms();
     for (;;)
     {
+        if (clip_now_ms() - incr_start > CLIP_INCR_BASE_MS + (long)(have / 256))
+        {
+            free(all);
+            s->dead_owner = owner; /* it is not asked again for a while: not every paste costs the whole wait */
+            s->dead_until = clip_now_ms() + CLIP_DEAD_MS;
+            return false;
+        }
         do
         {
             if (!clip_wait_event(PropertyNotify, &ev))
@@ -3198,17 +3628,17 @@ static bool clip_fetch(Atom target, Atom *type, uint8_t **out, size_t *size)
     return true;
 }
 
-bool backend_clipboard_has(const char *mime)
+static bool clip_has(ClipSel *s, const char *mime)
 {
-    if (clip_owned())
-        return clip_find_mime(mime) != NULL;
-    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == None)
+    if (clip_owned(s))
+        return clip_find_mime(s, mime) != NULL;
+    if (XGetSelectionOwner(g.dpy, s->atom) == None)
         return false;
 
     Atom type;
     uint8_t *list = NULL;
     size_t size = 0;
-    if (!clip_fetch(g.TARGETS, &type, &list, &size))
+    if (!clip_fetch(s, g.TARGETS, &type, &list, &size))
         return false;
     bool text = clip_mime_equal(mime, CLIPBOARD_TEXT);
     Atom want = text ? None : XInternAtom(g.dpy, mime, False);
@@ -3223,11 +3653,11 @@ bool backend_clipboard_has(const char *mime)
     return found;
 }
 
-void *backend_clipboard_get(const char *mime, size_t *size)
+static void *clip_get(ClipSel *s, const char *mime, size_t *size)
 {
-    if (clip_owned())
+    if (clip_owned(s))
     {
-        const ClipEntry *e = clip_find_mime(mime);
+        const ClipEntry *e = clip_find_mime(s, mime);
         if (!e)
             return NULL;
         uint8_t *copy = malloc(e->size + 1);
@@ -3237,7 +3667,7 @@ void *backend_clipboard_get(const char *mime, size_t *size)
         *size = e->size;
         return copy;
     }
-    if (XGetSelectionOwner(g.dpy, g.CLIPBOARD) == None)
+    if (XGetSelectionOwner(g.dpy, s->atom) == None)
         return NULL;
 
     Atom type;
@@ -3245,12 +3675,12 @@ void *backend_clipboard_get(const char *mime, size_t *size)
     size_t n = 0;
     if (clip_mime_equal(mime, CLIPBOARD_TEXT))
     {
-        if (!clip_fetch(g.UTF8_STRING, &type, &data, &n))
+        if (!clip_fetch(s, g.UTF8_STRING, &type, &data, &n))
         {
             /* Latin-1 only owners: STRING, widened to UTF-8. */
             uint8_t *latin = NULL;
             size_t ln = 0;
-            if (!clip_fetch(XA_STRING, &type, &latin, &ln))
+            if (!clip_fetch(s, XA_STRING, &type, &latin, &ln))
                 return NULL;
             data = malloc(ln * 2 + 1);
             if (!data)
@@ -3272,10 +3702,44 @@ void *backend_clipboard_get(const char *mime, size_t *size)
             free(latin);
         }
     }
-    else if (!clip_fetch(XInternAtom(g.dpy, mime, False), &type, &data, &n))
+    else if (!clip_fetch(s, XInternAtom(g.dpy, mime, False), &type, &data, &n))
         return NULL;
     *size = n;
     return data;
+}
+
+bool backend_clipboard_set(const ClipboardItem *items, int count)
+{
+    return clip_set(&g.sel[SEL_CLIPBOARD], items, count);
+}
+
+bool backend_clipboard_has(const char *mime)
+{
+    return clip_has(&g.sel[SEL_CLIPBOARD], mime);
+}
+
+void *backend_clipboard_get(const char *mime, size_t *size)
+{
+    return clip_get(&g.sel[SEL_CLIPBOARD], mime, size);
+}
+
+/* PRIMARY: the text that is selected, pasted by the middle button. Always there on X11. */
+bool backend_primary_supported(void)
+{
+    return true;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    if (!utf8 || len == 0)
+        return clip_set(&g.sel[SEL_PRIMARY], NULL, 0);
+    const ClipboardItem item = {CLIPBOARD_TEXT, utf8, len};
+    return clip_set(&g.sel[SEL_PRIMARY], &item, 1);
+}
+
+void *backend_primary_get(size_t *size)
+{
+    return clip_get(&g.sel[SEL_PRIMARY], CLIPBOARD_TEXT, size);
 }
 
 /* ========================================================================== */

@@ -44,6 +44,10 @@ typedef struct
     Event frame_events[FRAME_EVENT_MAX];
     int fe_count;
     int fe_cursor;
+    /* Once the list is full: an upper bound on the events in it that can be pushed out (pointer, size and position
+       ones), valid when fe_movers_ok. A full list with none left drops what comes without looking through it. */
+    int fe_movers;
+    bool fe_movers_ok;
 
     /* Active points kept dense in [0, touch_count); matched by OS id. */
     struct
@@ -61,6 +65,7 @@ typedef struct
     /* which gamepads and joysticks this window has been told about (and which device
        generation), so connect and disconnect events are per window */
     unsigned pad_seen[GAMEPAD_MAX], joy_seen[JOYSTICK_MAX]; /* 0 = not seen, else generation */
+    unsigned dev_epoch; /* gamepad_internal_epoch when the slots were last compared with those */
     /* Real touches on a desktop (XInput2, WM_TOUCH). The first finger also drives the
        mouse, and while any finger is down the system's own mouse events for it are
        dropped, so a touch is never delivered twice. */
@@ -90,12 +95,37 @@ struct PlatformWindow
     bool should_close;
     void *user;
     WindowConfig cfg;
+    PlatformWindow *next; /* the list of live windows (core.c) */
+    bool dead;            /* window_destroy was called from application code: freed when that returns */
 };
+
+/* Whether platform_init has succeeded and platform_shutdown has not run since. */
+bool core_platform_ready(void);
+
+/* The scope that defers window_destroy (core.c, g_depth): a backend whose frames are called by the system and not by a loop
+   inside app_run (the browser: the loop never returns to app_run) wraps each frame in these, and a window the application
+   destroyed in it is freed at core_scope_leave. core_window_count is for tests: the windows still allocated. */
+void core_scope_enter(void);
+void core_scope_leave(void);
+int core_window_count(void);
 
 /* Backend -> core. core_push_event fills the state arrays and the per-frame
    event list in one call; core_push_char only touches the text queue. */
 void core_push_event(Core *core, const Event *ev);
 void core_push_char(Core *core, uint32_t codepoint);
+
+/* ---- platform_wake: what a backend's wait sleeps on besides the OS's own events (core.c) ----
+   One object for the life of the process, made at the first use and never closed (a thread may call platform_wake while the
+   main one shuts the platform down; a descriptor closed and reused under it would be written to). A wake stays pending until a
+   wait takes it, so one posted before the wait returns at once, and many posted before it count as one. */
+#if defined(_WIN32)
+void *core_wake_handle(void); /* an auto-reset event: a wait that ends on it has taken the wake. NULL if there is none */
+#else
+int core_wake_fd(void); /* readable while a wake is pending; -1 if the system gave none (and on the web, which has no wait) */
+#endif
+bool core_wake_take(void);            /* takes the pending wake, if any: true if there was one */
+int64_t core_wait_ms(int64_t ns);     /* a timeout in nanoseconds (negative: none) as a poll / Win32 one in ms, rounded up; -1 / INFINITE-like: none */
+bool core_wake_only_wait(int64_t ns); /* the wait of a platform that is not up: sleeps on the wake alone; true if woken */
 
 /* A finger from a touch screen on a desktop backend (the system gave no mouse
    events for it, or gave ones that must not be counted twice). Raises EVENT_TOUCH

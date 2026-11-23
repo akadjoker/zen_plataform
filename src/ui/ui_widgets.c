@@ -33,10 +33,11 @@ bool ui_mouse_in(const UiContext *ui, UiRect r)
            ui->in.mouse_x < r.x + r.w && ui->in.mouse_y < r.y + r.h;
 }
 
-/* True when the mouse is over r and not swallowed by a higher popup. */
+/* True when the mouse is over r, over the part of the screen that is drawn (what a group, a window or a popup clips to: a widget
+   the panel hides does not take the mouse), and not swallowed by a higher popup. */
 bool ui_hovered(UiContext *ui, UiRect r)
 {
-    if (!ui_mouse_in(ui, r))
+    if (!ui_mouse_in(ui, r) || !ui_mouse_in(ui, ui->clip))
         return false;
     if (ui->overlay_active && ui->layer < ui->overlay_layer &&
         ui_mouse_in(ui, ui->overlay_rect))
@@ -497,6 +498,16 @@ bool zui_selectable(UiContext *ui, const char *label, bool selected)
     return false;
 }
 
+/* The part of `inner` that is inside `outer` (an empty rectangle, width and height 0, when they do not meet). */
+static UiRect ui_rect_within(UiRect outer, UiRect inner)
+{
+    int x0 = inner.x > outer.x ? inner.x : outer.x;
+    int y0 = inner.y > outer.y ? inner.y : outer.y;
+    int x1 = inner.x + inner.w < outer.x + outer.w ? inner.x + inner.w : outer.x + outer.w;
+    int y1 = inner.y + inner.h < outer.y + outer.h ? inner.y + inner.h : outer.y + outer.h;
+    return zui_rect(x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
+}
+
 int zui_listbox(UiContext *ui, const char *id_str, const char **items, int count, int *selected, int rows)
 {
     UiRect r = ui_layout_next(ui);
@@ -527,7 +538,10 @@ int zui_listbox(UiContext *ui, const char *id_str, const char **items, int count
     if (content_h > total_h)
         clip.w -= ui->style.scrollbar;
     UiRect saved_clip = ui->clip;
-    ui->clip = clip;
+    /* what the rows draw stays inside the panel the list is in too (a group, a window): a list taller than the room it was
+       given (a cell of one row and a hint of several) used to spill its last lines out under the panel */
+    UiRect visible = ui_rect_within(saved_clip, clip);
+    ui->clip = visible;
 
     int start_y = r.y - (int)*scroll;
     int changed_idx = -1;
@@ -540,7 +554,7 @@ int zui_listbox(UiContext *ui, const char *id_str, const char **items, int count
         UiRect row_rect = zui_rect(r.x, iy, clip.w, row_h);
         int id = ui_next_id(ui);
         /* clamp the hover test to the visible viewport and respect popups above */
-        bool hovered = ui_mouse_in(ui, clip) && ui_hovered(ui, row_rect);
+        bool hovered = ui_mouse_in(ui, visible) && ui_hovered(ui, row_rect);
         if (hovered) ui->hot = id;
         if (hovered && ui->in.mouse_pressed) ui->active = id;
 
@@ -1343,8 +1357,11 @@ bool zui_group_begin(UiContext *ui, const char *id_str, UiRect bounds, int flags
                               bounds.y + ui->style.pad_y - (int)*scroll_y,
                               inner_w,
                               bounds.h - 2 * ui->style.pad_y);
+    UiRect outer_clip = ui->clip; /* the panel this group is in (the window, when it is not in another group) */
     ui_push_container(ui, content, ui->layer);
-    ui->clip = bounds; /* push saved the outer clip; group_end restores it */
+    /* push saved the outer clip; group_end restores it. The group's own clip is cut by it: a group bigger than the room the panel
+       it is in gives it must not draw (or take the mouse) outside that panel */
+    ui->clip = ui_rect_within(outer_clip, bounds);
 
     if (ui->group_sp < 4)
     {
@@ -1446,11 +1463,12 @@ bool zui_window_begin(UiContext *ui, const char *title, UiRect *bounds)
                               bounds->y + th + ui->style.pad_y,
                               bounds->w - 2 * ui->style.pad_x,
                               bounds->h - th - 2 * ui->style.pad_y);
+    UiRect outer_clip = ui->clip; /* the panel this window is in (the whole screen, for a window of its own) */
     ui_push_container(ui, content, wl);
     /* Clip content to the window body so widgets (e.g. an expanded tree) can't
-       spill outside. The push saved the previous clip; window_end restores it. */
-    ui->clip = zui_rect(bounds->x, bounds->y + th,
-                        bounds->w, bounds->h - th);
+       spill outside, and to the panel the window is in. The push saved the previous clip; window_end restores it. */
+    ui->clip = ui_rect_within(outer_clip, zui_rect(bounds->x, bounds->y + th,
+                                                   bounds->w, bounds->h - th));
     return true;
 }
 

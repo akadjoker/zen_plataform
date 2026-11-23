@@ -15,6 +15,35 @@ headers before it, see "Preparation for the one run"), and 4 of the 35 tests fai
 fixes made after that run (commits 52506da, 1525b9e, 6568c9b, badd284 and the CI changes) were not run, and the next run may be the only one:
 where a check gave too little information it now prints the values.**
 
+## The first run on a real Mac (2026-11-23)
+
+A borrowed MacBook Pro (Apple M3 Pro, macOS 15.7.3, command line tools with Apple clang 17, CMake 4.4.5), one built-in display of
+1512x982 points at scale 2 (3024x1964 pixels), wide gamut (Display P3), 120 Hz: the first display of scale 2 and the first that is not
+sRGB. `tools/mac_ci.sh` was run by hand, with a person at the trackpad for the parts no test can make (the pointer, the keys, files
+dragged from the Finder). Everything compiled with no error and no warning of our own. What it showed, and what was done:
+
+| what | seen | done |
+|---|---|---|
+| colours of an OpenGL window | a window with no colour space is taken to be in the display's: 0,122,204 drawn was 0,124,210 on the screen (brought back to sRGB); `test_gl_cocoa` "presented FF30A050" within 48 of a channel, `test_ui_cocoa` gl 15385 pixels | the window's colour space is sRGB (commit 417329f): within 0, 0 pixels |
+| the first row of the content | AppKit draws the title bar's separator over it: a white frame had its first pixel row D9D9D9 and the second F2F2F2 (macOS 15, scale 2) | `setTitlebarSeparatorStyle:None` (417329f): `test_ui_cocoa` 0 pixels differ for both renderers |
+| an image copied by another program | a pasteboard with TIFF or JPEG and no PNG (what Preview and Safari put there) read as "the clipboard has no image" | `image/png` stands for the other image types too, converted when read (417329f) |
+| Vulkan with no loader | `vulkan_create_surface` failed with an empty error | "the Vulkan loader was not found" (417329f): `test_vulkan_cocoa` 10/10 |
+| files dragged from the Finder by hand | the paths were right (accents, an emoji, a folder with a space), but `mouse_position()` at `EVENT_WINDOW_DROP` was the pointer's place before the drag in four drops of five | the drag's place is pointer movement (603baf3); seven drops by hand afterwards all inside the window; `test_drop_cocoa` checks it |
+| the merge of `main` | `backend_wait_events`, `backend_wake` and the primary selection did not exist here: no link | the wait is AppKit's own (`nextEventMatchingMask` with `dequeue:NO`), a wake is a write to the core's descriptor that the main run loop watches, there is no primary selection; `test_wait_cocoa` (595 checks: timeouts, idle CPU 0.2 ms in 2 s, 10000 wakes from 4 threads, an event posted from another thread, a signal whose handler wakes) |
+| a child whose program cannot be run | `fprintf(stderr)` in the forked child never came back when a thread of the parent held stderr's lock (glibc gives the child fresh locks, macOS does not): `test_process_hostile.c:153` | `write(2)` in the child |
+
+By hand, with the clipboard of the system (`pbcopy`, `pbpaste`, AppleScript): text both ways (accents, CJK, an emoji; 20 MB with the
+same hash), PNG both ways pixel for pixel (alpha, 1x1, 4000x3000), copied files, HTML and a MIME type of our own. Real input: 558 pointer
+moves, 22 button events, 48 keys and 16 characters, the first click on a window without the focus, a drag that leaves the window.
+
+**Known and left as they are.** Three tests fail on this machine for reasons of the tests: `test_cocoa_window.c:886` and
+`test_gl_cocoa.c:761` are the limit on heap blocks (`blocks_in_use` grows about 60 a round on this macOS while the bytes in use do
+not grow past the limit, and the leaks tool finds 0 leaks in `test_cocoa_window`); `test_pixels_cocoa` compares with the window
+server's picture within 2 of a channel and pure green comes back FF03FF00 on a P3 display (through the view 0 pixels differ). A program
+that copies several files and ends at once leaves only the first on the pasteboard (alive for 3 s, all of them stay). Text that is not
+UTF-8 leaves the clipboard empty. **Not tried**: the trackpad's scroll and gestures by hand (no event came in the minute the window
+was open), a real Vulkan surface (no MoltenVK), a change of scale or a second display, gamepads (the stub).
+
 ## State of each phase
 
 | Phase | What | State |

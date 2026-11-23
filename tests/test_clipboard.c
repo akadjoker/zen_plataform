@@ -233,14 +233,67 @@ static void test_images(void)
     clipboard_set(NULL);
 }
 
+/* The primary selection over the fake backend's second buffer: independent of the clipboard, same ownership of the strings. */
+static void test_primary(void)
+{
+    CHECK(clipboard_has_primary_support());
+    CHECK(strcmp(clipboard_get_primary(), "") == 0); /* never NULL */
+    CHECK(clipboard_set_primary("selected \xC3\xA7"));
+    CHECK(strcmp(clipboard_get_primary(), "selected \xC3\xA7") == 0);
+
+    /* two places for text: setting one leaves the other, and clearing one leaves the other */
+    clipboard_set("copied");
+    CHECK(strcmp(clipboard_get(), "copied") == 0);
+    CHECK(strcmp(clipboard_get_primary(), "selected \xC3\xA7") == 0);
+    CHECK(clipboard_set_primary("selected again"));
+    CHECK(strcmp(clipboard_get(), "copied") == 0);
+    clipboard_set(NULL);
+    CHECK(strcmp(clipboard_get_primary(), "selected again") == 0);
+    clipboard_set("copied");
+    CHECK(clipboard_set_primary(NULL));
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+    CHECK(strcmp(clipboard_get(), "copied") == 0);
+
+    /* "" gives it up as NULL does; the platform keeps its own copy of what it is given */
+    char mine[] = "mutable";
+    CHECK(clipboard_set_primary(mine));
+    mine[0] = 'X';
+    CHECK(strcmp(clipboard_get_primary(), "mutable") == 0);
+    CHECK(clipboard_set_primary(""));
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+
+    /* the string of clipboard_get stays valid after a clipboard_get_primary (and the other way): a buffer each */
+    clipboard_set("clip");
+    clipboard_set_primary("prim");
+    const char *c = clipboard_get();
+    const char *p = clipboard_get_primary();
+    CHECK(strcmp(c, "clip") == 0 && strcmp(p, "prim") == 0 && c != p);
+
+    /* a large text and an embedded NUL's worth of binary-looking bytes survive */
+    size_t big = 3u << 20;
+    char *text = malloc(big + 1);
+    memset(text, 'x', big);
+    text[big] = '\0';
+    CHECK(clipboard_set_primary(text));
+    CHECK(strlen(clipboard_get_primary()) == big);
+    free(text);
+    clipboard_set_primary(NULL);
+    clipboard_set(NULL);
+}
+
 int main(void)
 {
+    /* before platform_init there is nothing: no support, nothing set, nothing read, never NULL */
+    CHECK(!clipboard_has_primary_support());
+    CHECK(!clipboard_set_primary("x"));
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
     if (!platform_init())
         return 1;
     test_text();
     test_items();
     test_bad_arguments();
     test_images();
+    test_primary();
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

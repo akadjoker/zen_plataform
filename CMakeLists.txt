@@ -168,6 +168,16 @@ if(PLATFORM_SANITIZE)
     endif()
 endif()
 target_link_libraries(platform PUBLIC platform_sanitize)
+# Every function and every datum in a section of its own, and the linker drops the sections nothing reaches: the shared
+# library goes from 356 kB to 192 kB (what a minimal window program pulls out of the static one, from 130 kB to 78 kB) with the
+# same exported API. PUBLIC so that a program linking the static library is linked with --gc-sections too (without it the
+# sections stay). Not for Apple (-dead_strip) or MSVC (/OPT:REF is the release default).
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
+    target_compile_options(platform PRIVATE -ffunction-sections -fdata-sections)
+    if(NOT EMSCRIPTEN)
+        target_link_options(platform PUBLIC -Wl,--gc-sections)
+    endif()
+endif()
 if(MSVC)
     target_compile_options(platform PUBLIC /utf-8)
     target_compile_definitions(platform PUBLIC _CRT_SECURE_NO_WARNINGS)
@@ -197,6 +207,9 @@ elseif(PLATFORM_BACKEND_WAYLAND AND NOT PLATFORM_USE_FAKE)
     if(WAYLAND_XDG_DECORATION)
         target_compile_definitions(platform PRIVATE ZEN_WL_XDG_DECORATION)
     endif()
+    if(WAYLAND_PRIMARY)
+        target_compile_definitions(platform PRIVATE ZEN_WL_PRIMARY)
+    endif()
     target_link_libraries(platform PUBLIC PkgConfig::WAYLAND ${CMAKE_DL_LIBS} Threads::Threads)
 elseif(PLATFORM_BACKEND_COCOA AND NOT PLATFORM_USE_FAKE)
     # Cocoa is AppKit and Foundation; CoreGraphics has the display and session calls (the monitors, the window server check,
@@ -220,6 +233,11 @@ if(PLATFORM_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT ANDROID)
 endif()
 
 option(PLATFORM_BUILD_EXAMPLES "Build examples" ON)
+# The programs that compare the core with GLFW and SDL2 (bench/compare); they need those libraries, so off by default.
+option(PLATFORM_BUILD_COMPARE "Build the GLFW / SDL2 comparison programs" OFF)
+if(PLATFORM_BUILD_COMPARE AND UNIX AND NOT APPLE AND NOT PLATFORM_USE_FAKE)
+    add_subdirectory(bench/compare)
+endif()
 if(PLATFORM_BUILD_EXAMPLES AND NOT PLATFORM_USE_FAKE AND (EMSCRIPTEN OR ANDROID OR UNIX OR WIN32))
     add_subdirectory(examples)
 endif()

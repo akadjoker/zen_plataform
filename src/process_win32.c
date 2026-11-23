@@ -11,6 +11,7 @@ typedef struct
 {
     DWORD pid;
     HANDLE process;
+    HANDLE job; /* NULL when the job could not be made or joined */
     bool running;
     int exit_code;
     unsigned long order; /* when it was started: the oldest finished record makes room first */
@@ -19,6 +20,16 @@ typedef struct
 static ProcessInfo g_processes[PROCESS_CAP];
 static unsigned long g_started;
 static SRWLOCK g_lock = SRWLOCK_INIT;
+
+/* An id as a process id (a DWORD), or false for one that is no process id: 0, negative, or wider than 32 bits (a number
+   with a bit set above them would otherwise be read as the process id that is left of it). */
+static bool id_to_pid(int64_t id, DWORD *pid)
+{
+    if (id <= 0 || id > 0xFFFFFFFFLL)
+        return false;
+    *pid = (DWORD)id;
+    return true;
+}
 
 static ProcessInfo *find_process(DWORD pid)
 {
@@ -30,6 +41,9 @@ static ProcessInfo *find_process(DWORD pid)
     return NULL;
 }
 
+/* A slot nobody used, else the finished record that is the oldest (still intact: release_slot takes it over once the
+   new process exists, so a spawn that fails does not make the table forget a record). NULL when all PROCESS_CAP
+   children still run. */
 static ProcessInfo *free_slot(void)
 {
     for (int i = 0; i < PROCESS_CAP; i++)
@@ -43,13 +57,16 @@ static ProcessInfo *free_slot(void)
         if (!g_processes[i].running && (!oldest || g_processes[i].order < oldest->order))
             oldest = &g_processes[i];
     }
-    if (oldest)
-    {
-        if (oldest->process)
-            CloseHandle(oldest->process);
-        memset(oldest, 0, sizeof *oldest);
-    }
     return oldest;
+}
+
+static void release_slot(ProcessInfo *slot)
+{
+    if (slot->process)
+        CloseHandle(slot->process);
+    if (slot->job)
+        CloseHandle(slot->job);
+    memset(slot, 0, sizeof *slot);
 }
 
 static bool needs_quotes(const char *text)
@@ -178,7 +195,7 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
     ZeroMemory(&si, sizeof si);
     si.cb = sizeof si;
     ZeroMemory(&pi, sizeof pi);
-    DWORD flags = NORMAL_PRIORITY_CLASS | (open_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW);
+    DWORD flags = NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED | (open_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW);
 
     AcquireSRWLockExclusive(&g_lock);
     ProcessInfo *slot = free_slot();
@@ -199,7 +216,34 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
         free(command);
         return 0;
     }
+    /* Suspended until it is in the job, so nothing it starts can escape. Without a job (the process is in one that
+       does not nest, as before Windows 8, or the job could not be made) the process still runs, and process_kill_tree
+       ends only the process. */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (job && !AssignProcessToJobObject(job, pi.hProcess))
+    {
+        CloseHandle(job);
+        job = NULL;
+    }
+    if (ResumeThread(pi.hThread) == (DWORD)-1)
+    {
+        /* it would stay suspended for ever, and read as running */
+        DWORD err = GetLastError();
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (job)
+            CloseHandle(job);
+        SetLastError(err);
+        ReleaseSRWLockExclusive(&g_lock);
+        win32_error("Could not start child process", command);
+        free(wide);
+        free(command);
+        return 0;
+    }
     CloseHandle(pi.hThread);
+    release_slot(slot);
+    slot->job = job;
     slot->pid = pi.dwProcessId;
     slot->process = pi.hProcess;
     slot->running = true;
@@ -213,10 +257,11 @@ int64_t process_spawn(const char *path, const char *const *args, int argc, bool 
 
 bool process_is_running(int64_t id)
 {
-    if (id <= 0)
+    DWORD pid;
+    if (!id_to_pid(id, &pid))
         return false;
     AcquireSRWLockExclusive(&g_lock);
-    ProcessInfo *info = find_process((DWORD)id);
+    ProcessInfo *info = find_process(pid);
     bool running = info && refresh(info);
     ReleaseSRWLockExclusive(&g_lock);
     return running;
@@ -224,10 +269,11 @@ bool process_is_running(int64_t id)
 
 int process_exit_code(int64_t id)
 {
-    if (id <= 0)
+    DWORD pid;
+    if (!id_to_pid(id, &pid))
         return -1;
     AcquireSRWLockExclusive(&g_lock);
-    ProcessInfo *info = find_process((DWORD)id);
+    ProcessInfo *info = find_process(pid);
     int result = -1;
     if (info && !refresh(info))
         result = info->running ? -1 : info->exit_code;
@@ -235,24 +281,34 @@ int process_exit_code(int64_t id)
     return result;
 }
 
+/* The process has been told to end (or has ended by itself just now): waits for it and records the code it really ended
+   with, which is the one TerminateProcess gave it or the one it ended with first. */
+static void wait_and_record(ProcessInfo *info)
+{
+    WaitForSingleObject(info->process, INFINITE);
+    refresh(info);
+}
+
 bool process_kill(int64_t id)
 {
-    if (id <= 0)
+    DWORD pid;
+    if (!id_to_pid(id, &pid))
         return error_set("invalid process id");
     bool ok = false;
+    DWORD err = 0;
     AcquireSRWLockExclusive(&g_lock);
-    ProcessInfo *info = find_process((DWORD)id);
+    ProcessInfo *info = find_process(pid);
     if (info)
     {
         if (refresh(info)) /* still running: one that already ended cannot be terminated, and needs no killing */
         {
             ok = TerminateProcess(info->process, 0) != 0;
+            err = GetLastError();
+            /* it may have ended by itself between refresh and TerminateProcess, which then fails with access denied */
+            if (!ok && WaitForSingleObject(info->process, 0) == WAIT_OBJECT_0)
+                ok = true;
             if (ok)
-            {
-                WaitForSingleObject(info->process, INFINITE);
-                info->running = false;
-                info->exit_code = 0;
-            }
+                wait_and_record(info);
         }
         else
         {
@@ -268,6 +324,48 @@ bool process_kill(int64_t id)
     }
     ReleaseSRWLockExclusive(&g_lock);
     if (!ok)
+    {
+        SetLastError(err);
         return win32_error("cannot kill process", NULL);
+    }
+    return true;
+}
+
+bool process_kill_tree(int64_t id)
+{
+    DWORD pid;
+    if (!id_to_pid(id, &pid))
+        return error_set("invalid process id");
+    bool ok = false;
+    DWORD err = 0;
+    AcquireSRWLockExclusive(&g_lock);
+    ProcessInfo *info = find_process(pid);
+    if (!info)
+    {
+        ReleaseSRWLockExclusive(&g_lock);
+        return error_set("process %lld was not started by process_spawn", (long long)id);
+    }
+    /* Everything in the job, the process included: this reaches the members a finished leader left, too. A job that is
+       empty or was never made leaves nothing to do here. */
+    bool job_ended = info->job && TerminateJobObject(info->job, 0) != 0;
+    if (refresh(info)) /* the leader still runs: ending a job is not instant, and a missing job ends nobody */
+    {
+        ok = job_ended || TerminateProcess(info->process, 0) != 0;
+        err = GetLastError();
+        if (!ok && WaitForSingleObject(info->process, 0) == WAIT_OBJECT_0)
+            ok = true; /* it ended by itself in the meantime */
+        if (ok)
+            wait_and_record(info);
+    }
+    else
+    {
+        ok = true; /* it is finished, and keeps the code it ended with */
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!ok)
+    {
+        SetLastError(err);
+        return win32_error("cannot kill process", NULL);
+    }
     return true;
 }

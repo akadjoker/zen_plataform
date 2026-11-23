@@ -60,7 +60,7 @@ Objective-C over AppKit (`src/backend_cocoa.m`, the only file of the library tha
 window, OpenGL, the pixel surface, the keyboard and mouse, text input, the clipboard, drops, dialogs, window modes and looks, Vulkan and
 the toolkit's frames (`test_cocoa_window`, `test_gl_cocoa`, `test_gl_worker_cocoa`, `test_pixels_cocoa`, `test_input_cocoa`,
 `test_text_cocoa`, `test_clipboard_cocoa`, `test_drop_cocoa`, `test_dialog_cocoa`, `test_window_cocoa`, `test_vulkan_cocoa`,
-`test_ui_cocoa`) need a graphical session and skip without one; `test_cocoa_names` (the library's names against the headers of Cocoa, Carbon,
+`test_ui_cocoa`, `test_wait_cocoa`) need a graphical session and skip without one; `test_cocoa_names` (the library's names against the headers of Cocoa, Carbon,
 OpenGL, QuartzCore and Mach, with a thread, a mutex and a condition variable) needs none and is built by the fake backend on macOS too;
 `test_ui_cocoa` writes the toolkit's software and GL frames as PNG files into `test-images/` of the build folder. There is no Mac among the machines it is developed
 on, so `.github/workflows/mac.yml` builds and tests it on a GitHub macOS runner. It runs only when it is started by hand (the Actions tab or `gh workflow run mac.yml --ref <branch>`; a push makes no run). `docs/MAC-PORT.md` says where the port stands (the
@@ -87,6 +87,7 @@ version in `release_version`; the release is created on the chosen commit.
 | `-DCMAKE_OSX_DEPLOYMENT_TARGET=` | 11.0 | Oldest macOS the build runs on (macOS only) |
 | `-DPLATFORM_LINUX_BACKEND=wayland` | x11 | Window system on Linux: `x11` or `wayland` |
 | `-DPLATFORM_SANITIZE=ON` | OFF | Enable ASan + UBSan |
+| `-DPLATFORM_BUILD_COMPARE=ON` | OFF | Build the GLFW / SDL2 comparison programs of `bench/compare` (X11 only; they need those libraries); see `docs/COMPARACAO_CORE.md` and `tools/bench_compare.sh` |
 
 ### Platforms
 
@@ -120,6 +121,50 @@ app_run(w, frame_callback, user_data);
 window_destroy(w);
 platform_shutdown();
 ```
+
+### Sleeping until something happens (0 % CPU when idle)
+
+`app_run` and a loop of `window_begin_frame` calls run flat out: a window with no vsync spins a core. A program that draws
+only when something changed sleeps in `platform_wait_events` between frames:
+
+```c
+while (!window_should_close(w))
+{
+    platform_wait_events(-1);   // sleeps until an event, a platform_wake, a gamepad, or the timeout (seconds; -1: none)
+    window_begin_frame(w);      // the events the wait woke for are here: the wait takes nothing
+    handle_input(w);
+    if (dirty) draw(w);
+}
+
+// a worker thread, a timer or a signal handler finishes something: set the data, then
+platform_wake();                // any thread, any time; a wake that finds no wait ends the next one at once, once
+```
+
+`platform_wait_events` returns true when something is waiting for the next frame (events, a wake, a gamepad) and false when
+the time ran out, a signal interrupted it (EINTR: look at your flag) or the backend has a deadline of its own that only
+`window_begin_frame` serves (a key held, the repeats the Wayland backend makes itself, a drop whose source never answers):
+call `window_begin_frame` after every return and loop, that is the whole contract. A wait with events already pending
+returns at once. The click that was released in the frame of its press and the tap that turns into a hold count as pending
+(the state that only the next `window_begin_frame` changes). Gamepads wake the wait on Linux (their descriptors are watched);
+on Windows XInput cannot be waited on, so a plugged pad limits the sleep to 8 ms. On the web it returns at once (the browser
+calls the frame); on Android it sleeps in the looper. `platform_wake` costs one `write(2)` and is safe in a signal handler
+once the platform is up.
+
+For programs that draw on demand `app_run_events` is `app_run` with this built in: the frame callback runs when events
+arrived, `platform_wake` was called, the frame asked for another with `app_request_frame()` (an animation), or the time given
+to `app_request_frame_at(time_seconds() + 0.5)` (a blinking caret) has come; the first frame always runs.
+
+```c
+static void frame(PlatformWindow *w, void *user)
+{
+    draw(w, user);
+    if (animating(user))        app_request_frame();                              // again, now
+    else if (caret_blinks(user)) app_request_frame_at(time_seconds() + 0.5);       // or at a deadline
+}
+app_run_events(w, frame, &state);   // idle: the process sleeps in poll(2)
+```
+
+Measured against GLFW and SDL2 in `docs/COMPARACAO_CORE.md` (instructions per wake and wait cycle, wake latency, idle CPU).
 
 ### Input state (polled)
 
@@ -346,6 +391,7 @@ src/
   clipboard.c             clipboard API (text, MIME data, PNG images)
   png.c                   minimal PNG encoder and decoder for the clipboard
   clipboard_mem.h         in-process clipboard store for fake, Android and web
+  web_key_rules.h         what the web backend decides about a key: clipboard command, text or not (no Emscripten in it)
   vulkan.c                Vulkan loader and surface creation (no Vulkan SDK needed)
   vulkan_internal.h       the few Vulkan declarations the backends use
   draw2d.c                software rasterizer over Framebuffer
@@ -368,8 +414,10 @@ tests/
   test_library.c          shared library loading
   test_thread.c           threads, mutex, condition, timeout, detach
   test_dialog.c           zenity/kdialog/xdg-open arguments and answers, with stand-in programs
-  test_clipboard.c        clipboard API and PNG round trip (fake backend)
-  test_clipboard_x11.c    real X11 selections against forked clients, INCR included
+  test_clipboard.c        clipboard API, the primary selection and the PNG round trip (fake backend)
+  test_clipboard_x11.c    real X11 selections (CLIPBOARD and PRIMARY) against forked clients, INCR included
+  test_web_keys.c         the web backend's key rules (clipboard keys, text with Ctrl or Meta) on the host
+  tests/web/              the web clipboard and text keys in a real headless Chrome (run_clip_web.js, shell.html)
   test_multiwindow_x11.c  two windows on one X connection: events reach their own window
   test_vulkan.c           RENDER_VULKAN window, handles, a real VkSurfaceKHR (skips without a driver)
   test_draw2d.c           rasterizer tests (nearest + bilinear blit)
@@ -377,6 +425,7 @@ tests/
   test_image.c            BMP read/write round-trip
 examples/
   hello_x11.c             minimal GL example
+  clipboard_web.c         the web backend's paste, copy and cut and its text keys, in a page (tests/web/run_clip_web.js)
   raytrace.c              interactive software ray tracer
   ddemo.c                 DOOM-style ray caster
   galaxy.c                80s space shooter

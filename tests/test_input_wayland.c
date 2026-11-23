@@ -12,10 +12,14 @@
 #include "pointer-constraints-unstable-v1-server-protocol.h"
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #endif
+#ifdef ZEN_WL_PRIMARY
+#include "primary-selection-unstable-v1-server-protocol.h"
+#endif
 
 #include <wayland-server.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -77,6 +81,32 @@ static struct
     struct wl_resource *cursor_surface;
 
     uint32_t enter_serial;
+#ifdef ZEN_WL_PRIMARY
+    /* the primary selection: the compositor is the other program. p_text is what it offers as the selection of "another
+       client"; what the client offers comes back by the pipe p_fetch asks for. p_lock guards what the test thread reads. */
+    bool p_advertise;
+    struct wl_resource *p_device, *p_source;
+    int p_sets, p_clears, p_receives;
+    uint32_t p_serial;
+    int p_mode; /* 0: serve p_text, 1: take the pipe and never write or close it */
+    int p_held_fd;
+    char *p_text;
+    size_t p_text_len;
+    char p_mime[64];
+    pthread_mutex_t p_lock;
+    char *p_got;
+    size_t p_got_len;
+    bool p_got_done;
+    int p_got_fd;
+    struct wl_event_source *p_got_src;
+    char p_sent_mime[64];
+#endif
+
+    /* a drag of files over the window: the client's data device, the offer in hand, and what the client asked of it */
+    struct wl_resource *data_device, *offer;
+    int dnd_accepts, dnd_receives, dnd_finished, dnd_offers_gone;
+    char dnd_accepted[64]; /* the MIME type of the last accept, "" for a refusal */
+    uint32_t dnd_actions, dnd_preferred;
 #ifdef ZEN_WL_POINTER_LOCK
     struct wl_resource *locked, *relative;
     int lock_requests;
@@ -107,6 +137,14 @@ enum
     CMD_LOCK,
     CMD_UNLOCK,
     CMD_REL_MOTION,
+    CMD_PRIMARY_OFFER, /* another program takes the selection: a = mode (0 serve, 1 stall) */
+    CMD_PRIMARY_DROP,  /* the selection has no owner */
+    CMD_PRIMARY_FETCH, /* read what the client offers, through a pipe */
+    CMD_PRIMARY_RELEASE, /* close the pipe a stalling offer held */
+    CMD_DND_ENTER, /* a, b: where; c: the offer has text/uri-list */
+    CMD_DND_MOVE,
+    CMD_DND_DROP,
+    CMD_DND_LEAVE,
     CMD_QUIT
 };
 
@@ -449,6 +487,95 @@ static void seat_bind(struct wl_client *c, void *data, uint32_t version, uint32_
     wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
 }
 
+/* ---- wl_data_device_manager: enough for files dragged into the window ---- */
+
+/* One line of comment, two local files (one escaped) and a web link: only the two local ones are paths. */
+static const char DND_URIS[] = "# a comment\r\n"
+                               "file:///tmp/zen%20drop/a%C3%A1.txt\r\n"
+                               "http://example.com/x\r\n"
+                               "file://localhost/tmp/b.png\r\n";
+
+static void offer_accept(struct wl_client *c, struct wl_resource *r, uint32_t serial, const char *mime)
+{
+    (void)c;
+    (void)r;
+    (void)serial;
+    S.dnd_accepts++;
+    snprintf(S.dnd_accepted, sizeof S.dnd_accepted, "%s", mime ? mime : "");
+}
+
+/* The source's side of a receive: the list goes into the pipe and the pipe is closed. */
+static void offer_receive(struct wl_client *c, struct wl_resource *r, const char *mime, int32_t fd)
+{
+    (void)c;
+    (void)r;
+    S.dnd_receives++;
+    if (mime && strcmp(mime, "text/uri-list") == 0 && write(fd, DND_URIS, strlen(DND_URIS)) != (ssize_t)strlen(DND_URIS))
+        g_fail++;
+    close(fd);
+}
+
+static void offer_finish(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    (void)r;
+    S.dnd_finished++;
+}
+
+static void offer_set_actions(struct wl_client *c, struct wl_resource *r, uint32_t actions, uint32_t preferred)
+{
+    (void)c;
+    (void)r;
+    S.dnd_actions = actions;
+    S.dnd_preferred = preferred;
+}
+
+static const struct wl_data_offer_interface offer_impl = {
+    .accept = offer_accept,
+    .receive = offer_receive,
+    .destroy = release_req,
+    .finish = offer_finish,
+    .set_actions = offer_set_actions,
+};
+
+static void offer_gone(struct wl_resource *r)
+{
+    if (S.offer == r)
+        S.offer = NULL;
+    S.dnd_offers_gone++;
+}
+
+static void data_device_gone(struct wl_resource *r)
+{
+    if (S.data_device == r)
+        S.data_device = NULL;
+}
+
+static const struct wl_data_device_interface data_device_impl = {
+    .start_drag = (void *)unused_request,
+    .set_selection = (void *)unused_request,
+    .release = release_req,
+};
+
+static void data_manager_get_device(struct wl_client *c, struct wl_resource *r, uint32_t id, struct wl_resource *seat)
+{
+    (void)seat;
+    S.data_device = wl_resource_create(c, &wl_data_device_interface, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(S.data_device, &data_device_impl, NULL, data_device_gone);
+}
+
+static const struct wl_data_device_manager_interface data_manager_impl = {
+    .create_data_source = (void *)unused_request,
+    .get_data_device = data_manager_get_device,
+};
+
+static void data_manager_bind(struct wl_client *c, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(c, &wl_data_device_manager_interface, (int)version, id);
+    wl_resource_set_implementation(r, &data_manager_impl, NULL, NULL);
+}
+
 #ifdef ZEN_WL_POINTER_LOCK
 static void locked_destroy(struct wl_client *c, struct wl_resource *r)
 {
@@ -524,6 +651,180 @@ static void manager_bind(struct wl_client *c, void *data, uint32_t version, uint
     (void)data;
     struct wl_resource *r = wl_resource_create(c, &zwp_relative_pointer_manager_v1_interface, (int)version, id);
     wl_resource_set_implementation(r, &manager_impl, NULL, NULL);
+}
+#endif
+
+#ifdef ZEN_WL_PRIMARY
+/* ---- the primary selection ---- */
+
+static void psource_offer_req(struct wl_client *c, struct wl_resource *r, const char *mime)
+{
+    (void)c, (void)r, (void)mime;
+}
+
+static void psource_gone(struct wl_resource *r)
+{
+    if (S.p_source == r)
+        S.p_source = NULL;
+}
+
+static const struct zwp_primary_selection_source_v1_interface psource_impl = {.offer = psource_offer_req,
+                                                                              .destroy = release_req};
+
+static void pdevice_set_selection(struct wl_client *c, struct wl_resource *r, struct wl_resource *source, uint32_t serial)
+{
+    (void)c, (void)r;
+    S.p_serial = serial;
+    if (S.p_source && S.p_source != source)
+        zwp_primary_selection_source_v1_send_cancelled(S.p_source);
+    S.p_source = source;
+    if (source)
+        S.p_sets++;
+    else
+        S.p_clears++;
+}
+
+static void pdevice_gone(struct wl_resource *r)
+{
+    if (S.p_device == r)
+        S.p_device = NULL;
+}
+
+static const struct zwp_primary_selection_device_v1_interface pdevice_impl = {.set_selection = pdevice_set_selection,
+                                                                              .destroy = release_req};
+
+static void poffer_receive(struct wl_client *c, struct wl_resource *r, const char *mime, int32_t fd)
+{
+    (void)c, (void)r;
+    snprintf(S.p_mime, sizeof S.p_mime, "%s", mime);
+    S.p_receives++;
+    if (S.p_mode == 1)
+    {
+        if (S.p_held_fd >= 0)
+            close(S.p_held_fd);
+        S.p_held_fd = fd; /* nothing is written and it stays open: a source that does not answer */
+        return;
+    }
+    const char *p = S.p_text;
+    size_t n = S.p_text_len;
+    while (n)
+    {
+        ssize_t w = write(fd, p, n);
+        if (w <= 0)
+            break; /* the client reads in its own thread: a pipe that is full is not a deadlock */
+        p += w;
+        n -= (size_t)w;
+    }
+    close(fd);
+}
+
+static const struct zwp_primary_selection_offer_v1_interface poffer_impl = {.receive = poffer_receive,
+                                                                            .destroy = release_req};
+
+static void pmanager_create_source(struct wl_client *c, struct wl_resource *r, uint32_t id)
+{
+    struct wl_resource *src = wl_resource_create(c, &zwp_primary_selection_source_v1_interface, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(src, &psource_impl, NULL, psource_gone);
+}
+
+static void pmanager_get_device(struct wl_client *c, struct wl_resource *r, uint32_t id, struct wl_resource *seat)
+{
+    (void)seat;
+    S.p_device = wl_resource_create(c, &zwp_primary_selection_device_v1_interface, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(S.p_device, &pdevice_impl, NULL, pdevice_gone);
+}
+
+static const struct zwp_primary_selection_device_manager_v1_interface pmanager_impl = {
+    .create_source = pmanager_create_source,
+    .get_device = pmanager_get_device,
+    .destroy = release_req,
+};
+
+static void pmanager_bind(struct wl_client *c, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(c, &zwp_primary_selection_device_manager_v1_interface, (int)version, id);
+    wl_resource_set_implementation(r, &pmanager_impl, NULL, NULL);
+}
+
+/* what the client's source writes into the pipe, read without blocking the compositor */
+static int pfetch_readable(int fd, uint32_t mask, void *data)
+{
+    (void)mask, (void)data;
+    char buf[65536];
+    for (;;)
+    {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n > 0)
+        {
+            pthread_mutex_lock(&S.p_lock);
+            S.p_got = realloc(S.p_got, S.p_got_len + (size_t)n + 1);
+            memcpy(S.p_got + S.p_got_len, buf, (size_t)n);
+            S.p_got_len += (size_t)n;
+            S.p_got[S.p_got_len] = '\0';
+            pthread_mutex_unlock(&S.p_lock);
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EINTR))
+            return 0;
+        break;
+    }
+    wl_event_source_remove(S.p_got_src);
+    S.p_got_src = NULL;
+    close(fd);
+    pthread_mutex_lock(&S.p_lock);
+    S.p_got_done = true;
+    pthread_mutex_unlock(&S.p_lock);
+    return 0;
+}
+
+static void primary_cmd(const Cmd *c)
+{
+    switch (c->type)
+    {
+    case CMD_PRIMARY_OFFER:
+        if (S.p_device)
+        {
+            if (S.p_source) /* the new owner takes it from the client's source */
+            {
+                zwp_primary_selection_source_v1_send_cancelled(S.p_source);
+                S.p_source = NULL;
+            }
+            S.p_mode = c->a;
+            struct wl_client *client = wl_resource_get_client(S.p_device);
+            struct wl_resource *offer = wl_resource_create(client, &zwp_primary_selection_offer_v1_interface,
+                                                           wl_resource_get_version(S.p_device), 0);
+            wl_resource_set_implementation(offer, &poffer_impl, NULL, NULL);
+            zwp_primary_selection_device_v1_send_data_offer(S.p_device, offer);
+            zwp_primary_selection_offer_v1_send_offer(offer, "image/png"); /* a type that is not text, listed first */
+            zwp_primary_selection_offer_v1_send_offer(offer, "STRING");
+            zwp_primary_selection_offer_v1_send_offer(offer, "text/plain;charset=utf-8");
+            zwp_primary_selection_device_v1_send_selection(S.p_device, offer);
+        }
+        break;
+    case CMD_PRIMARY_DROP:
+        if (S.p_device)
+            zwp_primary_selection_device_v1_send_selection(S.p_device, NULL);
+        break;
+    case CMD_PRIMARY_FETCH:
+        if (S.p_source)
+        {
+            int fds[2];
+            if (pipe2(fds, O_NONBLOCK | O_CLOEXEC) != 0)
+                break;
+            S.p_got_fd = fds[0];
+            S.p_got_src = wl_event_loop_add_fd(wl_display_get_event_loop(S.display), fds[0], WL_EVENT_READABLE, pfetch_readable, NULL);
+            snprintf(S.p_sent_mime, sizeof S.p_sent_mime, "%s", c->a == 1 ? "STRING" : c->a == 2 ? "image/png" : "text/plain;charset=utf-8");
+            zwp_primary_selection_source_v1_send_send(S.p_source, S.p_sent_mime, fds[1]);
+            close(fds[1]);
+        }
+        break;
+    case CMD_PRIMARY_RELEASE:
+        if (S.p_held_fd >= 0)
+            close(S.p_held_fd);
+        S.p_held_fd = -1;
+        break;
+    }
 }
 #endif
 
@@ -613,6 +914,43 @@ static void run_cmd(const Cmd *c)
                                                          wl_fixed_from_int(c->b));
         break;
 #endif
+#ifdef ZEN_WL_PRIMARY
+    case CMD_PRIMARY_OFFER:
+    case CMD_PRIMARY_DROP:
+    case CMD_PRIMARY_FETCH:
+    case CMD_PRIMARY_RELEASE:
+        primary_cmd(c);
+        break;
+#endif
+    case CMD_DND_ENTER:
+        if (S.data_device && S.surface)
+        {
+            /* A new offer with its types, then the drag enters the window with it. */
+            S.offer = wl_resource_create(wl_resource_get_client(S.data_device), &wl_data_offer_interface,
+                                         wl_resource_get_version(S.data_device), 0);
+            wl_resource_set_implementation(S.offer, &offer_impl, NULL, offer_gone);
+            wl_data_device_send_data_offer(S.data_device, S.offer);
+            wl_data_offer_send_offer(S.offer, "text/plain");
+            if (c->c)
+                wl_data_offer_send_offer(S.offer, "text/uri-list");
+            if (wl_resource_get_version(S.offer) >= WL_DATA_OFFER_SOURCE_ACTIONS_SINCE_VERSION)
+                wl_data_offer_send_source_actions(S.offer, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+            wl_data_device_send_enter(S.data_device, ++S.serial, S.surface->res, wl_fixed_from_int(c->a), wl_fixed_from_int(c->b),
+                                      S.offer);
+        }
+        break;
+    case CMD_DND_MOVE:
+        if (S.data_device)
+            wl_data_device_send_motion(S.data_device, 0, wl_fixed_from_int(c->a), wl_fixed_from_int(c->b));
+        break;
+    case CMD_DND_DROP:
+        if (S.data_device)
+            wl_data_device_send_drop(S.data_device);
+        break;
+    case CMD_DND_LEAVE:
+        if (S.data_device)
+            wl_data_device_send_leave(S.data_device);
+        break;
     case CMD_QUIT:
         wl_display_terminate(S.display);
         break;
@@ -675,9 +1013,19 @@ static bool start_compositor(void)
     wl_global_create(S.display, &wl_compositor_interface, 4, NULL, compositor_bind);
     wl_global_create(S.display, &xdg_wm_base_interface, 5, NULL, wm_base_bind);
     wl_global_create(S.display, &wl_seat_interface, 8, NULL, seat_bind);
+    wl_global_create(S.display, &wl_data_device_manager_interface, 3, NULL, data_manager_bind);
 #ifdef ZEN_WL_POINTER_LOCK
     wl_global_create(S.display, &zwp_pointer_constraints_v1_interface, 1, NULL, constraints_bind);
     wl_global_create(S.display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, manager_bind);
+#endif
+#ifdef ZEN_WL_PRIMARY
+    S.p_held_fd = -1;
+    pthread_mutex_init(&S.p_lock, NULL);
+    if (S.p_advertise)
+        wl_global_create(S.display, &zwp_primary_selection_device_manager_v1_interface, 1, NULL, pmanager_bind);
+#endif
+#ifdef ZEN_WL_EXTRA_GLOBALS
+    ZEN_WL_EXTRA_GLOBALS(S.display); /* bench/compare/wl_compositor.c adds a wl_output, which SDL2 needs */
 #endif
 
     if (pipe2(S.cmd, O_NONBLOCK | O_CLOEXEC) != 0)
@@ -702,6 +1050,8 @@ typedef struct
     bool down, repeat, flag;
     uint32_t cp;
     float wx, wy;
+    int n;              /* EVENT_WINDOW_DROP: how many paths, and the first two */
+    char paths[2][96];
 } Rec;
 
 #define REC_MAX 2048
@@ -748,6 +1098,12 @@ static void frame(PlatformWindow *w)
             break;
         case EVENT_WINDOW_ENTER:
             r->flag = e.data.enter.entered;
+            break;
+        case EVENT_WINDOW_DROP:
+            r->n = e.data.drop.count;
+            for (int i = 0; i < r->n && i < 2; i++)
+                snprintf(r->paths[i], sizeof r->paths[i], "%s", e.data.drop.paths[i]);
+            mouse_position(w, &r->x, &r->y); /* as an application reads it when the event comes */
             break;
         case EVENT_WINDOW_FOCUS:
             r->flag = e.data.focus.gained;
@@ -846,7 +1202,8 @@ static int count_char(uint32_t cp)
 enum
 {
     EV_ESC = 1, EV_1 = 2, EV_APOSTROPHE = 40, EV_A = 30, EV_Q = 16, EV_LCTRL = 29, EV_LSHIFT = 42,
-    EV_CAPS = 58, EV_F1 = 59, EV_LEFT = 105, EV_KP5 = 76, EV_NUMLOCK = 69
+    EV_CAPS = 58, EV_F1 = 59, EV_LEFT = 105, EV_KP5 = 76, EV_NUMLOCK = 69, EV_MINUS = 12, EV_COMMA = 51, EV_SPACE = 57,
+    EV_5 = 6, EV_RALT = 100, EV_LSUPER = 125, EV_INSERT = 110, EV_DELETE = 111
 };
 
 static void tap(int code)
@@ -927,6 +1284,93 @@ static void test_keys(PlatformWindow *w)
     cmd(CMD_KEY, EV_A, 0, 0, 0);
     CHECK(settle(w));
     CHECK(!key_down(w, KEY_A));
+}
+
+/* The rule (platform.h): a key pressed while Ctrl or Super is held is a shortcut and types nothing. xkbcommon turns
+   Ctrl+letter into a control character, which is dropped, but gives Ctrl+1, Ctrl+minus and Ctrl+comma as the plain
+   character and Ctrl+space as a space. */
+static void test_chord_text(PlatformWindow *w)
+{
+    static const struct
+    {
+        int hold, key;
+        int mod;
+    } chords[] = {{EV_LCTRL, EV_A, KEYMOD_CTRL},     {EV_LCTRL, EV_1, KEYMOD_CTRL},     {EV_LCTRL, EV_MINUS, KEYMOD_CTRL},
+                  {EV_LCTRL, EV_COMMA, KEYMOD_CTRL}, {EV_LCTRL, EV_SPACE, KEYMOD_CTRL}, {EV_LSUPER, EV_A, KEYMOD_SUPER},
+                  {EV_LSUPER, EV_1, KEYMOD_SUPER}};
+    cmd(CMD_LAYOUT, 0, 0, 0, 0);
+    cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+    CHECK(settle(w));
+    for (size_t i = 0; i < sizeof chords / sizeof chords[0]; i++)
+    {
+        reset();
+        cmd(CMD_KEY, chords[i].hold, 1, 0, 0);
+        tap(chords[i].key);
+        cmd(CMD_KEY, chords[i].hold, 0, 0, 0);
+        CHECK(settle(w));
+        if (count(EVENT_CHAR))
+            printf("  chord %zu typed U+%04X\n", i, (unsigned)nth(EVENT_CHAR, 0)->cp);
+        CHECK(count(EVENT_CHAR) == 0);
+        const Rec *pressed = NULL;
+        for (int j = 0; j < nrec; j++)
+            if (rec[j].type == EVENT_KEY && rec[j].down && rec[j].scancode == chords[i].key + 8)
+                pressed = &rec[j];
+        CHECK(pressed && (pressed->mods & chords[i].mod));
+    }
+    /* a dead key pending is not finished by a shortcut: Ctrl+a does not become an a-acute, and the a after it is a plain a */
+    if (access("/usr/share/X11/locale/en_US.UTF-8/Compose", R_OK) == 0)
+    {
+        cmd(CMD_LAYOUT, 2, 0, 0, 0);
+        cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+        reset();
+        tap(EV_APOSTROPHE);
+        cmd(CMD_KEY, EV_LCTRL, 1, 0, 0);
+        tap(EV_A);
+        cmd(CMD_KEY, EV_LCTRL, 0, 0, 0);
+        tap(EV_A);
+        CHECK(settle(w));
+        CHECK(count_char(0xE1) == 0);
+        CHECK(count_char('a') == 1);
+        /* AltGr is a level of the key: what the layout puts on it is text (AltGr+5 is the euro sign), with no Ctrl */
+        reset();
+        cmd(CMD_KEY, EV_RALT, 1, 0, 0);
+        tap(EV_5);
+        cmd(CMD_KEY, EV_RALT, 0, 0, 0);
+        CHECK(settle(w));
+        CHECK(count_char(0x20AC) == 1);
+        CHECK(count(EVENT_CHAR) == 1);
+        for (int j = 0; j < nrec; j++)
+            if (rec[j].type == EVENT_KEY)
+                CHECK(!(rec[j].mods & KEYMOD_CTRL));
+    }
+    cmd(CMD_LAYOUT, 0, 0, 0, 0);
+    cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+    CHECK(settle(w));
+}
+
+/* Shift+Insert, Ctrl+Insert and Shift+Delete, the clipboard shortcuts of old: the key and its modifier, no text. */
+static void test_clipboard_shortcuts(PlatformWindow *w)
+{
+    static const struct
+    {
+        int hold, key, want_key, mod;
+    } k[] = {{EV_LSHIFT, EV_INSERT, KEY_INSERT, KEYMOD_SHIFT},
+             {EV_LCTRL, EV_INSERT, KEY_INSERT, KEYMOD_CTRL},
+             {EV_LSHIFT, EV_DELETE, KEY_DELETE, KEYMOD_SHIFT}};
+    for (size_t i = 0; i < 3; i++)
+    {
+        reset();
+        cmd(CMD_KEY, k[i].hold, 1, 0, 0);
+        tap(k[i].key);
+        cmd(CMD_KEY, k[i].hold, 0, 0, 0);
+        CHECK(settle(w));
+        const Rec *pressed = NULL;
+        for (int j = 0; j < nrec; j++)
+            if (rec[j].type == EVENT_KEY && rec[j].down && rec[j].key == k[i].want_key)
+                pressed = &rec[j];
+        CHECK(pressed && pressed->mods == k[i].mod);
+        CHECK(count(EVENT_CHAR) == 0);
+    }
 }
 
 static void test_layout(PlatformWindow *w)
@@ -1276,6 +1720,68 @@ enum
 };
 
 /* What the compositor says about the window is what the application hears. */
+/* Files dragged in from another client: the offer with text/uri-list is accepted as a copy, the pointer's place comes as
+   pointer moves while it is held over the window, and the drop gives the local paths where the pointer was. */
+static void test_drop(PlatformWindow *w)
+{
+    reset();
+    cmd(CMD_PTR_LEAVE, 0, 0, 0, 0); /* a drag takes the pointer away from the window first */
+    CHECK(settle(w));
+    reset();
+    cmd(CMD_DND_ENTER, 40, 30, 1, 0);
+    cmd(CMD_DND_MOVE, 55, 44, 0, 0);
+    CHECK(settle(w));
+    CHECK(S.dnd_accepts == 1 && strcmp(S.dnd_accepted, "text/uri-list") == 0);
+    CHECK(S.dnd_actions == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY && S.dnd_preferred == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+    const Rec *m0 = nth(EVENT_MOUSE_MOVE, 0);
+    const Rec *m1 = nth(EVENT_MOUSE_MOVE, 1);
+    CHECK(m0 && m0->x == 40 && m0->y == 30);
+    CHECK(m1 && m1->x == 55 && m1->y == 44);
+    CHECK(count(EVENT_WINDOW_DROP) == 0);
+    int mx = -1, my = -1;
+    mouse_position(w, &mx, &my);
+    CHECK(mx == 55 && my == 44);
+
+    reset();
+    cmd(CMD_DND_MOVE, 120, 77, 0, 0);
+    cmd(CMD_DND_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+    const Rec *d = nth(EVENT_WINDOW_DROP, 0);
+    CHECK(d && d->n == 2);
+    CHECK(d && strcmp(d->paths[0], "/tmp/zen drop/a\xC3\xA1.txt") == 0);
+    CHECK(d && strcmp(d->paths[1], "/tmp/b.png") == 0);
+    CHECK(d && d->x == 120 && d->y == 77); /* where the files were let go */
+    CHECK(count(EVENT_WINDOW_DROP) == 1);
+    CHECK(S.dnd_receives == 1 && S.dnd_finished == 1);
+    CHECK(S.dnd_offers_gone == 1 && !S.offer); /* the client let go of the offer */
+
+    /* A drag with no files in it (text from an editor) is refused, and its drop gives nothing. */
+    reset();
+    cmd(CMD_DND_ENTER, 10, 10, 0, 0);
+    cmd(CMD_DND_MOVE, 20, 20, 0, 0);
+    CHECK(settle(w));
+    CHECK(S.dnd_accepts == 2 && S.dnd_accepted[0] == 0);
+    CHECK(S.dnd_actions == WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE);
+    CHECK(count(EVENT_MOUSE_MOVE) == 0);
+    cmd(CMD_DND_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(count(EVENT_WINDOW_DROP) == 0 && S.dnd_receives == 1);
+    CHECK(S.dnd_offers_gone == 2);
+
+    /* A drag that leaves without a drop: the offer is let go, and the next drag works. */
+    reset();
+    cmd(CMD_DND_ENTER, 5, 6, 1, 0);
+    cmd(CMD_DND_LEAVE, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(S.dnd_offers_gone == 3 && count(EVENT_WINDOW_DROP) == 0);
+    cmd(CMD_DND_ENTER, 70, 80, 1, 0);
+    cmd(CMD_DND_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(count(EVENT_WINDOW_DROP) == 1 && S.dnd_receives == 2 && S.dnd_offers_gone == 4);
+    const Rec *d2 = nth(EVENT_WINDOW_DROP, 0);
+    CHECK(d2 && d2->x == 70 && d2->y == 80);
+}
+
 static void test_configure(PlatformWindow *w)
 {
     int w0, h0;
@@ -1328,8 +1834,199 @@ static void test_configure(PlatformWindow *w)
     CHECK(window_is_focused(w));
 }
 
-int main(void)
+
+/* ---- the primary selection ---- */
+
+#ifdef ZEN_WL_PRIMARY
+static double now_s(void)
 {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static char *make_text(size_t n)
+{
+    char *p = malloc(n + 1);
+    for (size_t i = 0; i < n; i++)
+        p[i] = (char)('a' + (i * 7 + i / 26) % 26);
+    p[n] = '\0';
+    return p;
+}
+
+/* the compositor asks the client for the text it offers, and the client writes it from its frame */
+static bool fetch_from_client(PlatformWindow *w, int kind, char **got, size_t *len)
+{
+    pthread_mutex_lock(&S.p_lock); /* cleared here, before the compositor is asked: it must not find the last answer */
+    free(S.p_got);
+    S.p_got = NULL;
+    S.p_got_len = 0;
+    S.p_got_done = false;
+    pthread_mutex_unlock(&S.p_lock);
+    cmd(CMD_PRIMARY_FETCH, kind, 0, 0, 0);
+    for (int t = 0; t < 4000; t += 2)
+    {
+        frame(w);
+        pthread_mutex_lock(&S.p_lock);
+        bool done = S.p_got_done;
+        if (done)
+        {
+            *got = S.p_got ? strdup(S.p_got) : strdup("");
+            *len = S.p_got_len;
+        }
+        pthread_mutex_unlock(&S.p_lock);
+        if (done)
+            return true;
+        usleep(2000);
+    }
+    return false;
+}
+
+static void set_foreign_text(const char *text)
+{
+    free(S.p_text);
+    S.p_text = strdup(text);
+    S.p_text_len = strlen(text);
+}
+
+static void test_primary_we_own(PlatformWindow *w)
+{
+    CHECK(clipboard_has_primary_support());
+    cmd(CMD_KB_ENTER, 0, 0, 0, 0);
+    tap(EV_A); /* a key press: the serial that a selection is taken on */
+    CHECK(settle(w));
+
+    CHECK(clipboard_set_primary("ol\xC3\xA1 zen"));
+    CHECK(settle(w));
+    CHECK(S.p_sets == 1 && S.p_serial != 0);
+    CHECK(strcmp(clipboard_get_primary(), "ol\xC3\xA1 zen") == 0); /* ours: no round trip */
+
+    char *got = NULL;
+    size_t len = 0;
+    CHECK(fetch_from_client(w, 0, &got, &len));
+    CHECK(got && len == strlen("ol\xC3\xA1 zen") && strcmp(got, "ol\xC3\xA1 zen") == 0);
+    CHECK(strcmp(S.p_sent_mime, "text/plain;charset=utf-8") == 0);
+    free(got);
+    /* a type we do not offer gets nothing, and the pipe is closed */
+    CHECK(fetch_from_client(w, 2, &got, &len) && len == 0);
+    free(got);
+
+    /* a text larger than a pipe holds: the client writes it as the compositor reads, without blocking for good */
+    size_t big_n = 3u << 20;
+    char *big = make_text(big_n);
+    CHECK(clipboard_set_primary(big));
+    CHECK(settle(w));
+    CHECK(S.p_sets == 2);
+    double t0 = now_s();
+    CHECK(fetch_from_client(w, 0, &got, &len));
+    CHECK(len == big_n && got && memcmp(got, big, big_n) == 0);
+    CHECK(now_s() - t0 < 5.0);
+    free(got);
+    free(big);
+
+    /* given up with NULL and with "": the compositor is told, once, and what is read is empty */
+    CHECK(clipboard_set_primary(NULL));
+    CHECK(settle(w));
+    CHECK(S.p_clears == 1);
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+    CHECK(clipboard_set_primary("again"));
+    CHECK(clipboard_set_primary(""));
+    CHECK(settle(w));
+    CHECK(S.p_clears == 2);
+    CHECK(clipboard_set_primary(NULL)); /* nothing to give up */
+    CHECK(settle(w));
+    CHECK(S.p_clears == 2);
+}
+
+static void test_primary_foreign(PlatformWindow *w)
+{
+    set_foreign_text("from another program \xC3\xA7");
+    cmd(CMD_PRIMARY_OFFER, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(strcmp(clipboard_get_primary(), "from another program \xC3\xA7") == 0);
+    CHECK(strcmp(S.p_mime, "text/plain;charset=utf-8") == 0); /* the best of the types it listed (STRING and image/png too) */
+
+    /* 2 MB: more than a pipe holds, written by the other side while this one reads */
+    size_t big_n = 2u << 20;
+    char *big = make_text(big_n);
+    set_foreign_text(big);
+    cmd(CMD_PRIMARY_OFFER, 0, 0, 0, 0);
+    CHECK(settle(w));
+    double t0 = now_s();
+    const char *got = clipboard_get_primary();
+    CHECK(strlen(got) == big_n && memcmp(got, big, big_n) == 0);
+    CHECK(now_s() - t0 < 5.0);
+    free(big);
+
+    /* the selection passes from us to another program: our source is cancelled, what we read is theirs, and giving up a
+       selection we no longer own leaves theirs alone */
+    CHECK(clipboard_set_primary("mine"));
+    CHECK(settle(w));
+    int clears = S.p_clears;
+    set_foreign_text("theirs");
+    cmd(CMD_PRIMARY_OFFER, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(strcmp(clipboard_get_primary(), "theirs") == 0);
+    CHECK(clipboard_set_primary(NULL));
+    CHECK(settle(w));
+    CHECK(S.p_clears == clears);
+    CHECK(strcmp(clipboard_get_primary(), "theirs") == 0);
+
+    /* and from another program back to us */
+    CHECK(clipboard_set_primary("mine again"));
+    CHECK(settle(w));
+    CHECK(strcmp(clipboard_get_primary(), "mine again") == 0);
+    CHECK(clipboard_set_primary(NULL));
+    CHECK(settle(w));
+
+    /* the owner goes away: nothing to read */
+    set_foreign_text("soon gone");
+    cmd(CMD_PRIMARY_OFFER, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(strcmp(clipboard_get_primary(), "soon gone") == 0);
+    cmd(CMD_PRIMARY_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+
+    /* an owner that takes the pipe and never writes or closes it: a step is one second, and it is not asked again at once */
+    set_foreign_text("never delivered");
+    cmd(CMD_PRIMARY_OFFER, 1, 0, 0, 0);
+    CHECK(settle(w));
+    t0 = now_s();
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+    double first = now_s() - t0;
+    t0 = now_s();
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+    double rest = now_s() - t0;
+    printf("  a primary selection whose owner never writes: gave up after %.2f s, the next two calls took %.3f s\n", first, rest);
+    CHECK(first > 0.5 && first < 4.0);
+    CHECK(rest < 0.2);
+    cmd(CMD_PRIMARY_RELEASE, 0, 0, 0, 0);
+    cmd(CMD_PRIMARY_DROP, 0, 0, 0, 0);
+    CHECK(settle(w));
+}
+#endif
+
+/* The compositor has no primary selection protocol: the calls say there is none, without an error. */
+static void test_primary_unsupported(void)
+{
+    platform_clear_error();
+    CHECK(!clipboard_has_primary_support());
+    CHECK(!clipboard_set_primary("text"));
+    CHECK(!clipboard_set_primary(NULL));
+    CHECK(strcmp(clipboard_get_primary(), "") == 0);
+    CHECK(platform_get_error()[0] == '\0');
+}
+
+int main(int argc, char **argv)
+{
+#ifdef ZEN_WL_PRIMARY
+    S.p_advertise = !(argc > 1 && strcmp(argv[1], "noprimary") == 0);
+#else
+    (void)argc, (void)argv;
+#endif
+    const bool only_unsupported = argc > 1 && strcmp(argv[1], "noprimary") == 0;
     if (!start_compositor())
     {
         printf("SKIP the test compositor did not start\n");
@@ -1354,7 +2051,19 @@ int main(void)
         usleep(2000);
     }
 
+    if (only_unsupported)
+    {
+        test_primary_unsupported();
+        window_destroy(w);
+        platform_shutdown();
+        cmd(CMD_QUIT, 0, 0, 0, 0);
+        pthread_join(S.thread, NULL);
+        printf("%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail ? 1 : 0;
+    }
     test_keys(w);
+    test_chord_text(w);
+    test_clipboard_shortcuts(w);
     test_layout(w);
     test_repeat(w);
     test_compose(w);
@@ -1365,7 +2074,14 @@ int main(void)
 #ifdef ZEN_WL_POINTER_LOCK
     test_captured(w);
 #endif
+    test_drop(w);
     test_configure(w);
+#ifdef ZEN_WL_PRIMARY
+    test_primary_we_own(w);
+    test_primary_foreign(w);
+#else
+    test_primary_unsupported();
+#endif
 
     window_destroy(w);
     platform_shutdown();

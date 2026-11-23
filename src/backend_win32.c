@@ -9,6 +9,7 @@
 #include "backend.h"
 #include "win32_util.h"
 #include "error_internal.h"
+#include "gamepad_internal.h"
 #include "vulkan_internal.h"
 #include "png_internal.h"
 #include "mime_util.h"
@@ -60,6 +61,12 @@
 #define MAX_MONITORS 16
 #define MONITOR_NAME_CAP 64
 #define PENDING_MAX 256
+/* A window is at most 32767 pixels wide or high, and sits within 32767 of the origin: the coordinates and sizes of the window
+   messages (WM_SIZE, WM_MOVE, WM_NCHITTEST) are 16 bits, and the rectangle arithmetic below (AdjustWindowRect, the frame
+   added to a client size, a position plus the frame) overflows a signed int, which is undefined, for the values a program
+   may pass (INT_MAX). The same limit as X11's 65535 for the reason that this is the protocol's. */
+#define WIN_SIZE_MAX 32767
+#define WIN_POS_MAX 32767
 #define LIVE_TIMER_ID 1 /* the timer that keeps the live callback going in a modal loop */
 
 typedef BOOL(WINAPI *PFN_wglChoosePixelFormatARB)(HDC, const int *, const FLOAT *, UINT, int *, UINT *);
@@ -142,6 +149,8 @@ struct BackendWindow
 
     uint32_t *pixels;
     int px_w, px_h;
+    char **drop_paths; /* the last drop's paths, kept until the next drop: poll_event reads them after the message is handled */
+    int drop_n;
 };
 
 /* ========================================================================== */
@@ -151,12 +160,17 @@ struct BackendWindow
 /* Events raised while the window is being driven by an API call (ShowWindow,
    SetWindowPos) arrive outside the pump; they wait here and are delivered at the
    start of the next pump, so begin_frame never discards them. */
+static int g_pending_total; /* items waiting in every window's list: backend_wait_events returns while there are any */
+
 static void push(BackendWindow *b, Event *e)
 {
     if (b->pumping && b->core)
         core_push_event(b->core, e);
     else if (b->pending_count < PENDING_MAX)
+    {
         b->pending[b->pending_count++] = (PendingItem){.ev = *e};
+        g_pending_total++;
+    }
 }
 
 static void push_touch(BackendWindow *b, TouchPhase phase, int id, float x, float y)
@@ -172,6 +186,7 @@ static void push_touch(BackendWindow *b, TouchPhase phase, int id, float x, floa
         it.ev.data.touch.x = x;
         it.ev.data.touch.y = y;
         b->pending[b->pending_count++] = it;
+        g_pending_total++;
     }
 }
 
@@ -180,7 +195,10 @@ static void push_char(BackendWindow *b, uint32_t cp)
     if (b->pumping && b->core)
         core_push_char(b->core, cp);
     else if (b->pending_count < PENDING_MAX)
+    {
         b->pending[b->pending_count++] = (PendingItem){.is_char = true, .cp = cp};
+        g_pending_total++;
+    }
 }
 
 static UINT window_dpi(HWND hwnd)
@@ -188,6 +206,16 @@ static UINT window_dpi(HWND hwnd)
     if (hwnd && g.get_dpi_for_window)
         return g.get_dpi_for_window(hwnd);
     return g.get_dpi_for_system ? g.get_dpi_for_system() : 96;
+}
+
+static int clamp_size(int v)
+{
+    return v < 1 ? 1 : v > WIN_SIZE_MAX ? WIN_SIZE_MAX : v;
+}
+
+static int clamp_pos(int v)
+{
+    return v < -WIN_POS_MAX ? -WIN_POS_MAX : v > WIN_POS_MAX ? WIN_POS_MAX : v;
 }
 
 static void adjust_rect(RECT *rc, DWORD style, DWORD exstyle, HWND hwnd)
@@ -1002,8 +1030,64 @@ static void handle_size(BackendWindow *b, WPARAM wparam, LPARAM lparam)
     apply_clip(b);
 }
 
+/* Whether an HDROP is one DragQueryFileW can be trusted with. WM_DROPFILES can be posted to the window by any process of the
+   same integrity with any handle value, and the clipboard's CF_HDROP is what its owner put there: DragQueryFileW believes the
+   DROPFILES it finds (the offset of the list, its encoding, that the list ends). The handle must be a global memory block of
+   this process large enough for the header, the list must start inside it and end, with the empty name that closes it, before
+   the block does. */
+/* DROPFILES lives in shlobj.h, which is far bigger than this needs: the header of an HDROP. */
+typedef struct
+{
+    DWORD pFiles; /* the offset of the list of names from the start of this structure */
+    POINT pt;
+    BOOL fNC;
+    BOOL fWide; /* the names are UTF-16 */
+} ZenDropFiles;
+
+static bool drop_is_sane(HDROP drop)
+{
+    if (!drop)
+        return false;
+    SIZE_T size = GlobalSize((HGLOBAL)drop);
+    if (size < sizeof(ZenDropFiles))
+        return false;
+    const ZenDropFiles *df = GlobalLock((HGLOBAL)drop);
+    if (!df)
+        return false;
+    bool ok = false;
+    if (df->pFiles >= sizeof *df && df->pFiles < size)
+    {
+        const uint8_t *list = (const uint8_t *)df + df->pFiles;
+        SIZE_T room = size - df->pFiles;
+        if (df->fWide && df->pFiles % sizeof(wchar_t) == 0)
+        {
+            const wchar_t *w = (const wchar_t *)list;
+            for (SIZE_T i = 0; i + 1 < room / sizeof(wchar_t) && !ok; i++)
+                ok = w[i] == 0 && w[i + 1] == 0;
+        }
+        else if (!df->fWide)
+        {
+            for (SIZE_T i = 0; i + 1 < room && !ok; i++)
+                ok = list[i] == 0 && list[i + 1] == 0;
+        }
+    }
+    GlobalUnlock((HGLOBAL)drop);
+    return ok;
+}
+
+static void drop_free(BackendWindow *b)
+{
+    for (int i = 0; i < b->drop_n; i++)
+        free(b->drop_paths[i]);
+    free(b->drop_paths);
+    b->drop_paths = NULL;
+    b->drop_n = 0;
+}
+
 static void handle_drop(BackendWindow *b, HDROP drop)
 {
+    if (!drop_is_sane(drop))
+        return; /* not a drop of ours: not read, and not freed (DragFinish would free whatever the handle is) */
     UINT count = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
     char **paths = count ? calloc(count, sizeof *paths) : NULL;
     UINT stored = 0;
@@ -1028,12 +1112,30 @@ static void handle_drop(BackendWindow *b, HDROP drop)
     }
     if (stored && b->pumping && b->core)
     {
+        /* The core keeps the event for the frame, and poll_event hands out its paths after this function has returned: they
+           live until the next drop or the window's end (as on X11), not until the end of this call. */
+        drop_free(b);
+        b->drop_paths = paths;
+        b->drop_n = (int)stored;
+        paths = NULL;
+        /* Where the files were let go, as a pointer move before the drop (no WM_MOUSEMOVE comes while the shell drags): mouse_position() at the
+           EVENT_WINDOW_DROP is then the place of the drop. Only inside the client area, and not while the pointer is captured. */
+        POINT at;
+        if (DragQueryPoint(drop, &at) && b->cursor_mode != MOUSE_MODE_CAPTURED)
+        {
+            b->virtual_x = at.x;
+            b->virtual_y = at.y;
+            Event move = {.type = EVENT_MOUSE_MOVE};
+            move.data.mouse.x = at.x;
+            move.data.mouse.y = at.y;
+            push(b, &move);
+        }
         Event e = {.type = EVENT_WINDOW_DROP};
-        e.data.drop.count = (int)stored;
-        e.data.drop.paths = (const char **)paths;
+        e.data.drop.count = b->drop_n;
+        e.data.drop.paths = (const char **)b->drop_paths;
         push(b, &e);
     }
-    for (UINT i = 0; i < stored; i++)
+    for (UINT i = 0; paths && i < stored; i++)
         free(paths[i]);
     free(paths);
     DragFinish(drop);
@@ -1054,6 +1156,12 @@ static void handle_char(BackendWindow *b, WPARAM wparam)
         cp = 0x10000 + (((uint32_t)b->high_surrogate - 0xD800) << 10) + (cp - 0xDC00);
     }
     b->high_surrogate = 0;
+    /* A key pressed with Ctrl or the Windows key held is a shortcut and types nothing (the rule in platform.h): TranslateMessage
+       makes control characters of Ctrl+letter, dropped below, but Ctrl+space comes as a space. AltGr is reported as Ctrl and
+       Alt together, and the character a layout puts on it is text: a Ctrl without the Alt is the shortcut. */
+    const int mods = current_mods();
+    if ((mods & KEYMOD_SUPER) || ((mods & KEYMOD_CTRL) && !(mods & KEYMOD_ALT)))
+        return;
     if (cp >= 0x20 && cp != 0x7F)
         push_char(b, cp);
 }
@@ -1163,11 +1271,22 @@ static bool imm_composition(BackendWindow *b, LPARAM lparam)
     {
         wchar_t buf[256];
         LONG bytes = imm.get_string(ctx, GCS_RESULTSTR, buf, sizeof buf - sizeof(wchar_t));
-        for (LONG i = 0; i < bytes / (LONG)sizeof(wchar_t); i++)
+        /* the count is what the input method says: it can be more than the buffer holds (a long commit) or an error (< 0) */
+        LONG units = bytes > 0 ? bytes / (LONG)sizeof(wchar_t) : 0;
+        if (units > (LONG)(sizeof buf / sizeof buf[0]) - 1)
+            units = (LONG)(sizeof buf / sizeof buf[0]) - 1;
+        for (LONG i = 0; i < units; i++)
         {
             uint32_t cp = buf[i];
-            if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < bytes / (LONG)sizeof(wchar_t))
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (buf[++i] - 0xDC00);
+            if (cp >= 0xD800 && cp < 0xDC00)
+            {
+                if (i + 1 < units && buf[i + 1] >= 0xDC00 && buf[i + 1] < 0xE000)
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (buf[++i] - 0xDC00);
+                else
+                    continue; /* a high surrogate with no low one after it */
+            }
+            else if (cp >= 0xDC00 && cp < 0xE000)
+                continue; /* a low surrogate on its own */
             if (cp >= 0x20 && cp != 0x7F)
                 push_char(b, cp);
         }
@@ -1177,7 +1296,10 @@ static bool imm_composition(BackendWindow *b, LPARAM lparam)
         wchar_t buf[128];
         LONG bytes = imm.get_string(ctx, GCS_COMPSTR, buf, sizeof buf - sizeof(wchar_t));
         LONG cursor = imm.get_string(ctx, GCS_CURSORPOS, NULL, 0);
-        imm_edit(b, buf, bytes > 0 ? (int)(bytes / (LONG)sizeof(wchar_t)) : 0, (int)cursor);
+        LONG units = bytes > 0 ? bytes / (LONG)sizeof(wchar_t) : 0;
+        if (units > (LONG)(sizeof buf / sizeof buf[0]) - 1)
+            units = (LONG)(sizeof buf / sizeof buf[0]) - 1;
+        imm_edit(b, buf, (int)units, (int)cursor);
     }
     imm.release_context(b->hwnd, ctx);
     return true;
@@ -1214,9 +1336,13 @@ static void live_tick(BackendWindow *b)
 {
     if (b->live_cb && b->in_modal && !b->in_live)
     {
+        /* The application's code: it may destroy the window, which waits for the scope to end (core_scope_leave frees it,
+           so nothing of b is read after that). The pump holds a scope too, but a message can reach here with none open. */
+        core_scope_enter();
         b->in_live = true;
         b->live_cb(b->live_w, b->live_user);
         b->in_live = false;
+        core_scope_leave();
     }
 }
 
@@ -1297,7 +1423,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         {
             POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             ScreenToClient(hwnd, &pt);
-            switch (b->hit_cb(b->hit_w, pt.x, pt.y, b->hit_user))
+            /* WM_NCHITTEST comes with every mouse move, also while the program is in a native dialog or a call that pumps
+               messages, with no scope of the platform's open: the hit test may destroy the window (see live_tick). */
+            const bool frameless = b->frameless;
+            core_scope_enter();
+            HitTestResult hit = b->hit_cb(b->hit_w, pt.x, pt.y, b->hit_user);
+            core_scope_leave();
+            switch (hit)
             {
             case HIT_DRAG: return HTCAPTION;
             case HIT_RESIZE_TOPLEFT: return HTTOPLEFT;
@@ -1309,7 +1441,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             case HIT_RESIZE_BOTTOMLEFT: return HTBOTTOMLEFT;
             case HIT_RESIZE_LEFT: return HTLEFT;
             default:
-                if (b->frameless)
+                if (frameless)
                     return HTCLIENT;
                 break; /* a framed window keeps its own frame hits */
             }
@@ -1680,10 +1812,13 @@ void backend_make_current_on(BackendWindow *target, BackendWindow *context)
         wglMakeCurrent(target->hdc, context->glrc);
 }
 
+/* wglSwapIntervalEXT acts on the context that is current on this thread: on a window with no GL context of its own it would
+   change another window's. A window of pixels has none. */
 void backend_set_vsync(BackendWindow *b, bool on)
 {
-    (void)b;
-    if (g.swap_interval)
+    if (b->render != RENDER_GL || !b->glrc)
+        return;
+    if (g.swap_interval && wglGetCurrentContext() == b->glrc)
         g.swap_interval(on ? 1 : 0);
 }
 
@@ -1771,8 +1906,8 @@ void backend_swap(BackendWindow *b)
 
 BackendWindow *backend_create(const WindowConfig *cfg)
 {
-    int w = cfg->width > 0 ? cfg->width : 640;
-    int h = cfg->height > 0 ? cfg->height : 480;
+    int w = cfg->width > 0 ? clamp_size(cfg->width) : 640;
+    int h = cfg->height > 0 ? clamp_size(cfg->height) : 480;
     wchar_t title[512];
     to_wide_title(cfg->title, title, 512);
 
@@ -1811,14 +1946,14 @@ BackendWindow *backend_create(const WindowConfig *cfg)
         int index = cfg->monitor >= 0 ? cfg->monitor : primary_monitor();
         if (backend_monitor_info(index, &mi))
         {
-            x = cfg->x == WINDOW_POS_CENTERED ? mi.work_x + (mi.work_w - outer_w) / 2 : cfg->x + rc.left;
-            y = cfg->y == WINDOW_POS_CENTERED ? mi.work_y + (mi.work_h - outer_h) / 2 : cfg->y + rc.top;
+            x = cfg->x == WINDOW_POS_CENTERED ? mi.work_x + (mi.work_w - outer_w) / 2 : clamp_pos(cfg->x) + rc.left;
+            y = cfg->y == WINDOW_POS_CENTERED ? mi.work_y + (mi.work_h - outer_h) / 2 : clamp_pos(cfg->y) + rc.top;
         }
     }
     else if (cfg->x != WINDOW_POS_UNDEFINED && cfg->y != WINDOW_POS_UNDEFINED)
     {
-        x = cfg->x + rc.left;
-        y = cfg->y + rc.top;
+        x = clamp_pos(cfg->x) + rc.left;
+        y = clamp_pos(cfg->y) + rc.top;
     }
 
     b->hwnd = CreateWindowExW(ex, WINDOW_CLASS, title, style, x, y, outer_w, outer_h, owner, NULL, g.instance, b);
@@ -1866,6 +2001,7 @@ void backend_destroy(BackendWindow *b)
 {
     if (!b)
         return;
+    g_pending_total -= b->pending_count;
     if (b->cursor_mode == MOUSE_MODE_CAPTURED)
         ClipCursor(NULL);
     set_raw_mouse(b, false);
@@ -1888,6 +2024,9 @@ void backend_destroy(BackendWindow *b)
     if (b->icon_small)
         DestroyIcon(b->icon_small);
     free(b->pixels);
+    for (int i = 0; i < b->drop_n; i++)
+        free(b->drop_paths[i]);
+    free(b->drop_paths);
     free(b);
 }
 
@@ -1910,6 +2049,7 @@ void backend_pump_events(BackendWindow *b, Core *core)
         else
             core_push_event(core, &b->pending[i].ev);
     }
+    g_pending_total -= b->pending_count;
     b->pending_count = 0;
 
     b->pumping = true;
@@ -1922,6 +2062,53 @@ void backend_pump_events(BackendWindow *b, Core *core)
     }
     release_stuck_keys(b);
     b->pumping = false;
+}
+
+/* MsgWaitForMultipleObjectsEx with the wake event and every kind of input message, MWMO_INPUTAVAILABLE so that a message
+   that a PeekMessage has looked at and left (or one that arrived between the pump's last look and now) still ends the
+   wait: without the flag the wait only sees messages that came after the queue was last examined. Messages SENT to a
+   window by another thread are dispatched by the system inside this call (that is how the window procedure runs for
+   them); what they push goes to the pending lists, so the lists are looked at after every return. Gamepads cannot be waited
+   on: gamepad_wait_ns says when the next poll is due. Not run (no Windows here): compiled with MinGW only. */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    HANDLE wake = (HANDLE)core_wake_handle();
+    int64_t limit = timeout_ns;
+    bool live = false;
+    int64_t pads = gamepad_wait_ns(&live);
+    if (pads >= 0 && (limit < 0 || pads < limit))
+        limit = pads;
+    else
+        live = false; /* the caller's own timeout comes first: that tick is not a device's */
+    const int64_t start = (int64_t)time_nanos();
+    for (;;)
+    {
+        if (g_pending_total > 0)
+            return true;
+        int64_t left = -1;
+        if (limit >= 0)
+        {
+            left = limit - ((int64_t)time_nanos() - start);
+            if (left < 0)
+                left = 0;
+        }
+        int64_t ms = core_wait_ms(left);
+        DWORD n = wake ? 1 : 0;
+        DWORD r = MsgWaitForMultipleObjectsEx(n, wake ? &wake : NULL, ms < 0 ? INFINITE : (DWORD)(ms > 0x7ffffff0 ? 0x7ffffff0 : ms),
+                                              QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (r == WAIT_OBJECT_0 + n || (wake && r == WAIT_OBJECT_0))
+            return true; /* a message, or the wake (an auto-reset event: the wait took it) */
+        if (r == WAIT_FAILED)
+            return true; /* nothing to sleep on: let the caller go on rather than spin here */
+        if (g_pending_total > 0)
+            return true;
+        if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
+            return live;
+    }
+}
+
+void backend_wake(void)
+{
 }
 
 void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void *user)
@@ -1958,7 +2145,7 @@ void backend_set_size(BackendWindow *b, int w, int h)
 {
     DWORD style = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_STYLE);
     DWORD exstyle = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_EXSTYLE);
-    RECT rc = {0, 0, w, h};
+    RECT rc = {0, 0, clamp_size(w), clamp_size(h)};
     adjust_rect(&rc, style, exstyle, b->hwnd);
     SetWindowPos(b->hwnd, NULL, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
@@ -1969,7 +2156,7 @@ void backend_set_pos(BackendWindow *b, int x, int y)
     DWORD exstyle = (DWORD)GetWindowLongPtrW(b->hwnd, GWL_EXSTYLE);
     RECT rc = {0, 0, 0, 0};
     adjust_rect(&rc, style, exstyle, b->hwnd);
-    SetWindowPos(b->hwnd, NULL, x + rc.left, y + rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(b->hwnd, NULL, clamp_pos(x) + rc.left, clamp_pos(y) + rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 float backend_content_scale(BackendWindow *b)
@@ -2108,7 +2295,8 @@ WindowMode backend_get_mode(BackendWindow *b)
 
 void backend_set_icon(BackendWindow *b, int w, int h, const uint8_t *rgba)
 {
-    if (w <= 0 || h <= 0 || !rgba)
+    /* an icon is at most a few hundred pixels; the copy below indexes with ints and a size in the billions overflows them */
+    if (w <= 0 || h <= 0 || w > 1024 || h > 1024 || !rgba)
         return;
     BITMAPV5HEADER bi;
     memset(&bi, 0, sizeof bi);
@@ -2386,15 +2574,6 @@ static size_t uri_to_path(const char *line, size_t len, wchar_t *out, size_t cap
     return (size_t)w;
 }
 
-/* DROPFILES lives in shlobj.h, which is far bigger than this needs. */
-typedef struct
-{
-    DWORD pFiles;
-    POINT pt;
-    BOOL fNC;
-    BOOL fWide;
-} ZenDropFiles;
-
 static bool clip_put_uris(const char *text, size_t size)
 {
     size_t cap = size + 2, used = 0; /* wide chars never outnumber the UTF-8 bytes */
@@ -2434,6 +2613,25 @@ static bool clip_put_uris(const char *text, size_t size)
     }
     free(list);
     return ok;
+}
+
+/* There is no primary selection here (the middle button pastes nothing): the calls say so (clipboard_has_primary_support). */
+bool backend_primary_supported(void)
+{
+    return false;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    (void)utf8, (void)len;
+    return false;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (size)
+        *size = 0;
+    return NULL;
 }
 
 bool backend_clipboard_set(const ClipboardItem *items, int count)
@@ -2505,15 +2703,28 @@ static void *clip_dib_as_png(size_t *size)
     HANDLE h = GetClipboardData(CF_DIBV5);
     if (!h)
         h = GetClipboardData(CF_DIB);
-    const BITMAPINFOHEADER *bi = h ? GlobalLock(h) : NULL;
+    SIZE_T total = h ? GlobalSize(h) : 0;
+    const BITMAPINFOHEADER *bi = total >= sizeof(BITMAPINFOHEADER) ? GlobalLock(h) : NULL;
     if (!bi)
         return NULL;
     void *png = NULL;
-    int w = bi->biWidth, hgt = bi->biHeight < 0 ? -bi->biHeight : bi->biHeight;
+    /* Every number here is another program's. The pixels must lie inside the block (a header that says 30000 x 30000 over a
+       block of 100 bytes would be read for gigabytes), and the image is no larger than the PNG code takes (64 M pixels). */
+    int64_t w64 = bi->biWidth, h64 = bi->biHeight < 0 ? -(int64_t)bi->biHeight : (int64_t)bi->biHeight;
     bool top_down = bi->biHeight < 0;
-    bool ok = bi->biPlanes == 1 && w > 0 && hgt > 0 &&
+    bool ok = bi->biPlanes == 1 && w64 > 0 && h64 > 0 && w64 <= 32768 && h64 <= 32768 && w64 * h64 <= ((int64_t)1 << 26) &&
               (bi->biBitCount == 32 || bi->biBitCount == 24) &&
-              (bi->biCompression == BI_RGB || bi->biCompression == BI_BITFIELDS);
+              (bi->biCompression == BI_RGB || bi->biCompression == BI_BITFIELDS) && bi->biSize >= sizeof(BITMAPINFOHEADER) &&
+              bi->biSize <= total;
+    int w = (int)w64, hgt = (int)h64;
+    if (ok)
+    {
+        uint64_t header = bi->biSize;
+        if (bi->biCompression == BI_BITFIELDS && bi->biSize == sizeof(BITMAPINFOHEADER))
+            header += 12; /* the three masks follow a plain header */
+        uint64_t stride64 = (((uint64_t)w * bi->biBitCount + 31) / 32) * 4;
+        ok = header + (uint64_t)bi->biClrUsed * 4 + stride64 * (uint64_t)hgt <= total;
+    }
     if (ok)
     {
         size_t header = bi->biSize;
@@ -2551,8 +2762,8 @@ static void *clip_dib_as_png(size_t *size)
 static void *clip_hdrop_as_uris(size_t *size)
 {
     HDROP drop = (HDROP)GetClipboardData(CF_HDROP);
-    if (!drop)
-        return NULL;
+    if (!drop_is_sane(drop))
+        return NULL; /* what another program put there is not trusted to be a list that ends inside its block */
     UINT n = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
     size_t cap = 1, used = 0;
     char *out = malloc(cap);
@@ -2617,16 +2828,22 @@ void *backend_clipboard_get(const char *mime, size_t *size)
         const wchar_t *wide = h ? GlobalLock(h) : NULL;
         if (wide)
         {
-            int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
-            if (n > 0)
+            /* The text ends at its NUL or at the end of the block, whichever comes first: another program is to put a
+               terminator there, and one that does not would have this read on through whatever follows it in memory. */
+            SIZE_T room = GlobalSize(h) / sizeof(wchar_t), len = 0;
+            if (room > ((SIZE_T)1 << 28))
+                room = (SIZE_T)1 << 28; /* 512 MB of UTF-16: more is not a text to paste (X11 stops at the same size) */
+            while (len < room && wide[len])
+                len++;
+            int n = len ? WideCharToMultiByte(CP_UTF8, 0, wide, (int)len, NULL, 0, NULL, NULL) : 0;
+            char *utf8 = len == 0 || n > 0 ? malloc((size_t)n + 1) : NULL;
+            if (utf8)
             {
-                char *utf8 = malloc((size_t)n);
-                if (utf8)
-                {
-                    WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, n, NULL, NULL);
-                    *size = (size_t)n - 1; /* the conversion included the terminator */
-                    result = utf8;
-                }
+                if (n > 0)
+                    WideCharToMultiByte(CP_UTF8, 0, wide, (int)len, utf8, n, NULL, NULL);
+                utf8[n] = '\0';
+                *size = (size_t)n;
+                result = utf8;
             }
             GlobalUnlock(h);
         }

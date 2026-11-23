@@ -447,6 +447,90 @@ static void test_text_event(PlatformWindow *w)
     CHECK(char_get_pressed(w) == 0);
 }
 
+/* The text rule: a key pressed while Ctrl or Super is held is a shortcut and types nothing; Shift and AltGr (Ctrl and Alt
+   together on Windows and the web) still type; the clipboard shortcuts of old arrive as the key and its modifier. */
+static void drain_events(PlatformWindow *w, int *chars, uint32_t *first, int *key_mods)
+{
+    Event e;
+    *chars = 0;
+    *key_mods = -1;
+    window_begin_frame(w);
+    while (poll_event(w, &e))
+    {
+        if (e.type == EVENT_CHAR && (*chars)++ == 0)
+            *first = e.data.codepoint;
+        else if (e.type == EVENT_KEY && e.data.key.down && e.data.key.key != KEY_LEFT_CONTROL &&
+                 e.data.key.key != KEY_LEFT_SHIFT && e.data.key.key != KEY_LEFT_ALT && e.data.key.key != KEY_LEFT_SUPER)
+            *key_mods = e.data.key.mods;
+    }
+}
+
+static void test_text_rule(PlatformWindow *w)
+{
+    static const struct
+    {
+        const char *name;
+        int held[2];
+        int key;
+        uint32_t cp;
+        int want_chars, want_mods;
+    } cases[] = {
+        {"a", {0, 0}, KEY_A, 'a', 1, 0},
+        {"Shift+a", {KEY_LEFT_SHIFT, 0}, KEY_A, 'A', 1, KEYMOD_SHIFT},
+        {"Ctrl+a", {KEY_LEFT_CONTROL, 0}, KEY_A, 'a', 0, KEYMOD_CTRL},
+        {"Ctrl+1", {KEY_LEFT_CONTROL, 0}, KEY_ZERO + 1, '1', 0, KEYMOD_CTRL},
+        {"Ctrl+space", {KEY_LEFT_CONTROL, 0}, KEY_SPACE, ' ', 0, KEYMOD_CTRL},
+        {"Ctrl+Shift+v", {KEY_LEFT_CONTROL, KEY_LEFT_SHIFT}, KEY_V, 'V', 0, KEYMOD_CTRL | KEYMOD_SHIFT},
+        {"Super+a", {KEY_LEFT_SUPER, 0}, KEY_A, 'a', 0, KEYMOD_SUPER},
+        {"Alt+a", {KEY_LEFT_ALT, 0}, KEY_A, 'a', 1, KEYMOD_ALT},
+        {"AltGr+q (Ctrl+Alt)", {KEY_LEFT_CONTROL, KEY_LEFT_ALT}, KEY_Q, '@', 1, KEYMOD_CTRL | KEYMOD_ALT},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+    {
+        window_begin_frame(w);
+        for (int h = 0; h < 2; h++)
+            if (cases[i].held[h])
+                fake_key(w, cases[i].held[h], true, false);
+        fake_key_text(w, cases[i].key, cases[i].cp);
+        int chars, mods;
+        uint32_t first = 0;
+        drain_events(w, &chars, &first, &mods);
+        if (chars != cases[i].want_chars)
+            printf("  %s typed %d characters, wanted %d\n", cases[i].name, chars, cases[i].want_chars);
+        CHECK(chars == cases[i].want_chars);
+        CHECK(chars == 0 || first == cases[i].cp);
+        CHECK(mods == cases[i].want_mods);
+        fake_key(w, cases[i].key, false, false);
+        for (int h = 1; h >= 0; h--)
+            if (cases[i].held[h])
+                fake_key(w, cases[i].held[h], false, false);
+        drain_events(w, &chars, &first, &mods);
+    }
+}
+
+static void test_clipboard_shortcut_keys(PlatformWindow *w)
+{
+    static const struct
+    {
+        int held, key, mods;
+    } k[] = {{KEY_LEFT_SHIFT, KEY_INSERT, KEYMOD_SHIFT}, {KEY_LEFT_CONTROL, KEY_INSERT, KEYMOD_CTRL},
+             {KEY_LEFT_SHIFT, KEY_DELETE, KEYMOD_SHIFT}};
+    for (size_t i = 0; i < 3; i++)
+    {
+        window_begin_frame(w);
+        fake_key(w, k[i].held, true, false);
+        fake_key(w, k[i].key, true, false);
+        int chars, mods;
+        uint32_t first;
+        drain_events(w, &chars, &first, &mods);
+        CHECK(mods == k[i].mods);
+        CHECK(chars == 0);
+        fake_key(w, k[i].key, false, false);
+        fake_key(w, k[i].held, false, false);
+        drain_events(w, &chars, &first, &mods);
+    }
+}
+
 static void test_lock_mods(PlatformWindow *w)
 {
     window_begin_frame(w);
@@ -782,6 +866,99 @@ static void test_window_features(void)
     window_destroy(w);
 }
 
+/* ---- what a script's events carry: the same fields the X11 backend fills from the server's state ---- */
+
+static int frame_events(PlatformWindow *w, Event *out, int cap)
+{
+    window_begin_frame(w);
+    int n = 0;
+    Event e;
+    while (poll_event(w, &e))
+        if (n < cap)
+            out[n++] = e;
+    return n;
+}
+
+static void test_fake_fidelity(PlatformWindow *w)
+{
+    Event ev[16];
+    frame_events(w, ev, 16);
+    int px, py;
+
+    /* a click after a move is at the pointer (it was at 0, 0 whatever the pointer was) */
+    fake_mouse_move(w, 10, 20);
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    int n = frame_events(w, ev, 16);
+    CHECK(n == 3 && ev[1].type == EVENT_MOUSE_BUTTON && ev[2].type == EVENT_MOUSE_BUTTON);
+    CHECK(ev[1].data.mouse.x == 10 && ev[1].data.mouse.y == 20 && ev[2].data.mouse.x == 10 && ev[2].data.mouse.y == 20);
+    fake_mouse_move(w, 30, 40); /* and it follows the pointer */
+    fake_mouse_button(w, MOUSE_LEFT, true);
+    fake_mouse_move(w, 31, 41);
+    fake_mouse_button(w, MOUSE_LEFT, false);
+    n = frame_events(w, ev, 16);
+    CHECK(n == 4 && ev[1].data.mouse.x == 30 && ev[1].data.mouse.y == 40 && ev[3].data.mouse.x == 31 && ev[3].data.mouse.y == 41);
+
+    /* a click at a place: the pointer goes there (one move), and a second click there adds none */
+    fake_mouse_button_at(w, 50, 60, MOUSE_RIGHT, true);
+    fake_mouse_button_at(w, 50, 60, MOUSE_RIGHT, false);
+    n = frame_events(w, ev, 16);
+    CHECK(n == 3);
+    CHECK(ev[0].type == EVENT_MOUSE_MOVE && ev[0].data.mouse.x == 50 && ev[0].data.mouse.y == 60);
+    CHECK(ev[1].type == EVENT_MOUSE_BUTTON && ev[1].data.mouse.down && ev[1].data.mouse.button == MOUSE_RIGHT);
+    CHECK(ev[1].data.mouse.x == 50 && ev[1].data.mouse.y == 60);
+    CHECK(ev[2].type == EVENT_MOUSE_BUTTON && !ev[2].data.mouse.down && ev[2].data.mouse.x == 50 && ev[2].data.mouse.y == 60);
+    mouse_position(w, &px, &py);
+    CHECK(px == 50 && py == 60);
+
+    /* keys: the modifiers held before the key, a scancode */
+    fake_key(w, KEY_LEFT_CONTROL, true, false);
+    fake_key(w, KEY_LEFT_SHIFT, true, false);
+    fake_key(w, KEY_C, true, false);
+    fake_key(w, KEY_C, false, false);
+    fake_key(w, KEY_LEFT_SHIFT, false, false);
+    fake_key(w, KEY_LEFT_CONTROL, false, false);
+    n = frame_events(w, ev, 16);
+    CHECK(n == 6);
+    const int want[6] = {0, KEYMOD_CTRL, KEYMOD_CTRL | KEYMOD_SHIFT, KEYMOD_CTRL | KEYMOD_SHIFT, KEYMOD_CTRL | KEYMOD_SHIFT,
+                         KEYMOD_CTRL};
+    for (int i = 0; i < n && i < 6; i++)
+    {
+        CHECK(ev[i].type == EVENT_KEY && ev[i].data.key.mods == want[i]);
+        CHECK(ev[i].data.key.scancode != 0);
+    }
+    CHECK(key_mods(w) == 0);
+
+    /* a captured mouse: the step of each move; a free one carries none, as in X11 */
+    fake_mouse_move(w, 100, 100);
+    frame_events(w, ev, 16);
+    mouse_set_mode(w, MOUSE_MODE_CAPTURED);
+    fake_mouse_move(w, 110, 95);
+    fake_mouse_move(w, 112, 95);
+    n = frame_events(w, ev, 16);
+    CHECK(n == 2 && ev[0].data.mouse.dx == 10 && ev[0].data.mouse.dy == -5 && ev[1].data.mouse.dx == 2 && ev[1].data.mouse.dy == 0);
+    mouse_set_mode(w, MOUSE_MODE_NORMAL);
+    fake_mouse_move(w, 120, 95);
+    n = frame_events(w, ev, 16);
+    CHECK(n == 1 && ev[0].data.mouse.dx == 0 && ev[0].data.mouse.dy == 0);
+
+    /* a finger has pressure while it is down, as the backends report it */
+    fake_touch(w, 5, 1, 2, TOUCH_DOWN);
+    fake_touch(w, 5, 3, 4, TOUCH_MOVE);
+    fake_touch(w, 5, 3, 4, TOUCH_UP);
+    n = frame_events(w, ev, 16);
+    CHECK(n == 3 && ev[0].data.touch.pressure == 1.0f && ev[1].data.touch.pressure == 1.0f && ev[2].data.touch.pressure == 0.0f);
+
+    /* a resize is the window's size once it is delivered */
+    int ww = 0, hh = 0, fw = 0, fh = 0;
+    fake_resize(w, 640, 480);
+    fake_fb_resize(w, 1280, 960);
+    frame_events(w, ev, 16);
+    window_get_size(w, &ww, &hh);
+    window_get_framebuffer_size(w, &fw, &fh);
+    CHECK(ww == 640 && hh == 480 && fw == 1280 && fh == 960);
+}
+
 int main(void)
 {
     if (!platform_init())
@@ -797,11 +974,14 @@ int main(void)
     test_focus_loss_releases(w);
     test_click_in_one_frame(w);
     test_text_event(w);
+    test_text_rule(w);
+    test_clipboard_shortcut_keys(w);
     test_lock_mods(w);
     test_capture(w);
     test_device_events(w);
     test_real_touch(w);
     test_text_input(w);
+    test_fake_fidelity(w);
     window_destroy(w);
     test_window_features();
     platform_shutdown();

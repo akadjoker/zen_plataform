@@ -11,6 +11,8 @@
 #include "core_internal.h"
 #include "backend.h"
 #include "error_internal.h"
+#include "gamepad_internal.h"
+#include "uri_list.h"
 
 #include <wayland-client.h>
 #include <wayland-cursor.h>
@@ -27,9 +29,14 @@
 #ifdef ZEN_WL_XDG_DECORATION
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 #endif
+#ifdef ZEN_WL_PRIMARY
+#include "primary-selection-unstable-v1-client-protocol.h"
+#endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +71,26 @@ typedef struct DecorPart
     int part;
 } DecorPart;
 
+/* ---- the primary selection (zwp_primary_selection_unstable_v1): text, what the user has selected ---- */
+
+#ifdef ZEN_WL_PRIMARY
+/* what another program offers as the selection: the text type to ask for (the best one it listed) */
+typedef struct
+{
+    struct zwp_primary_selection_offer_v1 *offer;
+    int best;          /* index into primary_mimes, -1 until a type we can read is listed */
+    double dead_until; /* ms: the source did not answer, it is not asked again before */
+} PrimaryOffer;
+
+/* what we offer: the text and the source that carries it */
+typedef struct
+{
+    struct zwp_primary_selection_source_v1 *src;
+    char *text;
+    size_t len;
+} PrimarySource;
+#endif
+
 static struct
 {
     struct wl_display *display;
@@ -83,6 +110,14 @@ static struct
     BackendWindow *keyboard_focus, *pointer_focus;
     uint32_t serial; /* of the last key or button, which clipboard and move requests quote */
     uint32_t enter_serial; /* of the pointer's last enter, which a cursor request quotes */
+
+#ifdef ZEN_WL_PRIMARY
+    struct zwp_primary_selection_device_manager_v1 *primary_manager;
+    struct zwp_primary_selection_device_v1 *primary_device;
+    PrimaryOffer *primary_pending; /* a data_offer whose types are being listed, selected or not yet */
+    PrimaryOffer *primary_offer;   /* the selection of another program, or ours as the compositor reports it */
+    PrimarySource *primary_own;    /* what we offer as the selection, while we own it */
+#endif
 
     struct wl_subcompositor *subcompositor;
 #ifdef ZEN_WL_XDG_DECORATION
@@ -112,12 +147,28 @@ static struct
     xkb_keycode_t repeat_key;
     double repeat_next; /* ms */
 
+    /* Files dragged into a window (wl_data_device). */
+    struct wl_data_device_manager *data_manager;
+    struct wl_data_device *data_device;
+    struct wl_data_offer *new_offer; /* the offer the compositor introduced last, until an enter or a selection claims it */
+    bool new_offer_uri;              /* it has text/uri-list among its types */
+    struct wl_data_offer *dnd_offer; /* the one being dragged over a window */
+    bool dnd_uri;
+    BackendWindow *dnd_window;
+    char **drop_paths; /* the last drop's paths: kept until the next drop, poll_event reads them later */
+    int drop_n;
+
     int pointer_x, pointer_y;
     double axis_x, axis_y; /* continuous scroll of the current pointer frame */
     int v120_x, v120_y;    /* wheel notches of it, in 1/120 */
 } g;
 
 static const struct wl_seat_listener seat_listener;
+#ifdef ZEN_WL_PRIMARY
+static void primary_try_device(void);
+static void primary_teardown(void);
+#endif
+static void data_device_setup(void);
 static void apply_cursor(BackendWindow *b);
 static void set_pointer_cursor(int shape, struct PlatformCursor *image, bool hidden);
 static void apply_limits(BackendWindow *b);
@@ -265,11 +316,27 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name, 
     else if (strcmp(iface, zwp_relative_pointer_manager_v1_interface.name) == 0)
         g.relative_manager = wl_registry_bind(reg, name, &zwp_relative_pointer_manager_v1_interface, 1);
 #endif
+    else if (strcmp(iface, wl_data_device_manager_interface.name) == 0 && !g.data_manager)
+    {
+        g.data_manager = wl_registry_bind(reg, name, &wl_data_device_manager_interface, version < 3 ? version : 3);
+        data_device_setup();
+    }
     else if (strcmp(iface, wl_seat_interface.name) == 0 && !g.seat)
     {
         g.seat = wl_registry_bind(reg, name, &wl_seat_interface, version < 8 ? version : 8);
         wl_seat_add_listener(g.seat, &seat_listener, NULL);
+#ifdef ZEN_WL_PRIMARY
+        primary_try_device();
+#endif
+        data_device_setup();
     }
+#ifdef ZEN_WL_PRIMARY
+    else if (strcmp(iface, zwp_primary_selection_device_manager_v1_interface.name) == 0)
+    {
+        g.primary_manager = wl_registry_bind(reg, name, &zwp_primary_selection_device_manager_v1_interface, 1);
+        primary_try_device();
+    }
+#endif
 }
 
 static void registry_global_remove(void *data, struct wl_registry *reg, uint32_t name)
@@ -370,6 +437,9 @@ bool backend_init(void)
 
 void backend_shutdown(void)
 {
+#ifdef ZEN_WL_PRIMARY
+    primary_teardown();
+#endif
     if (g.egl)
         eglTerminate(g.egl);
     if (g.theme)
@@ -388,6 +458,22 @@ void backend_shutdown(void)
         wl_keyboard_release(g.keyboard);
     if (g.pointer)
         wl_pointer_release(g.pointer);
+    if (g.dnd_offer && g.dnd_offer != g.new_offer)
+        wl_data_offer_destroy(g.dnd_offer);
+    if (g.new_offer)
+        wl_data_offer_destroy(g.new_offer);
+    if (g.data_device)
+    {
+        if (wl_data_device_get_version(g.data_device) >= WL_DATA_DEVICE_RELEASE_SINCE_VERSION)
+            wl_data_device_release(g.data_device);
+        else
+            wl_data_device_destroy(g.data_device);
+    }
+    if (g.data_manager)
+        wl_data_device_manager_destroy(g.data_manager);
+    for (int i = 0; i < g.drop_n; i++)
+        free(g.drop_paths[i]);
+    free(g.drop_paths);
     if (g.seat)
         wl_seat_destroy(g.seat);
     xkb_compose_state_unref(g.compose);
@@ -428,8 +514,22 @@ static void set_opaque_region(BackendWindow *b)
     wl_region_destroy(r);
 }
 
+/* A window is at most WL_SIZE_MAX pixels wide or high: a wl_shm pool is sized in an int (a buffer of w * h * 4 bytes, and
+   the stride, have to fit it) and a size past that is a protocol error, which the compositor answers by closing the
+   connection (error 71, and every window of the program with it). 16384 x 16384 is a gigabyte of pixels. */
+#define WL_SIZE_MAX 16384
+
+static char *title_copy(const char *title);
+
+static int clamp_dim(int v)
+{
+    return v < 1 ? 1 : v > WL_SIZE_MAX ? WL_SIZE_MAX : v;
+}
+
 static void apply_size(BackendWindow *b, int w, int h)
 {
+    w = clamp_dim(w); /* what the application asks and what the compositor configures alike */
+    h = clamp_dim(h);
     if (w == b->width && h == b->height)
         return;
     b->width = w;
@@ -825,7 +925,19 @@ static void key_event(BackendWindow *b, xkb_keycode_t kc, bool down, bool repeat
     push(b, &e);
 
     if (down)
-        key_text(b, kc);
+    {
+        /* A key pressed with Ctrl or Super held is a shortcut and types nothing (the rule in platform.h): xkbcommon turns
+           Ctrl+letter into a control character, dropped by push_text, but gives Ctrl+1, Ctrl+minus, Ctrl+comma as the plain
+           character and Ctrl+space as a space. A Compose sequence waiting is cancelled, not finished by the shortcut.
+           AltGr is a level of the key, not Ctrl, so what a layout puts on it is text. */
+        if (e.data.key.mods & (KEYMOD_CTRL | KEYMOD_SUPER))
+        {
+            if (g.compose)
+                xkb_compose_state_reset(g.compose);
+        }
+        else
+            key_text(b, kc);
+    }
 }
 
 /* A held key repeats while its window has the focus, and the pump is what drives
@@ -1225,6 +1337,254 @@ static const struct wl_pointer_listener pointer_listener = {
     .axis_relative_direction = pointer_axis_relative_direction,
 #endif
 };
+
+/* ========================================================================== */
+/*  files dragged into a window (wl_data_device)                              */
+/* ========================================================================== */
+/* The compositor introduces an offer (data_offer, then its MIME types one by one) and then says what it is: the
+   selection, which this backend does not use (the clipboard goes another way: clipboard.c), or a drag that entered one
+   of our surfaces. A drag that has text/uri-list is accepted as a copy; while it is over a window the pointer's place
+   is handed on as pointer moves (the compositor sends no wl_pointer.motion during a drag), so mouse_position() at the
+   EVENT_WINDOW_DROP is where the files were let go. At the drop the list is read from a pipe the source writes into. */
+
+#define DND_MAX_PATHS 4096
+#define DND_READ_MS 2000 /* how long the source has to send its list */
+
+static void dnd_offer_offer(void *data, struct wl_data_offer *offer, const char *mime)
+{
+    (void)data;
+    if (offer == g.new_offer && mime && strcmp(mime, "text/uri-list") == 0)
+        g.new_offer_uri = true;
+}
+
+static void dnd_offer_source_actions(void *data, struct wl_data_offer *offer, uint32_t actions)
+{
+    (void)data;
+    (void)offer;
+    (void)actions;
+}
+
+static void dnd_offer_action(void *data, struct wl_data_offer *offer, uint32_t action)
+{
+    (void)data;
+    (void)offer;
+    (void)action;
+}
+
+static const struct wl_data_offer_listener offer_listener = {
+    .offer = dnd_offer_offer,
+    .source_actions = dnd_offer_source_actions,
+    .action = dnd_offer_action,
+};
+
+static void dnd_forget(void)
+{
+    if (g.dnd_offer)
+    {
+        if (g.dnd_offer == g.new_offer)
+            g.new_offer = NULL;
+        wl_data_offer_destroy(g.dnd_offer);
+    }
+    g.dnd_offer = NULL;
+    g.dnd_uri = false;
+    g.dnd_window = NULL;
+}
+
+static void dnd_pointer(BackendWindow *b, wl_fixed_t sx, wl_fixed_t sy)
+{
+    if (!b || b->locked)
+        return;
+    g.pointer_x = wl_fixed_to_int(sx);
+    g.pointer_y = wl_fixed_to_int(sy);
+    Event e = {.type = EVENT_MOUSE_MOVE};
+    e.data.mouse.x = g.pointer_x;
+    e.data.mouse.y = g.pointer_y;
+    push(b, &e);
+}
+
+static void dnd_device_data_offer(void *data, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+    (void)data;
+    (void)device;
+    /* An offer nobody claimed (the compositor replaced it before saying what it was) is let go. */
+    if (g.new_offer && g.new_offer != g.dnd_offer)
+        wl_data_offer_destroy(g.new_offer);
+    g.new_offer = offer;
+    g.new_offer_uri = false;
+    wl_data_offer_add_listener(offer, &offer_listener, NULL);
+}
+
+static void dnd_device_enter(void *data, struct wl_data_device *device, uint32_t serial, struct wl_surface *surface, wl_fixed_t sx,
+                         wl_fixed_t sy, struct wl_data_offer *offer)
+{
+    (void)data;
+    (void)device;
+    if (g.dnd_offer && g.dnd_offer != offer)
+        dnd_forget();
+    g.dnd_offer = offer;
+    g.dnd_uri = offer && offer == g.new_offer && g.new_offer_uri;
+    if (offer == g.new_offer)
+        g.new_offer = NULL; /* claimed: it is the drag's now */
+    g.dnd_window = surface ? window_for_surface(surface) : NULL; /* (a part of the frame is not the window) */
+    if (!offer)
+        return;
+    const bool take = g.dnd_uri && g.dnd_window;
+    wl_data_offer_accept(offer, serial, take ? "text/uri-list" : NULL);
+    if (wl_data_offer_get_version(offer) >= WL_DATA_OFFER_SET_ACTIONS_SINCE_VERSION)
+        wl_data_offer_set_actions(offer, take ? WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY : WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE,
+                                  take ? WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY : WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE);
+    if (take)
+        dnd_pointer(g.dnd_window, sx, sy);
+}
+
+static void dnd_device_leave(void *data, struct wl_data_device *device)
+{
+    (void)data;
+    (void)device;
+    dnd_forget();
+}
+
+static void dnd_device_motion(void *data, struct wl_data_device *device, uint32_t time, wl_fixed_t sx, wl_fixed_t sy)
+{
+    (void)data;
+    (void)device;
+    (void)time;
+    if (g.dnd_uri && g.dnd_window)
+        dnd_pointer(g.dnd_window, sx, sy);
+}
+
+/* Everything the source writes into the pipe, as a string; NULL when nothing came in time. */
+static char *dnd_read(int fd)
+{
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (buf)
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long left = DND_READ_MS - ((now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000);
+        if (left <= 0)
+            break;
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int r = poll(&pfd, 1, (int)left);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        if (len + 1 >= cap)
+        {
+            if (cap > (size_t)16 * 1024 * 1024)
+                break; /* a list of files is never this long */
+            char *grown = realloc(buf, cap * 2);
+            if (!grown)
+                break;
+            buf = grown;
+            cap *= 2;
+        }
+        ssize_t got = read(fd, buf + len, cap - len - 1);
+        if (got < 0 && (errno == EINTR || errno == EAGAIN))
+            continue;
+        if (got <= 0)
+            break; /* the source closed its end: the list is whole */
+        len += (size_t)got;
+    }
+    if (buf)
+        buf[len] = 0;
+    if (buf && len == 0)
+    {
+        free(buf);
+        buf = NULL;
+    }
+    return buf;
+}
+
+static void dnd_device_drop(void *data, struct wl_data_device *device)
+{
+    (void)data;
+    (void)device;
+    struct wl_data_offer *offer = g.dnd_offer;
+    BackendWindow *b = g.dnd_window;
+    if (!offer || !g.dnd_uri || !b)
+    {
+        dnd_forget();
+        return;
+    }
+    char *text = NULL;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) == 0)
+    {
+        wl_data_offer_receive(offer, "text/uri-list", fds[1]);
+        close(fds[1]);
+        wl_display_flush(g.display); /* the request has to reach the compositor before the source can write */
+        text = dnd_read(fds[0]);
+        close(fds[0]);
+    }
+    char *paths[DND_MAX_PATHS];
+    int n = text ? uri_list_parse(text, paths, DND_MAX_PATHS) : 0;
+    free(text);
+
+    for (int i = 0; i < g.drop_n; i++)
+        free(g.drop_paths[i]);
+    free(g.drop_paths);
+    g.drop_paths = NULL;
+    g.drop_n = 0;
+    if (n)
+    {
+        g.drop_paths = malloc((size_t)n * sizeof *g.drop_paths);
+        if (g.drop_paths)
+        {
+            memcpy(g.drop_paths, paths, (size_t)n * sizeof *paths);
+            g.drop_n = n;
+        }
+        else
+            for (int i = 0; i < n; i++)
+                free(paths[i]);
+    }
+    if (wl_data_offer_get_version(offer) >= WL_DATA_OFFER_FINISH_SINCE_VERSION)
+        wl_data_offer_finish(offer);
+    if (g.drop_n)
+    {
+        Event e = {.type = EVENT_WINDOW_DROP};
+        e.data.drop.count = g.drop_n;
+        e.data.drop.paths = (const char **)g.drop_paths;
+        push(b, &e);
+    }
+    dnd_forget();
+}
+
+static void dnd_device_selection(void *data, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+    (void)data;
+    (void)device;
+    /* The clipboard's offer: not used here, and an offer that is kept is never freed by the compositor. */
+    if (offer && offer != g.dnd_offer)
+    {
+        if (offer == g.new_offer)
+            g.new_offer = NULL;
+        wl_data_offer_destroy(offer);
+    }
+}
+
+static const struct wl_data_device_listener data_device_listener = {
+    .data_offer = dnd_device_data_offer,
+    .enter = dnd_device_enter,
+    .leave = dnd_device_leave,
+    .motion = dnd_device_motion,
+    .drop = dnd_device_drop,
+    .selection = dnd_device_selection,
+};
+
+/* The seat and the manager come in any order: the device is made when both are there. */
+static void data_device_setup(void)
+{
+    if (g.data_device || !g.data_manager || !g.seat)
+        return;
+    g.data_device = wl_data_device_manager_get_data_device(g.data_manager, g.seat);
+    if (g.data_device)
+        wl_data_device_add_listener(g.data_device, &data_device_listener, NULL);
+}
 
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
 {
@@ -2391,9 +2751,9 @@ BackendWindow *backend_create(const WindowConfig *cfg)
     b->render = cfg->render;
     b->mode = cfg->mode;
     b->visible = true;
-    b->width = cfg->width > 0 ? cfg->width : 640;
-    b->height = cfg->height > 0 ? cfg->height : 480;
-    b->title = strdup(cfg->title ? cfg->title : "");
+    b->width = clamp_dim(cfg->width > 0 ? cfg->width : 640);
+    b->height = clamp_dim(cfg->height > 0 ? cfg->height : 480);
+    b->title = title_copy(cfg->title);
     b->hover_button = b->press_button = TB_NONE;
     b->hit_cursor = -1;
     b->decorated = !cfg->undecorated && cfg->kind != WINDOW_KIND_POPUP && cfg->kind != WINDOW_KIND_TOOLTIP;
@@ -2457,6 +2817,8 @@ void backend_destroy(BackendWindow *b)
         g.keyboard_focus = NULL;
         g.repeat_key = 0;
     }
+    if (g.dnd_window == b)
+        g.dnd_window = NULL;
     if (g.pointer_focus == b)
         g.pointer_focus = NULL;
     decor_destroy(b);
@@ -2492,6 +2854,117 @@ static void dispatch(int timeout_ms)
     else
         wl_display_cancel_read(g.display);
     wl_display_dispatch_pending(g.display);
+}
+
+/* ---- sleeping until the compositor, a gamepad or platform_wake has something (platform_wait_events) ---- */
+
+#define WAIT_PADS 40 /* the descriptors of the gamepads and joysticks, and the one that watches /dev/input */
+
+/* Whether a listener has raised an event that some window's pump has not handed to the core yet. */
+static bool events_queued(void)
+{
+    for (const BackendWindow *w = g.windows; w; w = w->next)
+        if (w->queue_n > 0)
+            return true;
+    return false;
+}
+
+/* The protocol libwayland prescribes for a thread that waits on the connection: prepare_read says nobody else is about to
+   read (if it fails, what is already read is dispatched first), the output is flushed, poll, then read_events or cancel_read
+   exactly once. Everything dispatched here only fills the windows' queues (the listeners do nothing else), so the events
+   are still the pump's to hand to the core, and the wait also answers a ping of the compositor while it sleeps. The queues are
+   looked at after every dispatch: an event that arrives together with the one that ends a frame callback is already in
+   libwayland's buffer and the socket is quiet, so poll alone would sleep through it. */
+static bool wait_events(int64_t timeout_ns)
+{
+    int64_t limit = timeout_ns;
+    if (g.repeat_key && g.keyboard_focus && g.repeat_rate > 0)
+    {
+        /* the compositor sends no repeats: the pump makes them, so the sleep ends when the next is due (false: the pump
+           does it, no event is waiting yet) */
+        double due = g.repeat_next - now_ms();
+        int64_t d = due > 0 ? (int64_t)(due * 1e6) : 0;
+        if (limit < 0 || d < limit)
+            limit = d;
+    }
+    const int64_t start = (int64_t)time_nanos();
+    for (;;)
+    {
+        if (g.lost || wl_display_get_error(g.display) != 0 || events_queued())
+            return true; /* a broken connection is told to each window by the pump */
+        while (wl_display_prepare_read(g.display) != 0)
+            wl_display_dispatch_pending(g.display);
+        if (events_queued())
+        {
+            wl_display_cancel_read(g.display);
+            return true;
+        }
+        bool want_out = false;
+        if (wl_display_flush(g.display) < 0)
+        {
+            if (errno != EAGAIN)
+            {
+                wl_display_cancel_read(g.display);
+                return true; /* the pump reports the lost connection */
+            }
+            want_out = true; /* the socket is full: wait until it takes more, and read meanwhile */
+        }
+        int64_t left = -1;
+        if (limit >= 0)
+        {
+            left = limit - ((int64_t)time_nanos() - start);
+            if (left < 0)
+                left = 0;
+        }
+        struct pollfd fds[2 + WAIT_PADS];
+        int pad_fds[WAIT_PADS], n = 0;
+        fds[n++] = (struct pollfd){.fd = wl_display_get_fd(g.display), .events = (short)(POLLIN | (want_out ? POLLOUT : 0))};
+        int wake = core_wake_fd();
+        if (wake >= 0)
+            fds[n++] = (struct pollfd){.fd = wake, .events = POLLIN};
+        const int first_pad = n;
+        int pads = gamepad_wait_fds(pad_fds, WAIT_PADS);
+        for (int i = 0; i < pads; i++)
+            fds[n++] = (struct pollfd){.fd = pad_fds[i], .events = POLLIN};
+        int r = poll(fds, (nfds_t)n, (int)core_wait_ms(left));
+        if (r < 0)
+        {
+            wl_display_cancel_read(g.display);
+            return false; /* EINTR: a signal; the caller may have a flag to look at */
+        }
+        if (r > 0 && (fds[0].revents & (POLLIN | POLLHUP | POLLERR)))
+            wl_display_read_events(g.display); /* a failure is the connection's error, seen at the top of the loop */
+        else
+            wl_display_cancel_read(g.display);
+        wl_display_dispatch_pending(g.display);
+        if (r > 0)
+        {
+            bool woke = wake >= 0 && (fds[1].revents & POLLIN) && core_wake_take();
+            bool pad = false;
+            for (int i = first_pad; i < n; i++)
+                pad |= fds[i].revents != 0;
+            if (woke || pad)
+                return true;
+        }
+        if (events_queued())
+            return true;
+        if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
+            return false;
+    }
+}
+
+/* The listeners the dispatch runs call the application's code (the hit test of a window with its own title bar): a program
+   that destroys the window there must wait until the dispatch is over, here as in the pump (see platform.h). */
+bool backend_wait_events(int64_t timeout_ns)
+{
+    core_scope_enter();
+    bool r = wait_events(timeout_ns);
+    core_scope_leave();
+    return r;
+}
+
+void backend_wake(void)
+{
 }
 
 void backend_pump_events(BackendWindow *b, Core *core)
@@ -2652,9 +3125,34 @@ float backend_content_scale(BackendWindow *b)
     return 1.0f;
 }
 
+/* A copy of the title cut to what one Wayland message holds: the connection carries 4096 bytes a message, and a longer one
+   (a title of 4 KB) is not sent, it breaks the connection (error 7, E2BIG) and every window of the program with it. The
+   cut is made on a character boundary. */
+#define WL_TITLE_MAX 4000
+
+static char *title_copy(const char *title)
+{
+    if (!title)
+        title = "";
+    size_t n = strlen(title);
+    if (n > WL_TITLE_MAX)
+    {
+        n = WL_TITLE_MAX;
+        while (n > 0 && ((unsigned char)title[n] & 0xC0) == 0x80)
+            n--;
+    }
+    char *copy = malloc(n + 1);
+    if (copy)
+    {
+        memcpy(copy, title, n);
+        copy[n] = 0;
+    }
+    return copy;
+}
+
 void backend_set_title(BackendWindow *b, const char *title)
 {
-    char *copy = strdup(title ? title : "");
+    char *copy = title_copy(title);
     if (!copy)
         return;
     if (b->title && strcmp(b->title, copy) != 0)
@@ -2956,6 +3454,376 @@ void *backend_clipboard_get(const char *mime, size_t *size)
         *size = 0;
     return NULL;
 }
+
+/* ========================================================================== */
+/*  the primary selection                                                     */
+/* ========================================================================== */
+
+#ifdef ZEN_WL_PRIMARY
+
+/* the text types we offer and understand, best first; STRING is Latin-1 and is read as such */
+static const char *const primary_mimes[] = {"text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING"};
+#define PRIMARY_MIME_COUNT 3 /* the ones we offer: not STRING, whose bytes are not UTF-8 */
+#define PRIMARY_STRING 3
+#define PRIMARY_READ_LIMIT (512u << 20) /* a bigger selection is refused (the same limit as X11's) */
+#define PRIMARY_STEP_MS 1000            /* wait for the source, per step */
+#define PRIMARY_BASE_MS 10000           /* the whole transfer: this and 4 ms for every KB that has arrived */
+#define PRIMARY_DEAD_MS 10000           /* how long a source that did not answer is not asked again */
+
+static void offer_offer(void *data, struct zwp_primary_selection_offer_v1 *offer, const char *mime)
+{
+    (void)offer;
+    PrimaryOffer *po = data;
+    for (int i = 0; i < (int)(sizeof primary_mimes / sizeof primary_mimes[0]); i++)
+        if (strcmp(mime, primary_mimes[i]) == 0 && (po->best < 0 || i < po->best))
+            po->best = i;
+}
+
+static const struct zwp_primary_selection_offer_v1_listener primary_offer_listener = {.offer = offer_offer};
+
+static void primary_offer_free(PrimaryOffer *po)
+{
+    if (!po)
+        return;
+    zwp_primary_selection_offer_v1_destroy(po->offer);
+    free(po);
+}
+
+static void primary_source_free(PrimarySource *ps)
+{
+    if (!ps)
+        return;
+    zwp_primary_selection_source_v1_destroy(ps->src);
+    free(ps->text);
+    free(ps);
+}
+
+/* Write all of it to the pipe the reader gave us, without waiting for ever for a reader that does not read (the whole
+   transfer has a deadline, as the read has), and without a SIGPIPE killing the program when the reader goes away. */
+static void primary_write_all(int fd, const char *p, size_t n)
+{
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &block, &old);
+    const double end = now_ms() + PRIMARY_BASE_MS + (double)n / 256.0;
+    while (n)
+    {
+        ssize_t w = write(fd, p, n);
+        if (w > 0)
+        {
+            p += w;
+            n -= (size_t)w;
+        }
+        else if (w < 0 && errno == EINTR)
+            continue;
+        else if (w < 0 && errno == EAGAIN)
+        {
+            double left = end - now_ms();
+            if (left <= 0)
+                break;
+            struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+            poll(&pfd, 1, left > PRIMARY_STEP_MS ? PRIMARY_STEP_MS : (int)left);
+        }
+        else
+            break; /* the reader closed its end */
+    }
+    sigset_t pending;
+    sigpending(&pending);
+    if (sigismember(&pending, SIGPIPE))
+    {
+        const struct timespec none = {0, 0};
+        sigtimedwait(&block, NULL, &none); /* the one our write raised: it does not fire when the mask is restored */
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
+/* Someone wants what we offer: the compositor hands us the write end of a pipe. */
+static void source_send(void *data, struct zwp_primary_selection_source_v1 *src, const char *mime, int32_t fd)
+{
+    (void)src;
+    PrimarySource *ps = data;
+    bool ours = false;
+    for (int i = 0; i < PRIMARY_MIME_COUNT; i++)
+        ours |= strcmp(mime, primary_mimes[i]) == 0;
+    if (ours)
+        primary_write_all(fd, ps->text, ps->len);
+    close(fd);
+}
+
+/* Another program took the selection (or the compositor does not want ours): what we offered is not wanted any more. */
+static void source_cancelled(void *data, struct zwp_primary_selection_source_v1 *src)
+{
+    (void)src;
+    PrimarySource *ps = data;
+    if (g.primary_own == ps)
+        g.primary_own = NULL;
+    primary_source_free(ps);
+}
+
+static const struct zwp_primary_selection_source_v1_listener primary_source_listener = {
+    .send = source_send,
+    .cancelled = source_cancelled,
+};
+
+static void device_data_offer(void *data, struct zwp_primary_selection_device_v1 *dev,
+                              struct zwp_primary_selection_offer_v1 *offer)
+{
+    (void)data;
+    (void)dev;
+    PrimaryOffer *po = calloc(1, sizeof *po);
+    if (!po)
+    {
+        zwp_primary_selection_offer_v1_destroy(offer);
+        return;
+    }
+    po->offer = offer;
+    po->best = -1;
+    zwp_primary_selection_offer_v1_add_listener(offer, &primary_offer_listener, po);
+    primary_offer_free(g.primary_pending); /* one that was never selected */
+    g.primary_pending = po;
+}
+
+static void device_selection(void *data, struct zwp_primary_selection_device_v1 *dev,
+                             struct zwp_primary_selection_offer_v1 *offer)
+{
+    (void)data;
+    (void)dev;
+    PrimaryOffer *po = offer ? zwp_primary_selection_offer_v1_get_user_data(offer) : NULL;
+    if (po == g.primary_pending)
+        g.primary_pending = NULL;
+    if (g.primary_offer != po)
+        primary_offer_free(g.primary_offer);
+    g.primary_offer = po;
+}
+
+static const struct zwp_primary_selection_device_v1_listener primary_device_listener = {
+    .data_offer = device_data_offer,
+    .selection = device_selection,
+};
+
+/* the device exists once both the manager and the seat have been announced, in whichever order */
+static void primary_try_device(void)
+{
+    if (g.primary_device || !g.primary_manager || !g.seat)
+        return;
+    g.primary_device = zwp_primary_selection_device_manager_v1_get_device(g.primary_manager, g.seat);
+    if (g.primary_device)
+        zwp_primary_selection_device_v1_add_listener(g.primary_device, &primary_device_listener, NULL);
+}
+
+static void primary_teardown(void)
+{
+    primary_offer_free(g.primary_pending);
+    if (g.primary_offer != g.primary_pending)
+        primary_offer_free(g.primary_offer);
+    primary_source_free(g.primary_own);
+    g.primary_pending = g.primary_offer = NULL;
+    g.primary_own = NULL;
+    if (g.primary_device)
+        zwp_primary_selection_device_v1_destroy(g.primary_device);
+    if (g.primary_manager)
+        zwp_primary_selection_device_manager_v1_destroy(g.primary_manager);
+    g.primary_device = NULL;
+    g.primary_manager = NULL;
+}
+
+bool backend_primary_supported(void)
+{
+    return g.primary_device != NULL;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    if (!g.primary_device)
+        return false;
+    if (!utf8 || len == 0)
+    {
+        /* given up: the compositor is told when it is ours; a selection of another program is left alone */
+        if (g.primary_own)
+        {
+            zwp_primary_selection_device_v1_set_selection(g.primary_device, NULL, g.serial);
+            primary_source_free(g.primary_own);
+            g.primary_own = NULL;
+            wl_display_flush(g.display);
+        }
+        return true;
+    }
+    PrimarySource *ps = calloc(1, sizeof *ps);
+    if (ps)
+        ps->text = malloc(len + 1);
+    if (!ps || !ps->text)
+    {
+        if (ps)
+            free(ps->text);
+        free(ps);
+        return error_set("out of memory");
+    }
+    memcpy(ps->text, utf8, len);
+    ps->text[len] = '\0';
+    ps->len = len;
+    ps->src = zwp_primary_selection_device_manager_v1_create_source(g.primary_manager);
+    if (!ps->src)
+    {
+        free(ps->text);
+        free(ps);
+        return error_set("the compositor did not give a primary selection source");
+    }
+    for (int i = 0; i < PRIMARY_MIME_COUNT; i++)
+        zwp_primary_selection_source_v1_offer(ps->src, primary_mimes[i]);
+    zwp_primary_selection_source_v1_add_listener(ps->src, &primary_source_listener, ps);
+    /* the compositor takes a selection on the serial of the last key or button press of this client */
+    zwp_primary_selection_device_v1_set_selection(g.primary_device, ps->src, g.serial);
+    PrimarySource *old = g.primary_own;
+    g.primary_own = ps;
+    primary_source_free(old); /* replaced: the compositor cancels it, and its events are dropped once it is destroyed */
+    wl_display_flush(g.display);
+    return true;
+}
+
+/* Read what another program offers: ask for the text through a pipe and read it, while the program that owns it writes.
+   The same protections as the X11 read: one second per step, a deadline for the whole transfer, a limit on the size, and a
+   source that did not answer is not asked again for a while. */
+static void *primary_read(PrimaryOffer *po, size_t *size)
+{
+    if (!po || po->best < 0 || now_ms() < po->dead_until)
+        return NULL;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0)
+        return NULL;
+    zwp_primary_selection_offer_v1_receive(po->offer, primary_mimes[po->best], fds[1]);
+    close(fds[1]);
+    if (wl_display_flush(g.display) < 0 && errno != EAGAIN)
+    {
+        close(fds[0]);
+        return NULL;
+    }
+    uint8_t *all = malloc(4096 + 1);
+    size_t have = 0, cap = 4096;
+    const double start = now_ms();
+    bool ok = all != NULL;
+    while (ok)
+    {
+        if (now_ms() - start > PRIMARY_BASE_MS + (double)have / 256.0)
+        {
+            po->dead_until = now_ms() + PRIMARY_DEAD_MS;
+            ok = false;
+            break;
+        }
+        struct pollfd pfd = {.fd = fds[0], .events = POLLIN};
+        int r = poll(&pfd, 1, PRIMARY_STEP_MS);
+        if (r == 0)
+        {
+            po->dead_until = now_ms() + PRIMARY_DEAD_MS; /* neither data nor the end: it is not asked again for a while */
+            ok = false;
+            break;
+        }
+        if (r < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            ok = false;
+            break;
+        }
+        if (have == cap)
+        {
+            if (cap >= PRIMARY_READ_LIMIT)
+            {
+                ok = false;
+                break;
+            }
+            uint8_t *grown = realloc(all, cap * 2 + 1);
+            if (!grown)
+            {
+                ok = false;
+                break;
+            }
+            all = grown;
+            cap *= 2;
+        }
+        ssize_t n = read(fds[0], all + have, cap - have);
+        if (n > 0)
+            have += (size_t)n;
+        else if (n == 0)
+            break; /* the end: the source closed its side */
+        else if (errno != EINTR && errno != EAGAIN)
+            ok = false;
+    }
+    close(fds[0]);
+    if (!ok)
+    {
+        free(all);
+        return NULL;
+    }
+    all[have] = '\0';
+    if (po->best == PRIMARY_STRING)
+    {
+        /* Latin-1 widened to UTF-8 */
+        uint8_t *wide = malloc(have * 2 + 1);
+        if (!wide)
+        {
+            free(all);
+            return NULL;
+        }
+        size_t n = 0;
+        for (size_t i = 0; i < have; i++)
+        {
+            if (all[i] < 0x80)
+                wide[n++] = all[i];
+            else
+            {
+                wide[n++] = (uint8_t)(0xC0 | (all[i] >> 6));
+                wide[n++] = (uint8_t)(0x80 | (all[i] & 0x3F));
+            }
+        }
+        wide[n] = '\0';
+        free(all);
+        all = wide;
+        have = n;
+    }
+    *size = have;
+    return all;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (!g.primary_device)
+        return NULL;
+    dispatch(0); /* what the compositor has said since the last frame: a selection taken, ours cancelled */
+    if (g.primary_own)
+    {
+        uint8_t *copy = malloc(g.primary_own->len + 1);
+        if (!copy)
+            return NULL;
+        memcpy(copy, g.primary_own->text, g.primary_own->len + 1);
+        *size = g.primary_own->len;
+        return copy;
+    }
+    return primary_read(g.primary_offer, size);
+}
+
+#else /* the compositor protocol file is not installed: there is no primary selection to offer */
+
+bool backend_primary_supported(void)
+{
+    return false;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    (void)utf8, (void)len;
+    return false;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    if (size)
+        *size = 0;
+    return NULL;
+}
+
+#endif
 
 int backend_monitor_count(void)
 {

@@ -25,6 +25,17 @@ void backend_destroy(BackendWindow *b);
    only for the duration of the call. */
 void backend_pump_events(BackendWindow *b, Core *core);
 
+/* Sleep until the OS has events for the windows (backend_pump_events would find some), platform_wake was called, something
+   the core polls has input (gamepads), or timeout_ns have passed (negative: no limit); returns at once if any of that is
+   already so. The events stay where they are: nothing is handed to the core here. Returns true when there is something for
+   the next backend_pump_events to deliver or a wake was taken; false when the time ran out, a signal interrupted the sleep,
+   or only a deadline of the backend's own came due (a key held that must be looked at, a repeat, a drop that gave up: the
+   next backend_pump_events does that work, so the caller runs one in any case). Main thread only. backend_wake is the
+   backend's own half of platform_wake, for a backend whose sleep is not on core_wake_fd / core_wake_handle (Android's
+   looper); any thread, and it must not touch a window: empty elsewhere. */
+bool backend_wait_events(int64_t timeout_ns);
+void backend_wake(void);
+
 void backend_swap(BackendWindow *b);
 
 /* geometry - two distinct sizes (see hi-DPI gotcha) */
@@ -103,6 +114,14 @@ void backend_set_mouse_mode(BackendWindow *b, int mode); /* MOUSE_MODE_* */
 bool backend_clipboard_set(const ClipboardItem *items, int count);
 bool backend_clipboard_has(const char *mime);
 void *backend_clipboard_get(const char *mime, size_t *size);
+
+/* the primary selection (the text selected in a program, pasted by the middle button), text only. supported says whether
+   there is one (X11; Wayland when the compositor has the protocol; the fake): where it is false set returns false without an
+   error and get returns NULL. set copies the UTF-8 text; NULL or length 0 gives the selection up. get returns a malloc'd
+   copy followed by a NUL byte that *size does not count, or NULL when nobody owns the selection or it holds no text. */
+bool backend_primary_supported(void);
+bool backend_primary_set(const char *utf8, size_t len);
+void *backend_primary_get(size_t *size);
 
 /* monitors - one shared virtual coordinate space */
 int backend_monitor_count(void);

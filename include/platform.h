@@ -139,13 +139,15 @@ extern "C"
         EVENT_WINDOW_RESTORE,
         EVENT_WINDOW_ENTER,         /* pointer entered or left the window */
         EVENT_WINDOW_SCALE_CHANGED, /* moved to a monitor with a different scale */
-        EVENT_WINDOW_DROP,          /* paths are valid only during this event; on the web the files are in
-                                       the MEMFS under /drop/<name> (see platform_web_fetch_file) */
+        EVENT_WINDOW_DROP,          /* the paths stay valid until the next drop on the window or its destruction (the
+                                       poll_event that reads the event comes after the message was handled): copy what
+                                       you keep; on the web the files are in the MEMFS under /drop/<name> (see
+                                       platform_web_fetch_file) */
 
         EVENT_KEY,  /* a physical key changed state; data.key.scancode is the system's own code for the key
                        (the X keycode, the Win32 scancode, the macOS virtual key code), also for a key that has
                        no KEY_* (key is then KEY_NULL) */
-        EVENT_CHAR, /* text input, one Unicode codepoint */
+        EVENT_CHAR, /* text input, one Unicode codepoint; not for a shortcut (Ctrl or Super held): see "Text and shortcuts" below */
         EVENT_MOUSE_MOVE,
         EVENT_MOUSE_BUTTON,
         EVENT_MOUSE_WHEEL,
@@ -327,6 +329,23 @@ extern "C"
 #define log_warn(...) log_message(LOGLEVEL_WARN, __VA_ARGS__)
 #define log_error(...) log_message(LOGLEVEL_ERROR, __VA_ARGS__)
 
+    /* Window handles. A window is valid from window_create until window_destroy or platform_shutdown (which destroys the
+       windows still open); after that its pointer must not be used, as after free.
+       - A NULL window (window_create failed and was not checked) is harmless in every function that takes one: it returns
+         a neutral value and does nothing. Neutral means false, 0, NULL, "" for window_text_composition, zeros through
+         the out pointers (sizes, positions, mouse, touch, gesture vectors); the exceptions are window_should_close
+         (true: a window that does not exist is closed, so a loop on it ends), window_content_scale (1), touch_id and
+         monitor_from_window (-1). The dialogs take the window only as a parent and accept NULL for "no parent". The cost
+         is one predictable branch per call (tests/test_null_handles.c checks every function of this header).
+       - window_destroy on a window already destroyed, or after platform_shutdown, does nothing. In an event hook, a frame
+         callback of app_run, a hit test or a live callback it is deferred: the window closes at once (window_should_close
+         is true, so the loop ends) and is freed when window_begin_frame or app_run returns, whichever it was called
+         from; it can destroy its own window, another one, and create one. platform_shutdown called there waits the same
+         way.
+       - Without the platform (before platform_init succeeds, after platform_shutdown) window_create returns NULL, the
+         monitor, clipboard and cursor functions fail or answer empty (monitor_count 0, clipboard_get ""), and
+         platform_init / platform_shutdown called twice in a row do nothing the second time. Window functions are for
+         the thread that created the window. */
     PLATFORM_API PlatformWindow *window_create(const WindowConfig *cfg);
     PLATFORM_API void window_destroy(PlatformWindow *w);
 
@@ -343,6 +362,77 @@ extern "C"
        Use this instead of a manual loop when targeting every platform. */
     typedef void (*FrameCallback)(PlatformWindow *w, void *user);
     PLATFORM_API void app_run(PlatformWindow *w, FrameCallback frame, void *user);
+
+    /* ---- Sleeping until something happens (an application that is idle uses no CPU) ----
+       app_run and a loop of window_begin_frame calls run flat out (vsync, if the window has it, is all that slows them).
+       A program that draws only when something changed sleeps in platform_wait_events instead:
+
+           while (!window_should_close(w)) {
+               platform_wait_events(-1);       // or a timeout in seconds: a blinking caret, a clock
+               window_begin_frame(w);          // the events the wait woke for are here
+               ... handle input, draw if anything changed ...
+           }
+
+       platform_wait_events(timeout_seconds) returns when the OS has events for the application's windows, when platform_wake
+       is called, when a gamepad has input, or when the timeout has passed (negative: no limit; 0: look and return, a poll).
+       It returns true when something is waiting for the next window_begin_frame (events, a wake, a gamepad) and false when
+       the time ran out. It never consumes an event: window_begin_frame and poll_event see them exactly as if the wait had not
+       been there, so a loop that calls it before every frame loses nothing. Events that are already waiting (in the
+       connection, or read earlier by a call that had to wait for the server) make it return at once, true.
+       It may also return false early, before the timeout and with nothing for the application: a signal arrived (EINTR: the
+       handler's flag can be looked at; not on macOS, where the sleep is AppKit's run loop and no signal interrupts it: a
+       handler that wants the loop to look at its flag calls platform_wake there, which is right everywhere), or the backend has work of its own that only window_begin_frame does and that is due
+       (see below). Call window_begin_frame after every return, true or false, and loop: that is the whole contract.
+       What the wait does not starve (it returns in time for each, so the next window_begin_frame serves it):
+         - a click released in the frame of its press, and a gesture that turns from a tap into a hold or ends (the state
+           that only the next window_begin_frame changes): true at once;
+         - gamepads and joysticks: on Linux their descriptors are watched (true when one has input or a device comes or goes);
+           on Windows XInput and winmm cannot be waited on, so while a pad is plugged in the sleep is at most 8 ms, and with
+           none at most one second (the pad scan);
+         - a key held, with the window focused (X11 only): false after at most 0.1 s, the time the check for a key release
+           the server never sent is due; the keyboard's own auto-repeat arrives as events and needs nothing (Wayland has no
+           server-side repeat: the sleep ends in time for each repeat the library makes itself, false);
+         - a drag-and-drop whose source never sends the files (X11): false when the five seconds it is given are up;
+         - clipboard transfers in progress are served by the events they raise (true), a paste in progress is a call that
+           does not return to the loop; input-method pre-edit and cursor shape changes arrive as events or are done by the
+           call that asks for them; live resize on Windows runs inside the OS and is served by the live callback (the wait is
+           not called then).
+       Not waited on, so documented rather than hidden: an input method that talks over a socket of its own instead of the X
+       connection (rare; the ones in use go through the connection); another thread of the program that reads the X
+       connection itself (a GL or Vulkan driver may take events off it while it waits for its own reply) can leave events in a
+       queue while the socket is quiet: call platform_wake after it, or wait with a timeout. On the web there is nothing to
+       sleep on (the browser calls the frame): it returns true at once. On Android it sleeps in the looper (events, wake).
+       Call it from the thread that drives the windows, not from an event hook, a hit test or a live callback. Before
+       platform_init succeeds or after platform_shutdown it sleeps on the wake alone (true only if woken).
+
+       platform_wake() makes a wait that is blocked return true, or the next one if none is blocked now: a wake that finds no
+       wait stays pending and ends the next wait at once, once (wakes that come before it count as one). It is for the
+       other threads (a worker that finished, a timer, a socket reader: set the data, then wake), and it may be called from any
+       thread at any time, also before platform_init and while another thread shuts the platform down. It is async-signal-safe
+       once the platform has been initialized or waited on (it is a write to a descriptor that exists), so a signal handler
+       can use it. Ten thousand wakes from four threads against a waiting main thread lose none (tests/test_wait.c, run
+       under ThreadSanitizer). Nothing is delivered with the wake: it carries no data, the waker's own queue does. */
+    PLATFORM_API bool platform_wait_events(double timeout_seconds);
+    PLATFORM_API void platform_wake(void);
+
+    /* app_run for programs that draw on demand: the loop sleeps in platform_wait_events and runs the frame callback only when
+       events arrived, platform_wake was called, the frame called app_request_frame (an animation going on), or the time
+       given to app_request_frame_at has come. The first frame always runs. window_begin_frame still runs on every turn, so
+       input state, edges and should_close stay exact; window_swap runs after a frame only. Idle, it uses no CPU: the
+       process sleeps in poll(2). On the web the browser paces the frames and this is app_run.
+
+           static void frame(PlatformWindow *w, void *user) {
+               draw(w);
+               if (animating) app_request_frame();                       // again, now
+               else if (caret_blinks) app_request_frame_at(time_seconds() + 0.5);
+           }
+           ... app_run_events(w, frame, &state);
+
+       app_request_frame and app_request_frame_at are for the thread that runs the loop (from another one, call
+       platform_wake: that makes the next frame run too). Of two deadlines the earlier counts, and a frame run clears them. */
+    PLATFORM_API void app_run_events(PlatformWindow *w, FrameCallback frame, void *user);
+    PLATFORM_API void app_request_frame(void);
+    PLATFORM_API void app_request_frame_at(double seconds); /* on the clock of time_seconds() */
 
     /* Iterate the events collected this frame. Returns false when the queue is
        empty. Does not clear input state, so state queries stay valid in the same
@@ -526,12 +616,24 @@ extern "C"
        to call from several threads. */
     PLATFORM_API int64_t process_spawn(const char *path, const char *const *args, int argc, bool open_console);
     PLATFORM_API bool process_is_running(int64_t id);
-    /* -1 while the process runs or when the id is unknown. */
+    /* -1 while the process runs or when the id is unknown. An id that no process id can be (0, negative, wider than the
+       system's 32 bits) is unknown to every function here, and no process is touched. */
     PLATFORM_API int process_exit_code(int64_t id);
     /* Ends the process and reaps it. An id that process_spawn did not hand out, or whose record is among
        those the table has forgotten, is refused: the number may belong to some other process by now. A child that
        ended is waited for by the next call into these functions, so it does not stay a zombie. */
     PLATFORM_API bool process_kill(int64_t id);
+    /* Ends the process and what it started, and reaps it; a second call, or one on a process that ended, succeeds.
+       POSIX: SIGKILL to the process group process_spawn made (the process id is its id), so a grandchild that outlived
+       the leader is reached too, also after the leader ended and was waited for (the system does not give the number out
+       again while a group with it has a member). A child that left the group (setsid, setpgid) is out of reach. Once
+       the last member is gone the call does nothing and succeeds: the number may be some other process's group by then,
+       and the library does not signal it. (Between two calls into these functions the last member can go and the
+       system give the number to a stranger's group; the next call into them is what notices.)
+       Windows: the job the process was assigned to, which holds every descendant (none can leave it: the job does not
+       allow breakaway), those that outlive it included; where the process could not be put in a job (it was in one that
+       does not nest, before Windows 8) only the process is ended. The same rules for unknown ids as process_kill. */
+    PLATFORM_API bool process_kill_tree(int64_t id);
 
     /* ========================================================================== */
     /*  Crash report                                                              */
@@ -809,6 +911,24 @@ extern "C"
        key queue, so it carries layout and composed input correctly. */
     PLATFORM_API uint32_t char_get_pressed(PlatformWindow *w);
 
+    /* Text and shortcuts. EVENT_CHAR is what the user typed, and a shortcut is not typing: a key pressed while Ctrl or Super
+       (Meta: the Windows or the Command key) is held gives its EVENT_KEY, with the modifier in mods, and no EVENT_CHAR. Ctrl+A in a
+       text field selects, it does not type an "a"; Ctrl+1, Ctrl+minus, Ctrl+space and Super+a type nothing either. It is the same
+       on X11, Wayland, Windows, the web and the fake backend of the tests (Android makes no text from keys yet). Shift and Alt do not
+       change it: Shift+a is an "A", and Alt+a is an "a" where the platform makes text of it (Windows sends Alt+letter as a system
+       key, which makes none). What still types, whatever the modifiers of the key that finished it:
+         - AltGr: what a layout puts on its AltGr level is text. X11 and Wayland keep AltGr apart from Ctrl; Windows and the
+           browsers report it as Ctrl and Alt together, and there a character that comes with that pair is text (the web
+           asks the browser: getModifierState("AltGraph"); a Ctrl+Alt that is not AltGr is a shortcut).
+         - dead keys and Compose sequences: the character they compose is text. A shortcut in the middle of one is not part
+           of it: on Wayland it cancels the sequence (Ctrl+a after a dead acute is a Ctrl+a, not an a-acute); on X11 the input
+           method decides.
+         - what an input method commits (EVENT_TEXT_EDIT ends and the text arrives as EVENT_CHAR): X11 and Windows. The web
+           has no input method (a canvas is not an editable element) and the Wayland backend has no text-input protocol yet.
+       The clipboard shortcuts of the old desktops arrive as the key with its modifier, and make no text: Shift+Insert (paste),
+       Ctrl+Insert (copy) and Shift+Delete (cut) are KEY_INSERT and KEY_DELETE with KEYMOD_SHIFT or KEYMOD_CTRL in mods, on every
+       platform, to be bound next to Ctrl+V, Ctrl+C and Ctrl+X. */
+
     /* Text input and input methods. On by default: typed characters arrive as
        EVENT_CHAR and an input method may compose first (EVENT_TEXT_EDIT). A game that
        reads keys, not text, can turn it off, so no input method interferes with the
@@ -1041,7 +1161,25 @@ extern "C"
        text are not supported on Android and the web, where the data stays inside the
        app. The platform keeps its own copy of what you set. Reading blocks while
        another application answers (X11 waits up to one second per step); the owner
-       must keep running its event loop for others to be able to paste. */
+       must keep running its event loop for others to be able to paste.
+
+       The web: a page cannot read the clipboard at will, and the asynchronous API (navigator.clipboard) is not there on a page
+       opened over plain http. clipboard_get returns what the program put there, or the text the browser handed the page in a
+       paste event. Ctrl or Meta with V, C, X, and Shift+Insert, Ctrl+Insert, Shift+Delete are not swallowed by the page, so the
+       browser fires its paste, copy and cut events:
+         - paste (a key, or the browser's menu): the text becomes the clipboard content, and then the paste key reaches the
+           program (for a paste from the menu, which has no key, a Ctrl+V, Meta+V on a Mac), so clipboard_get in the handling of
+           the key returns what was pasted. A paste that holds no text (an image, files) leaves the content as it was.
+         - copy and cut: the program's frame runs once, inside the browser's event, right after the key is queued (the program
+           has not seen the key before this): what it sets with clipboard_set in answer goes to the browser's clipboard in that
+           very event, and a program that sets nothing (nothing selected) leaves the browser's clipboard alone.
+         - clipboard_set at any other time (a Copy button): navigator.clipboard when the page has it, else a hidden textarea
+           and document.execCommand("copy"); a browser that refuses outside of a gesture gets the text again at the next
+           mouse, touch or key event of the page.
+       A field of the page itself (an <input>) keeps its own paste, copy and cut. A build with the program on a worker
+       (PROXY_TO_PTHREAD) cannot run its frame inside the event: a copy or cut gets the text the program had set already, and
+       otherwise the text set a frame later is written through navigator.clipboard (such a build needs a secure context, where
+       it exists). */
 #define CLIPBOARD_TEXT "text/plain"
 #define CLIPBOARD_PNG "image/png"
 #define CLIPBOARD_URIS "text/uri-list"
@@ -1068,6 +1206,37 @@ extern "C"
        source offers are not read. */
     PLATFORM_API bool clipboard_set_image(const Framebuffer *fb);
     PLATFORM_API bool clipboard_get_image(Framebuffer *out);
+
+    /* The primary selection: the text that is selected in a program, which a click of the middle mouse button pastes into
+       another one. It is a second place for text, independent of the clipboard: it changes when the user selects, not when
+       they copy, and setting one does not touch the other. Only X11 and Wayland have it; on Windows, Android and the web
+       there is no such thing (the middle button pastes nothing), and the fake backend of the tests has a second in-memory
+       buffer.
+
+       clipboard_has_primary_support: true when there is a primary selection to set and get: X11 always, Wayland when the
+       compositor offers zwp_primary_selection_device_manager_v1 and there is a seat (GNOME, KDE and wlroots do), the fake
+       backend. False before platform_init.
+
+       clipboard_set_primary(utf8): this program offers the UTF-8 text as the primary selection (the platform keeps its
+       own copy, as clipboard_set does) and becomes its owner, which makes the program that owned it before lose it. NULL or
+       "" gives the selection up: ownership is released if this program has it, and a selection another program owns is
+       left alone (an empty selection is not one). Returns true when the selection was taken or given up. Returns false,
+       and sets no error, where there is no primary selection; false with platform_get_error() when it could not be set
+       (out of memory, no ownership on X11; on Wayland the compositor accepts a selection only from the window that has
+       the keyboard focus, on the strength of its last key or button press: call it while the window is focused, from the
+       handling of the mouse button or key that made the selection). The text is served while the program runs its event loop
+       (window_begin_frame), as the clipboard is, and it is gone when the program ends: nothing keeps the primary
+       selection after its owner.
+
+       clipboard_get_primary: the text of the primary selection, ours or another program's; "" when nobody owns it, it holds no
+       text, a read failed, or there is none on this platform: it never returns NULL. The string belongs to the platform and
+       is valid until the next clipboard_get_primary. Reading from another program blocks as clipboard_get does and has the same
+       protections: one second per step on X11, a deadline for the whole of a transfer by INCR, a limit on the size, an owner that
+       did not answer is not asked again for a while. A click of the middle button is the moment to read it (EVENT_MOUSE_BUTTON,
+       MOUSE_MIDDLE), not every frame. */
+    PLATFORM_API bool clipboard_has_primary_support(void);
+    PLATFORM_API bool clipboard_set_primary(const char *utf8);
+    PLATFORM_API const char *clipboard_get_primary(void);
 
     /* ========================================================================== */
     /*  OS / filesystem                                                           */

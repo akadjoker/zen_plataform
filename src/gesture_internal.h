@@ -49,6 +49,10 @@ void gesture_feed(GestureState *g, GestureAction action, int count, const GVec2 
 /* Once per frame, after the events were fed. */
 void gesture_update(GestureState *g, double now);
 
+/* Whether the next gesture_update changes what the gesture reports (a tap that turns into a hold, a swipe that ends): a loop
+   that sleeps between events must run that frame too. */
+bool gesture_update_pending(const GestureState *g);
+
 unsigned gesture_state_detected(const GestureState *g);
 float gesture_state_hold_duration(const GestureState *g, double now);
 

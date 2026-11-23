@@ -50,6 +50,7 @@
 #include <string.h>
 
 #include "core_internal.h"
+#include "gamepad_internal.h"
 #include "backend.h"
 #include "error_internal.h"
 #include "pasteboard_type.h"
@@ -207,7 +208,11 @@ static struct
     NSCursor *shape_cursors[CURSOR_COUNT]; /* the system cursors, looked up once */
     void *gl_framework;         /* dlopen of OpenGL.framework, for gl_proc_address */
     int fullscreen_windows;     /* how many windows hold the menu bar and the Dock hidden */
+    bool waiting;               /* inside the sleep of backend_wait_events (main thread only) */
+    CFFileDescriptorRef wake_watch; /* the core's wake descriptor as the main run loop sees it; made once, kept */
 } g;
+
+static void wait_poke(void);
 
 struct PlatformCursor
 {
@@ -227,8 +232,15 @@ static void push(BackendWindow *b, const Event *e)
 {
     if (b->pumping && b->core)
         core_push_event(b->core, e);
-    else if (b->pending_count < PENDING_MAX)
-        b->pending[b->pending_count++] = *e;
+    else
+    {
+        if (b->pending_count < PENDING_MAX)
+            b->pending[b->pending_count++] = *e;
+        /* an event AppKit made with no NSEvent behind it (a notification, a timer) while backend_wait_events sleeps: the sleep
+           ends, as it would for one that came through the queue */
+        if (g.waiting)
+            wait_poke();
+    }
 }
 
 static bool on_main_thread(void)
@@ -2571,6 +2583,161 @@ void backend_pump_events(BackendWindow *b, Core *core)
         }
     }
     b->pumping = false;
+}
+
+/* ========================================================================== */
+/*  sleeping until something happens                                          */
+/* ========================================================================== */
+
+/* The sleep of platform_wait_events is AppKit's own: -nextEventMatchingMask with dequeue:NO runs the main run loop until an
+   event is in the application's queue and leaves it there for backend_pump_events. Two things end it that are no event of the
+   system's, and both do it with an event of the application's own put at the head of the queue (a marker, taken out again by the
+   wait): platform_wake, and an event the backend made outside the pump (push).
+
+   platform_wake is a write to the core's wake descriptor and nothing else (any thread, a signal handler: backend_wake is empty).
+   The main run loop watches the descriptor (a CFFileDescriptor source) and its callback, which runs on the main thread inside
+   the sleep, posts the marker. Nothing of AppKit is touched from another thread.
+
+   Unlike poll(2), the run loop is not interrupted by a signal: a handler that wants the loop to look at a flag calls
+   platform_wake, and a signal whose handler does not is not seen until the wait ends for another reason. */
+enum { ZEN_WAIT_MARKER = 0x5A45 }; /* the subtype of the marker event */
+
+static bool is_wait_marker(NSEvent *event)
+{
+    return [event type] == NSEventTypeApplicationDefined && [event subtype] == ZEN_WAIT_MARKER;
+}
+
+static void wait_poke(void)
+{
+    NSEvent *marker = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                         location:NSZeroPoint
+                                    modifierFlags:0
+                                        timestamp:0
+                                     windowNumber:0
+                                          context:nil
+                                          subtype:ZEN_WAIT_MARKER
+                                            data1:0
+                                            data2:0];
+    [NSApp postEvent:marker atStart:YES];
+}
+
+/* The wake descriptor is readable: on the main thread, from the run loop. The callback of a CFFileDescriptor is one shot, so the
+   wait asks for it again every time it is about to sleep. */
+static void wake_readable(CFFileDescriptorRef f, CFOptionFlags types, void *info)
+{
+    (void)f, (void)types, (void)info;
+    if (g.waiting)
+    {
+        @autoreleasepool
+        {
+            wait_poke();
+        }
+    }
+}
+
+static void wake_watch_arm(void)
+{
+    if (!g.wake_watch)
+    {
+        int fd = core_wake_fd();
+        if (fd < 0)
+            return;
+        g.wake_watch = CFFileDescriptorCreate(kCFAllocatorDefault, fd, false, wake_readable, NULL);
+        if (!g.wake_watch)
+            return;
+        CFRunLoopSourceRef source = CFFileDescriptorCreateRunLoopSource(kCFAllocatorDefault, g.wake_watch, 0);
+        if (source)
+        {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+            CFRelease(source);
+        }
+    }
+    CFFileDescriptorEnableCallBacks(g.wake_watch, kCFFileDescriptorReadCallBack);
+}
+
+static bool any_pending(void)
+{
+    for (BackendWindow *w = g.windows; w; w = w->next)
+        if (w->pending_count > 0)
+            return true;
+    return false;
+}
+
+bool backend_wait_events(int64_t timeout_ns)
+{
+    int64_t limit = timeout_ns;
+    bool live = false;
+    int64_t pads = gamepad_wait_ns(&live);
+    if (pads >= 0 && (limit < 0 || pads < limit))
+        limit = pads;
+    else
+        live = false; /* the caller's own timeout comes first: that tick is not a device's */
+    const int64_t start = (int64_t)time_nanos();
+    for (;;)
+    {
+        if (any_pending())
+            return true;
+        if (core_wake_take())
+            return true;
+        @autoreleasepool
+        {
+            NSDate *until = [NSDate distantFuture];
+            if (limit >= 0)
+            {
+                int64_t left = limit - ((int64_t)time_nanos() - start);
+                until = left > 0 ? [NSDate dateWithTimeIntervalSinceNow:(double)left / 1e9] : [NSDate distantPast];
+            }
+            wake_watch_arm();
+            g.waiting = true;
+            NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:until inMode:NSDefaultRunLoopMode dequeue:NO];
+            g.waiting = false;
+            if (event && !is_wait_marker(event))
+                return true; /* the system's: it stays in the queue for the pump */
+            if (event)
+            {
+                /* the marker is the first of the queue: out it goes, and the loop looks at what it stood for (a wake to take, an
+                   event waiting in a window); one left over from a wait that ended for another reason stands for nothing */
+                NSEvent *first = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                    untilDate:[NSDate distantPast]
+                                                       inMode:NSDefaultRunLoopMode
+                                                      dequeue:YES];
+                if (first && !is_wait_marker(first))
+                {
+                    [NSApp postEvent:first atStart:YES]; /* not ours after all: back where it was */
+                    return true;
+                }
+                continue;
+            }
+        }
+        if (any_pending())
+            return true;
+        if (core_wake_take())
+            return true;
+        if (limit >= 0 && (int64_t)time_nanos() - start >= limit)
+            return live;
+    }
+}
+
+void backend_wake(void)
+{
+}
+
+/* macOS has no primary selection (the text selected in a program, pasted with the middle button). */
+bool backend_primary_supported(void)
+{
+    return false;
+}
+
+bool backend_primary_set(const char *utf8, size_t len)
+{
+    (void)utf8, (void)len;
+    return false;
+}
+
+void *backend_primary_get(size_t *size)
+{
+    (void)size;
+    return NULL;
 }
 
 void backend_run(BackendWindow *b, PlatformWindow *w, FrameCallback frame, void *user)

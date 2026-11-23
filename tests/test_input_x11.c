@@ -700,6 +700,174 @@ static void test_portuguese_text(PlatformWindow *w)
     drain(w);
 }
 
+/* ---- text and shortcuts ---- */
+
+typedef struct
+{
+    uint32_t chars[16];
+    int nchars;
+    int keys[16];
+    int mods[16];
+    bool down[16];
+    int nkeys;
+} Got;
+
+static void gather(PlatformWindow *w, Got *g)
+{
+    Event ev;
+    memset(g, 0, sizeof *g);
+    for (int i = 0; i < 25; i++)
+    {
+        window_begin_frame(w);
+        while (poll_event(w, &ev))
+        {
+            if (ev.type == EVENT_CHAR && g->nchars < 16)
+                g->chars[g->nchars++] = ev.data.codepoint;
+            else if (ev.type == EVENT_KEY && g->nkeys < 16)
+            {
+                g->keys[g->nkeys] = ev.data.key.key;
+                g->mods[g->nkeys] = ev.data.key.mods;
+                g->down[g->nkeys] = ev.data.key.down;
+                g->nkeys++;
+            }
+        }
+        time_sleep(3);
+    }
+}
+
+/* the press of `key` with the keys of `held` down before it, in order; released after, in the opposite order */
+static void chord(KeySym key, const KeySym *held, int nheld)
+{
+    for (int i = 0; i < nheld; i++)
+        XTestFakeKeyEvent(g_dpy, XKeysymToKeycode(g_dpy, held[i]), True, 0);
+    XTestFakeKeyEvent(g_dpy, XKeysymToKeycode(g_dpy, key), True, 0);
+    XTestFakeKeyEvent(g_dpy, XKeysymToKeycode(g_dpy, key), False, 0);
+    for (int i = nheld - 1; i >= 0; i--)
+        XTestFakeKeyEvent(g_dpy, XKeysymToKeycode(g_dpy, held[i]), False, 0);
+    XSync(g_dpy, False);
+}
+
+/* The rule (platform.h): a key pressed while Ctrl or Super is held is a shortcut and types nothing. Xlib answers Ctrl+1,
+   Ctrl+minus, Ctrl+comma with the plain character and Ctrl+space with a space, so those used to be typed. */
+static void test_chord_text(PlatformWindow *w)
+{
+    if (!XSupportsLocale())
+    {
+        printf("SKIP chord text: Xlib does not support the locale\n");
+        return;
+    }
+    drain(w);
+    static const KeySym ctrl[] = {XK_Control_L}, ctrl_shift[] = {XK_Control_L, XK_Shift_L}, super_[] = {XK_Super_L},
+                        ctrl_alt[] = {XK_Control_L, XK_Alt_L}, shift[] = {XK_Shift_L};
+    static const struct
+    {
+        const char *name;
+        KeySym key;
+        const KeySym *held;
+        int nheld;
+        int key_mods;
+    } chords[] = {
+        {"Ctrl+a", XK_a, ctrl, 1, KEYMOD_CTRL},
+        {"Ctrl+Shift+a", XK_a, ctrl_shift, 2, KEYMOD_CTRL | KEYMOD_SHIFT},
+        {"Ctrl+1", XK_1, ctrl, 1, KEYMOD_CTRL},
+        {"Ctrl+minus", XK_minus, ctrl, 1, KEYMOD_CTRL},
+        {"Ctrl+comma", XK_comma, ctrl, 1, KEYMOD_CTRL},
+        {"Ctrl+space", XK_space, ctrl, 1, KEYMOD_CTRL},
+        {"Ctrl+Alt+e", XK_e, ctrl_alt, 2, KEYMOD_CTRL | KEYMOD_ALT},
+        {"Super+a", XK_a, super_, 1, KEYMOD_SUPER},
+        {"Super+1", XK_1, super_, 1, KEYMOD_SUPER},
+    };
+    for (size_t i = 0; i < sizeof chords / sizeof chords[0]; i++)
+    {
+        chord(chords[i].key, chords[i].held, chords[i].nheld);
+        Got g;
+        gather(w, &g);
+        int pressed_mods = -1;
+        for (int k = 0; k < g.nkeys; k++)
+            if (g.down[k] && g.keys[k] != KEY_LEFT_CONTROL && g.keys[k] != KEY_LEFT_SHIFT && g.keys[k] != KEY_LEFT_SUPER &&
+                g.keys[k] != KEY_LEFT_ALT)
+                pressed_mods = g.mods[k];
+        if (g.nchars)
+            printf("  %s typed %d characters, the first U+%04X\n", chords[i].name, g.nchars, (unsigned)g.chars[0]);
+        CHECK(g.nchars == 0);
+        CHECK(pressed_mods == chords[i].key_mods);
+    }
+    /* the same keys without the modifier type */
+    static const struct
+    {
+        KeySym key;
+        const KeySym *held;
+        int nheld;
+        uint32_t text;
+    } plain[] = {{XK_a, NULL, 0, 'a'}, {XK_1, NULL, 0, '1'}, {XK_a, shift, 1, 'A'}, {XK_space, NULL, 0, ' '}};
+    for (size_t i = 0; i < sizeof plain / sizeof plain[0]; i++)
+    {
+        chord(plain[i].key, plain[i].held, plain[i].nheld);
+        Got g;
+        gather(w, &g);
+        CHECK(g.nchars == 1 && g.chars[0] == plain[i].text);
+    }
+}
+
+/* AltGr is a level of the key, not Ctrl: what the layout puts there is text, and the event says no Ctrl. The Portuguese
+   layout has '@' on AltGr+2. */
+static void test_altgr_text(PlatformWindow *w)
+{
+    if (!XSupportsLocale() || strcmp(nl_langinfo(CODESET), "UTF-8") != 0 || !getenv("ZP_PRIVATE_X") ||
+        system("setxkbmap pt 2> /dev/null") != 0)
+    {
+        printf("SKIP altgr: needs a UTF-8 locale, a private X server and setxkbmap\n");
+        return;
+    }
+    XSync(g_dpy, False);
+    drain(w);
+    CHECK(type_keysym(XK_at));
+    CHECK(type_keysym(XK_EuroSign));
+    XSync(g_dpy, False);
+    Got g;
+    gather(w, &g);
+    CHECK(g.nchars == 2 && g.chars[0] == '@' && g.chars[1] == 0x20AC);
+    for (int k = 0; k < g.nkeys; k++)
+        CHECK(!(g.mods[k] & KEYMOD_CTRL));
+    CHECK(system("setxkbmap us 2> /dev/null") == 0);
+    XSync(g_dpy, False);
+    drain(w);
+}
+
+/* The clipboard shortcuts of the old desktops arrive as the key with its modifier: a GUI binds them to paste, copy and
+   cut next to Ctrl+V, Ctrl+C and Ctrl+X. None of them types anything. */
+static void test_clipboard_shortcuts(PlatformWindow *w)
+{
+    drain(w);
+    static const KeySym shift[] = {XK_Shift_L}, ctrl[] = {XK_Control_L};
+    static const struct
+    {
+        const char *name;
+        KeySym key;
+        const KeySym *held;
+        int want_key, want_mods;
+    } k[] = {
+        {"Shift+Insert", XK_Insert, shift, KEY_INSERT, KEYMOD_SHIFT},
+        {"Ctrl+Insert", XK_Insert, ctrl, KEY_INSERT, KEYMOD_CTRL},
+        {"Shift+Delete", XK_Delete, shift, KEY_DELETE, KEYMOD_SHIFT},
+    };
+    for (size_t i = 0; i < 3; i++)
+    {
+        chord(k[i].key, k[i].held, 1);
+        Got g;
+        gather(w, &g);
+        int found = -1;
+        for (int j = 0; j < g.nkeys; j++)
+            if (g.down[j] && g.keys[j] == k[i].want_key)
+                found = g.mods[j];
+        if (found != k[i].want_mods)
+            printf("  %s arrived with modifiers %d, wanted %d\n", k[i].name, found, k[i].want_mods);
+        CHECK(found == k[i].want_mods);
+        CHECK(g.nchars == 0);
+    }
+}
+
+
 static void test_key_sweep(PlatformWindow *w)
 {
     static const struct
@@ -1459,6 +1627,9 @@ int main(void)
             test_text_once(w);
             test_dead_key(w);
             test_portuguese_text(w);
+            test_chord_text(w);
+            test_altgr_text(w);
+            test_clipboard_shortcuts(w);
             test_grab_keeps_keys(w);
             test_key_sweep(w);
             test_keys_together(w);

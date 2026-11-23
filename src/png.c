@@ -15,6 +15,20 @@
 #define STBI_NO_LINEAR
 #define STBI_NO_STDIO
 #define STBI_MAX_DIMENSIONS (1 << 15)
+/* stb_image's zlib reader goes on feeding zeros after the end of its input and expands its output without a limit (a
+   70-byte file ran for minutes and overflowed an int): every allocation it makes goes through png_realloc, which refuses
+   to grow past what the image in the header can need (png_decode sets g_png_cap from IHDR before it calls stb). */
+static _Thread_local size_t g_png_cap;
+static void *png_realloc(void *p, size_t oldsz, size_t newsz)
+{
+    (void)oldsz;
+    if (g_png_cap && newsz > g_png_cap)
+        return NULL;
+    return realloc(p, newsz);
+}
+#define STBI_MALLOC(sz) malloc(sz)
+#define STBI_REALLOC_SIZED(p, oldsz, newsz) png_realloc(p, oldsz, newsz)
+#define STBI_FREE(p) free(p)
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -203,12 +217,86 @@ uint8_t *png_encode(const Framebuffer *fb, size_t *out_size)
 
 /* ---- decoder ---- */
 
+/* The most pixels png_decode takes (8192 x 8192): the decoder allocates the whole image from the size in the header, and
+   a header is a few bytes. */
+#define PNG_MAX_PIXELS ((uint64_t)1 << 26)
+
+static uint32_t be32(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+/* What stb_image does not check before it allocates: it grows its buffer to the length a chunk declares (a 100-byte file
+   with an IDAT of 1.9 GB asked for 1.9 GB) and sizes the image from IHDR. A file whose chunks declare more than the file
+   holds, or whose image is too large, cannot be a PNG worth decoding: refused here, before stb sees it. */
+static bool png_plausible(const uint8_t *d, size_t n, size_t *cap)
+{
+    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    if (n < 8 + 12 + 13 || memcmp(d, sig, 8) != 0)
+        return false;
+    size_t pos = 8;
+    bool header = false, data = false;
+    uint64_t idat_total = 0, raw_least = 0;
+    while (pos + 8 <= n) /* the header of a chunk: stb reads an IDAT's data before its CRC, which a truncated file may lack */
+    {
+        uint32_t len = be32(d + pos);
+        if (len > n - pos - 8)
+            return false; /* the chunk says it is longer than what is left of the file */
+        if (!header)
+        {
+            if (len != 13 || memcmp(d + pos + 4, "IHDR", 4) != 0)
+                return false;
+            uint32_t w = be32(d + pos + 8), h = be32(d + pos + 12);
+            if (w == 0 || h == 0 || w > (1u << 15) || h > (1u << 15) || (uint64_t)w * h > PNG_MAX_PIXELS)
+                return false;
+            /* what the decoder needs for the inflated data, as stb computes it (filter byte per row included), twice
+               over for the growth of its buffers; the colour type gives the components, the depth the bits */
+            static const uint8_t comps[7] = {1, 0, 3, 1, 2, 0, 4};
+            unsigned depth = d[pos + 8 + 8], ctype = d[pos + 8 + 9];
+            if (ctype > 6 || comps[ctype] == 0 || depth == 0 || depth > 16)
+                return false;
+            /* the depths each colour type may have (PNG 11.2.2): a gray image of 4 bits is fine, an RGBA one of 4 bits is not,
+               and stb trusts it (an assert in Debug, a decode of the wrong size otherwise) */
+            if ((ctype == 0 && depth != 1 && depth != 2 && depth != 4 && depth != 8 && depth != 16) ||
+                (ctype == 3 && depth > 8) || ((ctype == 2 || ctype == 4 || ctype == 6) && depth != 8 && depth != 16))
+                return false;
+            uint64_t bpl = ((uint64_t)w * depth + 7) / 8;
+            *cap = (size_t)(2 * (bpl * h * comps[ctype] + h) + 262144);
+            raw_least = (uint64_t)w * h * depth * comps[ctype] / 8; /* the least the inflated data can be (Adam7 adds filter bytes) */
+            header = true;
+        }
+        if (memcmp(d + pos + 4, "IDAT", 4) == 0)
+        {
+            /* stb reads an IDAT into a buffer it has not allocated yet when the first one is empty (a null pointer plus
+               zero: undefined in C). An empty first IDAT is legal and absurd; not decoded. */
+            if (!data && len == 0)
+                return false;
+            data = true;
+            idat_total += len;
+        }
+        if (memcmp(d + pos + 4, "IEND", 4) == 0)
+            break;
+        pos += 12 + (size_t)len;
+    }
+    /* Deflate cannot expand more than 1032 to 1, so an image whose compressed data is that much smaller than the pixels
+       it declares is not one: stb would feed its zlib reader zeros past the end of the input until the buffer the header
+       allows is full (a 68-byte file declaring 12799 x 2305 took 20 s under ASan to fill it). */
+    if (header && idat_total * 1032 + 4096 < raw_least)
+        return false;
+    return header;
+}
+
 bool png_decode(const void *data, size_t size, Framebuffer *out)
 {
     if (!data || !out || size == 0 || size > 0x7FFFFFFFu)
         return false;
+    size_t cap = 0;
+    if (!png_plausible((const uint8_t *)data, size, &cap))
+        return false;
+    g_png_cap = cap;
     int w, h, comp;
     unsigned char *rgba = stbi_load_from_memory((const unsigned char *)data, (int)size, &w, &h, &comp, 4);
+    g_png_cap = 0;
     if (!rgba)
         return false;
     if (!framebuffer_alloc(out, w, h))

@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>clipboard_web</title>
+<style>html, body { margin: 0; height: 100%; } canvas { width: 100%; height: 100%; display: block; }</style>
+</head>
+<body>
+<canvas id="canvas" data-fill-window></canvas>
+<script>
+var Module = {
+  canvas: document.getElementById('canvas'),
+  print: function(t) { (window.zpPrint = window.zpPrint || []).push(String(t)); },
+  printErr: function(t) { (window.zpPrintErr = window.zpPrintErr || []).push(String(t)); }
+};
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
