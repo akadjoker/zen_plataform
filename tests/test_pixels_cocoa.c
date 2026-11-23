@@ -120,8 +120,9 @@ static void test_content(PlatformWindow *w)
         return;
     }
     image_free(&probe);
-    bool by_server = shows(w, &fb, true, 2, &worst);
-    printf("  the window as the window server shows it: %ld pixels differ from the buffer (tolerance 2)\n", worst);
+    int tol = server_tolerance();
+    bool by_server = shows(w, &fb, true, tol, &worst);
+    printf("  the window as the window server shows it: %ld pixels differ from the buffer (tolerance %d)\n", worst, tol);
     CHECK(by_server);
 
     /* the colour of each quadrant, in the words of the channels: no red and blue swapped, no flip */
@@ -131,8 +132,8 @@ static void test_content(PlatformWindow *w)
         uint32_t tl = got.px[(size_t)(got.h / 4) * got.w + got.w / 4], tr = got.px[(size_t)(got.h / 4) * got.w + 3 * got.w / 4];
         uint32_t bl = got.px[(size_t)(3 * got.h / 4) * got.w + got.w / 4], br = got.px[(size_t)(3 * got.h / 4) * got.w + 3 * got.w / 4];
         printf("  quadrants as the window server shows them: %08X %08X %08X %08X (red, green, blue, yellow expected)\n", tl, tr, bl, br);
-        CHECK(color_distance(tl, 0xFFFF0000u) <= 2 && color_distance(tr, 0xFF00FF00u) <= 2);
-        CHECK(color_distance(bl, 0xFF0000FFu) <= 2 && color_distance(br, 0xFFFFFF00u) <= 2);
+        CHECK(color_distance(tl, 0xFFFF0000u) <= tol && color_distance(tr, 0xFF00FF00u) <= tol);
+        CHECK(color_distance(bl, 0xFF0000FFu) <= tol && color_distance(br, 0xFFFFFF00u) <= tol);
         image_free(&got);
     }
 }
@@ -200,7 +201,7 @@ static void test_resize(PlatformWindow *w)
         if (capture_window(w, &probe))
         {
             image_free(&probe);
-            CHECK(shows(w, &fb, true, 2, &worst));
+            CHECK(shows(w, &fb, true, server_tolerance(), &worst));
         }
     }
 }

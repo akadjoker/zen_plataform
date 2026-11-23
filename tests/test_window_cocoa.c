@@ -419,7 +419,9 @@ static void send_gesture(PlatformWindow *w, const char *selector, unsigned long 
     g_rotation = rotation;
     g_dx = dx;
     g_dy = dy;
-    to_view(w, selector, make_gesture_event());
+    id event = make_gesture_event();
+    to_view(w, selector, event);
+    msg_void(event, "release"); /* the leaks tool counted every one of them */
     pump_frame(w);
 }
 

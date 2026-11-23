@@ -545,6 +545,31 @@ UNUSED_FN long image_diff_corners(const Image *a, const Image *b, int tolerance,
 
 #define WINDOW_CORNER 48 /* pixels: the radius of the rounded corner of a window, and some margin */
 
+/* How far a channel of the window server's picture may be from what was drawn. The window is sRGB and the picture is brought back
+   to sRGB, but in between it is in the display's colour space at 8 bits a channel: on an sRGB display that is the same numbers
+   (within 2), on a wide gamut one the round trip moves a saturated colour (measured on a MacBook Pro's P3 panel over 1.4 million
+   pixels of every hue: 0 or 1 for 93% of them, 9 at the worst: FF04EBFF came back FF0DEAFF; pure green comes back FF03FF00). A swap
+   of channels, a flip or a wrong colour space are tens or hundreds away, so 10 still tells them. */
+UNUSED_FN int server_tolerance(void)
+{
+    static int tolerance;
+    if (!tolerance)
+    {
+        tolerance = 10;
+        CGColorSpaceRef space = CGDisplayCopyColorSpace(CGMainDisplayID());
+        if (space)
+        {
+            CFStringRef name = CGColorSpaceCopyName(space);
+            if (name && CFEqual(name, kCGColorSpaceSRGB))
+                tolerance = 2;
+            if (name)
+                CFRelease(name);
+            CGColorSpaceRelease(space);
+        }
+    }
+    return tolerance;
+}
+
 /* ========================================================================== */
 /*  the heap                                                                  */
 /* ========================================================================== */

@@ -883,7 +883,9 @@ static void test_create_destroy_many(PlatformWindow *w)
        calls grew 340 KB and 3000 blocks a round. What stays after the pools is a few hundred bytes a round (AppKit's own tables,
        the numbers above), so the limit is a thousand of the 300 rounds' worth of that. */
     CHECK(grown < 1024 * 1024);
-    CHECK((long)b1 - (long)b0 < 6000);
+    /* The count of blocks is printed and not checked: on macOS 15 (M3) blocks_in_use grew some 60 a round here while the bytes in
+       use went down, the leaks tool found none, and the system's heap tool, asked after 130 and after 630 rounds, counted fewer
+       nodes after the longer run (29856 and 27138) with no class of ours growing. The bytes are what a leak cannot hide from. */
 #endif
 }
 

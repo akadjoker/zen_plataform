@@ -186,6 +186,7 @@ int main(void)
         CHECK(drop(w, info));
         CHECK(seen_count(EVENT_WINDOW_DROP) == 1);
     }
+    msg_void(info, "release");
     window_destroy(w);
     platform_shutdown();
     printf("%d passed, %d failed\n", g_pass, g_fail);
